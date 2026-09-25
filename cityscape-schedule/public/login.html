@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Cityscape Schedule</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/styles.css">
+<meta name="robots" content="noindex">
+</head>
+<body>
+<div class="login">
+  <form method="post" action="/login">
+    <svg width="40" height="40" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#1f4e5f"/><path d="M7 24V14h5v10M13.5 24V8h5v16M20 24V12h5v12" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M5 24.5h22" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+    <h1>Cityscape Schedule</h1>
+    <p>Check-ins, check-outs and linen for the week.</p>
+    <label for="pw">Team password</label>
+    <input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+</div>
+<script>
+  const e = new URLSearchParams(location.search).get('e');
+  if (e === '1') document.getElementById('err').textContent = 'That password isn’t right.';
+  if (e === 'locked') document.getElementById('err').textContent = 'Too many attempts — try again in 10 minutes.';
+</script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cityscape Schedule</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#1f4e5f">
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1f4e5f"/><path d="M7 24V14h5v10M13.5 24V8h5v16M20 24V12h5v12" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M5 24.5h22" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+      <span class="name">Cityscape Schedule</span>
+    </div>
+    <span class="live" id="live" title="Connecting…"><i></i><span class="lbl">Connecting</span></span>
+    <nav class="seg" role="tablist" aria-label="View">
+      <button role="tab" data-view="day" aria-selected="true">Day</button>
+      <button role="tab" data-view="board" aria-selected="false">Board</button>
+      <button role="tab" data-view="props" aria-selected="false">Properties</button>
+    </nav>
+    <a class="btn sq" href="/logout" title="Sign out" aria-label="Sign out">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+    </a>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="week-area">
+    <div class="weekbar">
+      <button class="btn sq no-print" id="prev" aria-label="Previous week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <h1 id="week-title">Loading…</h1>
+      <button class="btn sq no-print" id="next" aria-label="Next week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button>
+      <span class="when" id="when"></span>
+      <span id="newpill"></span>
+      <span class="spacer"></span>
+      <button class="btn no-print" id="this">This week</button>
+      <button class="btn act no-print" id="refresh" title="Pull the latest from Guesty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/></svg><span class="btn-label">Refresh</span></button>
+      <button class="btn act no-print" id="copy" title="Copy as text for WhatsApp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><span class="btn-label" id="copy-label">Copy day</span></button>
+      <button class="btn act no-print" id="print" title="Print or save as PDF"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg><span class="btn-label">Print</span></button>
+    </div>
+
+    <div id="banners"></div>
+
+    <div class="summary" id="summary">
+      <div class="metric"><div class="k"><i style="background:var(--out)"></i>Cleans</div><div class="v" id="m-out">–</div></div>
+      <div class="metric"><div class="k"><i style="background:var(--in)"></i>Arrivals</div><div class="v" id="m-in">–</div></div>
+      <div class="metric"><div class="k"><i style="background:var(--turn)"></i>Same-day</div><div class="v" id="m-turn">–</div></div>
+      <div class="metric linen"><div class="k">Linen sets for the week <span class="muted" style="font-weight:500">· 1 per check-out</span></div><div class="linen-row" id="m-linen"></div></div>
+    </div>
+
+    <!-- DAY VIEW -->
+    <div id="view-day">
+      <div class="strip" id="strip" role="tablist" aria-label="Day"></div>
+      <div class="card" id="daypanel"><div class="loading">Loading from Guesty…</div></div>
+    </div>
+
+    <!-- BOARD VIEW -->
+    <div id="view-board" class="hidden">
+      <div class="card">
+        <div class="board-wrap"><table class="board" id="board"></table></div>
+        <div class="legend no-print">
+          <span><i class="sw"></i>Guest staying</span>
+          <span><b style="color:var(--out)">10 am</b> check-out</span>
+          <span><b style="color:var(--in)">3 pm</b> check-in</span>
+          <span><b class="mark turn" style="position:static;transform:none">10→3</b> same-day turnover</span>
+          <span><i class="sw n"></i>Booked in the last 24 h</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROPERTIES VIEW -->
+  <section id="view-props" class="hidden">
+    <div class="weekbar"><h1>Properties</h1><span class="when" id="props-sub"></span></div>
+    <div class="pgrid" id="props"></div>
+  </section>
+
+  <div class="foot" id="foot"></div>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

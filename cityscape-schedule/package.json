@@ -1,0 +1,12 @@
+{
+  "name": "cityscape-schedule",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Weekly check-ins, check-outs and linen totals for Cityscape, pulled live from Guesty.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "MOCK=1 APP_PASSWORD=test node server.js"
+  },
+  "engines": { "node": ">=18" }
+}
