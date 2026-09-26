@@ -1,0 +1,14 @@
+// Cloudflare Worker settings for Cityscape Schedule.
+// Secrets (GUESTY_CLIENT_ID, GUESTY_CLIENT_SECRET, APP_PASSWORD) are added in the Cloudflare dashboard, never here.
+{
+  "name": "cityscape-schedule",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "kv_namespaces": [
+    { "binding": "STORE", "id": "9767eb0cd00a4061b645e053479762bb" }
+  ],
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "observability": { "enabled": true },
+  "keep_vars": true,
+  "workers_dev": true
+}
