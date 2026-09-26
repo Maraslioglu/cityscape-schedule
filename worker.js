@@ -335,7 +335,13 @@ function shapeWeek(data, u) {
 // ---------------------------------------------------------------- Guesty client
 // Guesty allows only 5 access tokens per 24 h, so the token is kept in KV and shared by every instance.
 let memToken = null;
-async function getToken(env) {
+let tokenPromise = null; // one token request at a time, even when several Guesty calls start together
+function getToken(env) {
+  if (memToken && memToken.expires_at > Date.now() + 5 * 60e3) return Promise.resolve(memToken.access_token);
+  if (!tokenPromise) tokenPromise = fetchToken(env).finally(() => { tokenPromise = null; });
+  return tokenPromise;
+}
+async function fetchToken(env) {
   if (memToken && memToken.expires_at > Date.now() + 5 * 60e3) return memToken.access_token;
   const stored = await env.STORE.get('guesty_token', 'json');
   if (stored && stored.client_id === env.GUESTY_CLIENT_ID && stored.expires_at > Date.now() + 5 * 60e3) { memToken = stored; return stored.access_token; }
