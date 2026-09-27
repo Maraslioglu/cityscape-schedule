@@ -589,7 +589,7 @@ const CHECKLIST = [
   { key: 'microwave', title: 'Microwave', text: 'Have you checked the microwave is empty and clean?' },
   { key: 'hairs', title: 'Shower & toilet', text: 'Have you checked there are no hairs in the shower or around the toilet?' },
 ];
-const HOLD_MS = 2000;
+const HOLD_MS = 3000; // hold time for the final "all checks done" button
 const nowIso = () => new Date().toISOString();
 const londonDate = (iso) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(iso ? new Date(iso) : new Date());
 const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
@@ -696,15 +696,27 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     return json({ cleaning: rec });
   }
   if (req.method === 'POST' && action === 'confirm') {
-    // One checklist item, confirmed by holding the button. The client reports how long it was held.
+    // One checklist item, confirmed with a single tap, in order.
     if (!isMine) return deny();
     if (rec.status !== 'checklist') return json({ error: 'This checklist is already done.' }, 400);
     const body = await req.json().catch(() => ({}));
     const next = CHECKLIST[rec.checklist.length];
-    if (!next || body.key !== next.key) return json({ error: 'Please go through the checks in order.', cleaning: rec }, 400);
+    if (!next) return json({ cleaning: rec });
+    if (body.key !== next.key) return json({ error: 'Please go through the checks in order.', cleaning: rec }, 400);
+    rec.checklist.push({ key: next.key, confirmedAt: nowIso() });
+    await saveList(env, 'cleanings', list);
+    return json({ cleaning: rec });
+  }
+  if (req.method === 'POST' && action === 'checks-done') {
+    // After all items are ticked, the summary is confirmed by holding the button for HOLD_MS.
+    if (!isMine) return deny();
+    if (rec.status !== 'checklist') return json({ cleaning: rec });
+    const body = await req.json().catch(() => ({}));
+    if (rec.checklist.length < CHECKLIST.length) return json({ error: 'Please answer every check first.', cleaning: rec }, 400);
     if (!(Number(body.heldMs) >= HOLD_MS - 50)) return json({ error: 'Hold the button until the bar fills.' }, 400);
-    rec.checklist.push({ key: next.key, confirmedAt: nowIso(), heldMs: Math.round(Number(body.heldMs)) });
-    if (rec.checklist.length === CHECKLIST.length) rec.status = 'awaiting_video';
+    rec.checksConfirmedAt = nowIso();
+    rec.checksHeldMs = Math.round(Number(body.heldMs));
+    rec.status = 'awaiting_video';
     await saveList(env, 'cleanings', list);
     return json({ cleaning: rec });
   }
