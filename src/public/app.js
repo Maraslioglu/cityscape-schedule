@@ -237,11 +237,33 @@
       $('props-sub').textContent = `${p.total} flats · ${counts}`;
       $('props').innerHTML = p.buildings.map((b) => `<div class="card pcard">
         <h3>${esc(b.name)}</h3><div class="pc">${esc(b.postcode)}</div>
-        ${b.units.map((u) => `<div class="prow" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span></div>`).join('')}
+        ${b.units.map((u) => `<div class="prow" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span></div>${u.keyMode === 'lockbox' ? `<div class="pnote"><span class="kbadge">Lockbox</span><span>${u.lockbox ? `Code <b>${esc(u.lockbox.code)}</b> · set by ${esc(u.lockbox.by)}, ${esc(fmtWhen(u.lockbox.at))}` : 'No code recorded yet'}</span></div>` : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key handed in at KeyNest after each clean</span></div>' : ''}`).join('')}
       </div>`).join('');
+      if (can('manage_users')) loadKeynestPanel();
     } catch (e) {
       if (e.message !== 'signed out') $('props').innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
     }
+  }
+
+  function fmtWhen(iso) { return new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
+  // Admins: link flats tagged KEYNEST in Guesty to their KeyNest key.
+  async function loadKeynestPanel() {
+    let box = $('kn-panel');
+    if (!box) { box = document.createElement('div'); box.id = 'kn-panel'; box.className = 'card kn-panel'; $('props').before(box); }
+    try {
+      const k = await getJSON('/api/keynest');
+      if (!k.flats.length && k.connected) { box.remove(); return; }
+      const opts = (sel) => `<option value="">Not linked</option>${k.keys.map((x) => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name || x.id)}${x.status ? ' · ' + esc(x.status) : ''}</option>`).join('')}`;
+      box.innerHTML = `<h3>KeyNest</h3>
+        ${!k.connected ? '<p class="banner">Not connected yet. Add <b>KEYNEST_API_KEY</b> in Railway (Variables) and the app will connect automatically. Until then, KeyNest flats can’t be completed.</p>' : k.error ? `<p class="banner error">${esc(k.error)}</p>` : '<p class="muted">Connected ✓ Link each KeyNest flat to its key. Cleaners can only complete once KeyNest shows the key handed in.</p>'}
+        ${k.flats.length ? k.flats.map((f) => `<div class="kn-row"><span class="u">${esc(f.label)} <span class="muted">· ${esc(f.building)}</span></span>
+          ${k.connected && !k.error ? `<select data-kn="${esc(f.id)}">${opts(f.keyId)}</select>${f.how === 'auto' ? '<span class="muted">matched by name</span>' : ''}` : `<span class="muted">${f.keyId ? 'Linked' : 'Not linked'}</span>`}</div>`).join('') : '<p class="muted">No flats have the KEYNEST tag in Guesty.</p>'}
+        ${k.webhookUrl ? `<details class="muted"><summary>Instant updates (optional)</summary>Ask KeyNest to send webhooks to: <code>${esc(k.webhookUrl)}</code></details>` : ''}`;
+      box.querySelectorAll('select[data-kn]').forEach((s) => { s.onchange = async () => {
+        try { await send('PUT', '/api/keynest/link', { listingId: s.dataset.kn, keyId: s.value || null }); toast(s.value ? 'Key linked ✓' : 'Link removed'); }
+        catch (e) { toast(e.message); }
+      }; });
+    } catch (e) { if (e.message !== 'signed out') box.innerHTML = `<p class="banner error">${esc(e.message)}</p>`; }
   }
 
   // ---------- text for WhatsApp ----------
@@ -504,7 +526,7 @@
   let cleanings = [];           // cleanings visible to me (selected day + my active one)
   let checklistDef = [];
   let holdMs = 3000;
-  const ACTIVE = ['in_progress', 'checklist', 'awaiting_video'];
+  const ACTIVE = ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key'];
   const fmtClock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
   const fmtDur = (ms) => {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -554,7 +576,7 @@
     const a = myActive();
     const bar = $('active-bar');
     if (!a) { bar.classList.add('hidden'); return; }
-    const step = a.status === 'in_progress' ? `<b data-since="${esc(a.startedAt)}">${fmtDur(Date.now() - Date.parse(a.startedAt))}</b>` : a.status === 'checklist' ? 'Checklist to finish' : 'Video needed';
+    const step = a.status === 'in_progress' ? `<b data-since="${esc(a.startedAt)}">${fmtDur(Date.now() - Date.parse(a.startedAt))}</b>` : a.status === 'checklist' ? 'Checklist to finish' : a.status === 'awaiting_key' ? 'Key to return' : 'Video needed';
     bar.innerHTML = `<div class="wrap"><span class="ab-dot"></span><span>Cleaning <b>${esc(a.label)}</b> · ${step}</span><button class="btn primary" id="ab-open">Open</button></div>`;
     bar.classList.remove('hidden');
     $('ab-open').onclick = () => openSheet(a.listingId);
@@ -617,10 +639,12 @@
         <p>Go through the final checks to finish.</p><button class="btn big primary" id="open-checklist">Continue checklist</button></div>`;
     } else if (active && mine && active.status === 'awaiting_video') {
       body = evidenceStep(active);
+    } else if (active && mine && active.status === 'awaiting_key') {
+      body = keyStep(active);
     } else if (active) {
       body = `<div class="timer-card other"><div class="tc-label">${esc(active.cleanerName)} started at ${fmtClock(active.startedAt)}</div>
         <div class="tc-time" ${active.endedAt ? '' : `data-since="${esc(active.startedAt)}"`}>${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</div>
-        <div class="tc-step">${active.status === 'in_progress' ? 'Cleaning now' : active.status === 'checklist' ? 'Doing final checks' : 'Uploading video'}</div>
+        <div class="tc-step">${active.status === 'in_progress' ? 'Cleaning now' : active.status === 'checklist' ? 'Doing final checks' : active.status === 'awaiting_key' ? 'Returning the key' : 'Uploading video'}</div>
         ${can('manage_users') ? '<button class="linkbtn" id="cancel-clean">Cancel this cleaning</button>' : ''}</div>`;
     } else if (can('do_cleaning')) {
       body = `<button class="btn big primary" id="begin-clean"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 5v14l11-7z"/></svg>Begin cleaning</button>`;
@@ -628,7 +652,7 @@
 
     const history = done.map((c) => `<div class="hist">
         <div class="hist-h"><b>✓ Cleaned by ${esc(c.cleanerName)}</b><span>${fmtClock(c.startedAt)}–${fmtClock(c.endedAt)} · ${durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt))}</span></div>
-        <div class="hist-s">Checklist confirmed ${c.checklist.length}/${checklistDef.length || 5}${c.guesty === 'updated' ? ' · marked clean in Guesty' : c.guesty === 'failed' ? ' · <span class="warn">Guesty not updated</span>' : ''}</div>
+        <div class="hist-s">Checklist confirmed ${c.checklist.length}/${checklistDef.length || 5}${keyNote(c)}${c.guesty === 'updated' ? ' · marked clean in Guesty' : c.guesty === 'failed' ? ' · <span class="warn">Guesty not updated</span>' : ''}</div>
         ${(can('view_cleaning') || c.cleanerId === me.id) ? mediaTiles(c.media) : ''}
       </div>`).join('');
 
@@ -655,6 +679,7 @@
     on('open-checklist', openChecklist);
     on('report-damage', () => { sheetMode = 'damage'; renderSheet(); });
     if (active && mine && active.status === 'awaiting_video') wireEvidence(active);
+    if (active && mine && active.status === 'awaiting_key') wireKey(active);
     loadSheetDamages(sheetListing);
   }
 
@@ -760,6 +785,77 @@
   // ---------------- video (required) + photos (optional) ----------------
   const uploads = new Map(); // key -> {file, kind, progress, id, done, error}
   const uploadsBusy = () => [...uploads.values()].some((u) => !u.done && !u.error);
+  // ---------------- returning the key (Guesty tag LOCKBOX or KEYNEST) ----------------
+  function keyNote(c) {
+    if (!c.key) return '';
+    if (c.key.mode === 'lockbox') return can('view_cleaning') ? ` · key in lockbox, new code <b>${esc(c.key.code)}</b>` : ' · key returned to lockbox';
+    return ' · key handed in at KeyNest';
+  }
+  let keyPoll = null;
+  function keyStep(a) {
+    if (a.keyMode === 'lockbox') {
+      return `<div class="evidence keystep">
+        <div class="ev-head"><b>Last step: the key.</b> <span class="req">Required</span></div>
+        <ol class="ks-steps"><li>Put the key back in the lockbox.</li><li>Set a <b>new 4-digit code</b> on the lockbox and close it.</li><li>Enter the new code below.</li></ol>
+        <label class="ks-l" for="ks-code">New lockbox code</label>
+        <input class="ks-code" id="ks-code" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="••••">
+        <label class="ks-l" for="ks-code2">Enter it again</label>
+        <input class="ks-code" id="ks-code2" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="••••">
+        <label class="ks-check"><input type="checkbox" id="ks-back"> The key is in the lockbox and the new code is set</label>
+        <p class="ks-msg" id="ks-msg"></p>
+        <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
+      </div>`;
+    }
+    return `<div class="evidence keystep">
+      <div class="ev-head"><b>Last step: hand the key in at KeyNest.</b> <span class="req">Required</span></div>
+      <p class="ev-note">Drop the key off at the KeyNest store. As soon as KeyNest records it, you can complete the cleaning.</p>
+      <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span id="kn-text">Checking KeyNest…</span></div>
+      <button class="btn wide" id="kn-check">Check again</button>
+      <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
+    </div>`;
+  }
+  function wireKey(a) {
+    clearInterval(keyPoll); keyPoll = null;
+    const done = $('ks-done');
+    const finish = async (payload) => {
+      done.disabled = true;
+      try {
+        await send('POST', `/api/cleanings/${a.id}/key`, payload);
+        clearInterval(keyPoll); keyPoll = null;
+        if (navigator.vibrate) navigator.vibrate(40);
+        toast('Cleaning complete ✓');
+        await refreshCleanings();
+      } catch (e) { toast(e.message); done.disabled = false; if (a.keyMode === 'keynest') check(); }
+    };
+    if (a.keyMode === 'lockbox') {
+      const c1 = $('ks-code'), c2 = $('ks-code2'), back = $('ks-back'), msg = $('ks-msg');
+      const update = () => {
+        for (const el of [c1, c2]) el.value = el.value.replace(/\D/g, '').slice(0, 4);
+        const ok4 = /^\d{4}$/.test(c1.value), same = c1.value === c2.value;
+        msg.textContent = c2.value.length === 4 && !same ? 'The two codes don’t match.' : '';
+        done.disabled = !(ok4 && same && back.checked);
+      };
+      c1.oninput = () => { update(); if (c1.value.length === 4) c2.focus(); };
+      c2.oninput = update; back.onchange = update;
+      done.onclick = () => finish({ code: c1.value, confirmCode: c2.value, keyReturned: back.checked });
+      return;
+    }
+    const box = $('kn-status'), text = $('kn-text');
+    const check = async () => {
+      if (!$('kn-status')) { clearInterval(keyPoll); keyPoll = null; return; }
+      try {
+        const r = await getJSON(`/api/cleanings/${a.id}/key-status`);
+        box.className = 'kn-status ' + (r.ok ? 'ok' : r.error ? 'err' : 'wait');
+        text.textContent = r.error ? r.error : r.ok ? `Key handed in ✓ (${r.status})` : `Waiting for drop-off · KeyNest shows: ${r.status}`;
+        done.disabled = !r.ok;
+      } catch (e) { box.className = 'kn-status err'; text.textContent = e.message; done.disabled = true; }
+    };
+    $('kn-check').onclick = check;
+    done.onclick = () => finish({});
+    check();
+    keyPoll = setInterval(check, 20000);
+  }
+
   function evidenceStep(a) {
     return `<div class="evidence">
       <div class="ev-head"><b>Almost done.</b> Record a video walking through the flat. <span class="req">Video required</span></div>
@@ -789,10 +885,10 @@
     $('ev-finish').onclick = async () => {
       const mineUp = [...uploads.values()].filter((u) => u.ownerId === a.id && u.done);
       try {
-        await send('POST', `/api/cleanings/${a.id}/complete`, { videoIds: mineUp.filter((u) => u.kind === 'video').map((u) => u.id), photoIds: mineUp.filter((u) => u.kind === 'photo').map((u) => u.id) });
+        const r = await send('POST', `/api/cleanings/${a.id}/complete`, { videoIds: mineUp.filter((u) => u.kind === 'video').map((u) => u.id), photoIds: mineUp.filter((u) => u.kind === 'photo').map((u) => u.id) });
         for (const [k, u] of uploads) if (u.ownerId === a.id) uploads.delete(k);
         releaseWake();
-        toast('Cleaning complete ✓');
+        toast(r.cleaning && r.cleaning.status === 'awaiting_key' ? 'Video saved ✓ Now return the key' : 'Cleaning complete ✓');
         await refreshCleanings();
       } catch (e) { toast(e.message); }
     };
@@ -810,7 +906,8 @@
     const busy = mine.some(([, u]) => !u.done && !u.error);
     const btn = $('ev-finish');
     btn.disabled = !hasVideo || busy;
-    btn.textContent = busy ? 'Uploading…' : hasVideo ? 'Finish cleaning' : 'Finish cleaning (video needed)';
+    const next = a.keyMode ? 'Next: return the key' : 'Finish cleaning';
+    btn.textContent = busy ? 'Uploading…' : hasVideo ? next : `${next} (video needed)`;
   }
 
   let wakeLock = null;
@@ -941,10 +1038,11 @@
         <div class="metric"><div class="k">Open damage</div><div class="v">${d.damages.filter((x) => x.status === 'open').length}</div></div>`;
       $('cv-list').innerHTML = cls.length ? cls.map((x) => `<div class="card cv-item">
           <div class="hist-h"><b>${esc(x.label)} <span class="muted">· ${esc(x.building)}</span></b>
-            <span class="${ACTIVE.includes(x.status) ? 'cb running' : 'cb done'}">${ACTIVE.includes(x.status) ? `<i></i>${x.status === 'in_progress' ? 'Cleaning' : x.status === 'checklist' ? 'Final checks' : 'Uploading video'}` : '✓ Completed'}</span></div>
+            <span class="${ACTIVE.includes(x.status) ? 'cb running' : 'cb done'}">${ACTIVE.includes(x.status) ? `<i></i>${x.status === 'in_progress' ? 'Cleaning' : x.status === 'checklist' ? 'Final checks' : x.status === 'awaiting_key' ? 'Returning key' : 'Uploading video'}` : '✓ Completed'}</span></div>
           <div class="cv-meta"><span>${esc(x.cleanerName)}</span><span>Start ${fmtClock(x.startedAt)}</span><span>End ${x.endedAt ? fmtClock(x.endedAt) : '—'}</span>
             <span>Time <b ${x.endedAt ? '' : `data-since="${esc(x.startedAt)}"`}>${fmtDur((x.endedAt ? Date.parse(x.endedAt) : Date.now()) - Date.parse(x.startedAt))}</b></span>
             ${x.status === 'completed' ? `<span>Checks ${x.checklist.length}/${c.checklist.length}</span>` : ''}
+            ${x.key && x.key.mode === 'lockbox' ? `<span>Lockbox code <b>${esc(x.key.code)}</b></span>` : x.key && x.key.mode === 'keynest' ? '<span>Key at KeyNest ✓</span>' : ''}
             ${x.guesty === 'updated' ? '<span>Guesty ✓</span>' : x.guesty === 'failed' ? '<span class="warn">Guesty not updated</span>' : ''}</div>
           ${mediaTiles(x.media)}
         </div>`).join('') : '<div class="card empty"><b>No cleanings recorded</b>Nothing was started on this day.</div>';
