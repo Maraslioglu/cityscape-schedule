@@ -503,7 +503,7 @@
   // =====================================================================
   let cleanings = [];           // cleanings visible to me (selected day + my active one)
   let checklistDef = [];
-  let holdMs = 2000;
+  let holdMs = 3000;
   const ACTIVE = ['in_progress', 'checklist', 'awaiting_video'];
   const fmtClock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
   const fmtDur = (ms) => {
@@ -668,7 +668,7 @@
     n.onclick = () => box.remove();
   }
 
-  // ---------------- hold-to-confirm checklist ----------------
+  // ---------------- checklist: tap each item, then hold to confirm the summary ----------------
   function openChecklist() {
     const a = myActive();
     if (!a || a.status !== 'checklist') return;
@@ -678,25 +678,52 @@
       const cur = myActive();
       const i = cur ? cur.checklist.length : checklistDef.length;
       if (!cur || cur.status !== 'checklist') { ov.classList.add('hidden'); renderSheet(); return; }
+      const later = `<button class="linkbtn" id="cl-later">Not done yet — go back and check</button>`;
+      const dots = checklistDef.map((_, k) => `<i class="${k < i ? 'done' : k === i ? 'cur' : ''}"></i>`).join('');
+      if (i >= checklistDef.length) {
+        // All items ticked: show the summary, confirmed by one press-and-hold.
+        const secs = Math.round(holdMs / 1000);
+        ov.innerHTML = `<div class="cl-card" role="dialog" aria-modal="true" aria-labelledby="cl-t">
+          <div class="cl-top"><span class="cl-count">All checks</span><div class="cl-dots">${dots}</div></div>
+          <h2 id="cl-t">Final checks</h2>
+          <ul class="cl-sum">${checklistDef.map((it) => `<li><span class="cl-tick" aria-hidden="true">✓</span><span>${esc(it.text)}</span></li>`).join('')}</ul>
+          <p class="cl-help">Hold the button for ${secs} seconds to confirm everything above is done.</p>
+          <button class="hold" id="hold-btn"><span class="hold-fill"></span><span class="hold-label">Hold: All checks done</span></button>
+          ${later}
+        </div>`;
+        $('cl-later').onclick = () => { ov.classList.add('hidden'); };
+        wireHold($('hold-btn'), async (held) => {
+          try {
+            const r = await send('POST', `/api/cleanings/${cur.id}/checks-done`, { heldMs: held });
+            const idx = cleanings.findIndex((c) => c.id === cur.id); cleanings[idx] = { ...cleanings[idx], ...r.cleaning };
+            if (navigator.vibrate) navigator.vibrate(40);
+            step();
+          } catch (e) { toast(e.message); step(); }
+        });
+        return;
+      }
       const item = checklistDef[i];
       ov.innerHTML = `<div class="cl-card" role="dialog" aria-modal="true" aria-labelledby="cl-t">
-        <div class="cl-top"><span class="cl-count">Check ${i + 1} of ${checklistDef.length}</span><div class="cl-dots">${checklistDef.map((_, k) => `<i class="${k < i ? 'done' : k === i ? 'cur' : ''}"></i>`).join('')}</div></div>
+        <div class="cl-top"><span class="cl-count">Check ${i + 1} of ${checklistDef.length}</span><div class="cl-dots">${dots}</div></div>
         <div class="cl-icon">${CL_ICONS[item.key] || ''}</div>
         <h2 id="cl-t">${esc(item.title)}</h2>
         <p class="cl-q">${esc(item.text)}</p>
-        <p class="cl-help">Read carefully, then press and hold the button until the bar fills.</p>
-        <button class="hold" id="hold-btn"><span class="hold-fill"></span><span class="hold-label">Hold: Yes, I have checked</span></button>
-        <button class="linkbtn" id="cl-later">Not done yet — go back and check</button>
+        <p class="cl-help">Read carefully, then tap the button.</p>
+        <button class="tapbtn" id="tap-btn">Yes, I have checked</button>
+        ${later}
       </div>`;
       $('cl-later').onclick = () => { ov.classList.add('hidden'); };
-      wireHold($('hold-btn'), async (held) => {
+      const tap = $('tap-btn');
+      tap.onclick = async () => {
+        if (tap.disabled) return;
+        tap.disabled = true;
         try {
-          const r = await send('POST', `/api/cleanings/${cur.id}/confirm`, { key: item.key, heldMs: held });
+          const r = await send('POST', `/api/cleanings/${cur.id}/confirm`, { key: item.key });
           const idx = cleanings.findIndex((c) => c.id === cur.id); cleanings[idx] = { ...cleanings[idx], ...r.cleaning };
-          if (navigator.vibrate) navigator.vibrate(30);
+          if (navigator.vibrate) navigator.vibrate(20);
           step();
         } catch (e) { toast(e.message); step(); }
-      });
+      };
     };
     step();
   }

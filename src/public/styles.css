@@ -417,6 +417,12 @@ body:has(.active-bar:not(.hidden)) main { padding-bottom: 80px; }
 .cl-card h2 { font-size: 26px; margin: 0 0 10px; }
 .cl-q { font-size: 18px; line-height: 1.45; color: var(--ink); margin: 0 0 8px; }
 .cl-help { font-size: 13.5px; color: var(--ink-3); margin: 0 0 26px; }
+.tapbtn { width: 100%; height: 64px; border-radius: 16px; border: 2px solid var(--in); background: var(--in-soft); color: var(--in); font-size: 17px; font-weight: 750; cursor: pointer; }
+.tapbtn:active { transform: scale(.985); }
+.tapbtn:disabled { opacity: .6; }
+.cl-sum { list-style: none; padding: 0; margin: 4px 0 18px; width: 100%; text-align: left; display: flex; flex-direction: column; gap: 10px; }
+.cl-sum li { display: flex; gap: 12px; align-items: flex-start; font-size: 16px; line-height: 1.4; padding: 12px 14px; border-radius: 12px; background: var(--in-soft); }
+.cl-tick { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--in); color: #fff; display: grid; place-items: center; font-size: 14px; font-weight: 800; }
 .hold { position: relative; width: 100%; height: 64px; border-radius: 16px; border: 2px solid var(--in); background: var(--in-soft); color: var(--in); font-size: 17px; font-weight: 750; overflow: hidden; cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; }
 .hold-fill { position: absolute; inset: 0; background: var(--in); opacity: .28; transform: scaleX(0); transform-origin: left; }
 .hold.ok .hold-fill { opacity: 1; }
@@ -488,7 +494,7 @@ button, .btn, .row.tap, .dbtn { touch-action: manipulation; }
   .sh-head .btn.sq { width: 44px; height: 44px; }
   .btn.big { min-height: 56px; }
   .ev-btns .btn { flex: 1 1 auto; justify-content: center; min-height: 46px; }
-  .hold { height: 72px; }
+  .hold, .tapbtn { height: 72px; }
   .cl-overlay { padding: calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom)); }
   .cl-card h2 { font-size: 24px; }
 
