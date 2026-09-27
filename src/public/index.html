@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Cityscape">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<title>Cityscape Schedule</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#1f4e5f">
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1f4e5f"/><path d="M7 24V14h5v10M13.5 24V8h5v16M20 24V12h5v12" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M5 24.5h22" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+      <span class="name">Cityscape Schedule</span>
+    </div>
+    <span class="live" id="live" title="Connecting…"><i></i><span class="lbl">Connecting</span></span>
+    <nav class="seg" role="tablist" aria-label="View">
+      <button role="tab" data-view="day" aria-selected="true"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg><span>Day</span></button>
+      <button role="tab" data-view="board" aria-selected="false"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg><span>Board</span></button>
+      <button role="tab" data-view="props" aria-selected="false"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg><span>Properties</span></button>
+      <button role="tab" data-view="cleaning" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span>Cleaning</span></button>
+      <button role="tab" data-view="users" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg><span>Users</span></button>
+    </nav>
+    <button class="btn me" id="me-btn" data-view="account" title="My account"><span class="avatar" id="me-avatar"></span><span class="btn-label" id="me-name"></span></button>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="week-area">
+    <div class="weekbar">
+      <button class="btn sq no-print" id="prev" aria-label="Previous week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <h1 id="week-title">Loading…</h1>
+      <button class="btn sq no-print" id="next" aria-label="Next week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button>
+      <span class="when" id="when"></span>
+      <span id="newpill"></span>
+      <span class="spacer"></span>
+      <button class="btn no-print" id="this">This week</button>
+      <button class="btn act no-print" id="refresh" title="Pull the latest from Guesty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/></svg><span class="btn-label">Refresh</span></button>
+      <button class="btn act no-print" id="copy" title="Copy as text for WhatsApp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><span class="btn-label" id="copy-label">Copy day</span></button>
+      <button class="btn act no-print" id="print" title="Print or save as PDF"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg><span class="btn-label">Print</span></button>
+    </div>
+
+    <div id="banners"></div>
+
+    <div class="summary" id="summary">
+      <div class="metric"><div class="k"><i style="background:var(--out)"></i>Cleans</div><div class="v" id="m-out">–</div></div>
+      <div class="metric"><div class="k"><i style="background:var(--in)"></i>Arrivals</div><div class="v" id="m-in">–</div></div>
+      <div class="metric"><div class="k"><i style="background:var(--turn)"></i>Same-day</div><div class="v" id="m-turn">–</div></div>
+      <div class="metric linen"><div class="k">Linen sets for the week <span class="muted" style="font-weight:500">· 1 per check-out</span></div><div class="linen-row" id="m-linen"></div></div>
+    </div>
+
+    <!-- DAY VIEW -->
+    <div id="view-day">
+      <div class="strip" id="strip" role="tablist" aria-label="Day"></div>
+      <div class="card" id="daypanel"><div class="loading">Loading from Guesty…</div></div>
+    </div>
+
+    <!-- BOARD VIEW -->
+    <div id="view-board" class="hidden">
+      <div class="card">
+        <div class="board-wrap"><table class="board" id="board"></table></div>
+        <div class="legend no-print">
+          <span><i class="sw"></i>Guest staying</span>
+          <span><b style="color:var(--out)">10 am</b> check-out</span>
+          <span><b style="color:var(--in)">3 pm</b> check-in</span>
+          <span><b class="mark turn" style="position:static;transform:none">10→3</b> same-day turnover</span>
+          <span><i class="sw n"></i>Booked in the last 24 h</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROPERTIES VIEW -->
+  <section id="view-props" class="hidden">
+    <div class="weekbar"><h1>Properties</h1><span class="when" id="props-sub"></span></div>
+    <div class="pgrid" id="props"></div>
+  </section>
+
+  <!-- CLEANING VIEW (admins, supervisors) -->
+  <section id="view-cleaning" class="hidden">
+    <div class="weekbar"><h1>Cleaning</h1>
+      <button class="btn sq" id="cv-prev" aria-label="Previous day"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <input type="date" id="cv-date" class="cv-date" aria-label="Day">
+      <button class="btn sq" id="cv-next" aria-label="Next day"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button>
+    </div>
+    <div class="summary cv-summary" id="cv-summary"></div>
+    <div class="cv-grid">
+      <div><h3 class="sh-h3">Cleanings</h3><div id="cv-list"></div></div>
+      <div><h3 class="sh-h3">Damage reports</h3><div id="cv-damages"></div></div>
+    </div>
+  </section>
+
+  <!-- USERS VIEW (admins) -->
+  <section id="view-users" class="hidden">
+    <div class="weekbar"><h1>Users</h1><span class="when" id="users-sub"></span><span class="spacer"></span>
+      <button class="btn primary" id="add-user"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Add user</button></div>
+    <div id="users-msg"></div>
+    <div class="users-layout">
+      <div class="card"><table class="utable"><thead><tr><th>Name</th><th>Role</th><th class="hide-sm">Buildings</th><th class="hide-sm">Last sign-in</th><th></th></tr></thead><tbody id="users-list"></tbody></table></div>
+      <form class="card uform hidden" id="user-form" autocomplete="off"></form>
+    </div>
+  </section>
+
+  <!-- MY ACCOUNT -->
+  <section id="view-account" class="hidden">
+    <div class="weekbar"><h1>My account</h1></div>
+    <div class="acct-grid">
+      <div class="card pad" id="acct-info"></div>
+      <form class="card pad" id="pw-form">
+        <h3>Change password</h3>
+        <label for="pw-cur">Current password</label><input id="pw-cur" type="password" autocomplete="current-password" required>
+        <label for="pw-new">New password</label><input id="pw-new" type="password" autocomplete="new-password" minlength="8" required>
+        <label for="pw-new2">New password again</label><input id="pw-new2" type="password" autocomplete="new-password" minlength="8" required>
+        <div class="form-msg" id="pw-msg"></div>
+        <button class="btn primary" type="submit">Change password</button>
+      </form>
+    </div>
+    <p style="margin-top:14px"><a class="btn" href="/logout"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>Sign out</a></p>
+  </section>
+
+  <div class="foot" id="foot"></div>
+</main>
+
+<div class="active-bar hidden" id="active-bar"></div>
+<div class="sheet hidden" id="sheet"><div class="sheet-card" id="sheet-body" role="dialog" aria-modal="true"></div></div>
+<div class="cl-overlay hidden" id="checklist"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

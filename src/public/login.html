@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Cityscape">
+<title>Sign in · Cityscape Schedule</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/styles.css">
+<meta name="robots" content="noindex">
+</head>
+<body>
+<div class="login">
+  <form method="post" action="/login">
+    <svg width="40" height="40" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#1f4e5f"/><path d="M7 24V14h5v10M13.5 24V8h5v16M20 24V12h5v12" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M5 24.5h22" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+    <h1>Cityscape Schedule</h1>
+    <p>Check-ins, check-outs and linen for the week.</p>
+    <label for="un">Username</label>
+    <input id="un" name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+    <label for="pw" style="margin-top:12px">Password</label>
+    <input id="pw" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+</div>
+<script>
+  const q = new URLSearchParams(location.search), e = q.get('e');
+  if (q.get('u')) { document.getElementById('un').value = q.get('u'); document.getElementById('pw').focus(); }
+  if (e === '1') document.getElementById('err').textContent = 'That username or password isn’t right.';
+  if (e === 'locked') document.getElementById('err').textContent = 'Too many attempts — try again in 10 minutes.';
+</script>
+</body>
+</html>

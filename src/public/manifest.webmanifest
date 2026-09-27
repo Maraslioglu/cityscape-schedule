@@ -1,0 +1,1 @@
+{ "name": "Cityscape Schedule", "short_name": "Schedule", "start_url": "/", "display": "standalone", "background_color": "#f5f4f0", "theme_color": "#1f4e5f", "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }] }
