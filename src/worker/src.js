@@ -7,7 +7,7 @@
 //   Cron trigger  */5 * * * *            – keeps bookings fresh in the background
 //   Optional vars PUBLIC_URL, WEEK_START_DAY, RESERVATION_STATUSES, DEFAULT_CHECKIN_TIME,
 //                 DEFAULT_CHECKOUT_TIME, UNIT_TYPE_OVERRIDES, BUILDING_OVERRIDES,
-//                 HIDDEN_LISTINGS, NEW_BOOKING_HOURS
+//                 HIDDEN_LISTINGS, NEW_BOOKING_HOURS, KEYNEST_API_KEY
 //
 // Without Guesty keys it runs on sample data so it can be previewed.
 
@@ -340,7 +340,7 @@ async function paginate(env, path, params) {
   }
   return out;
 }
-const LISTING_FIELDS = '_id nickname title bedrooms address.full address.street address.zipcode active defaultCheckInTime defaultCheckOutTime';
+const LISTING_FIELDS = '_id nickname title bedrooms address.full address.street address.zipcode active defaultCheckInTime defaultCheckOutTime tags';
 const STAY_FIELDS = '_id listingId status confirmationCode checkInDateLocalized checkOutDateLocalized plannedArrival plannedDeparture guestsCount nightsCount createdAt';
 
 async function fetchListings(env, cfg) {
@@ -364,7 +364,7 @@ async function fetchStays(env, cfg, from, to) {
 let memSnap = null; // { snap, readAt }
 
 function slimListing(l) {
-  return { _id: l._id, nickname: l.nickname, title: l.title, bedrooms: l.bedrooms, active: l.active, address: { full: l.address?.full, street: l.address?.street, zipcode: l.address?.zipcode }, defaultCheckInTime: l.defaultCheckInTime, defaultCheckOutTime: l.defaultCheckOutTime };
+  return { _id: l._id, nickname: l.nickname, title: l.title, bedrooms: l.bedrooms, active: l.active, address: { full: l.address?.full, street: l.address?.street, zipcode: l.address?.zipcode }, defaultCheckInTime: l.defaultCheckInTime, defaultCheckOutTime: l.defaultCheckOutTime, tags: Array.isArray(l.tags) ? l.tags : [] };
 }
 function slimStay(r) {
   return { _id: r._id, listingId: r.listingId, status: r.status, confirmationCode: r.confirmationCode, checkInDateLocalized: r.checkInDateLocalized, checkOutDateLocalized: r.checkOutDateLocalized, plannedArrival: r.plannedArrival, plannedDeparture: r.plannedDeparture, guestsCount: r.guestsCount, nightsCount: r.nightsCount, createdAt: r.createdAt };
@@ -421,13 +421,16 @@ function listingMap(raw, cfg, allow) {
     const ov = (m) => m[l._id] || (l.nickname && m[l.nickname]);
     const b = l.bedrooms;
     const unitType = ov(cfg.typeOverrides) || (b === 0 ? 'Studio' : typeof b === 'number' && b > 0 ? `${b} Bedroom` : 'Unknown');
+    // Guesty tags decide how the key is returned after a cleaning.
+    const tags = (Array.isArray(l.tags) ? l.tags : []).map((t) => String(t).trim().toUpperCase().replace(/[\s_-]+/g, ''));
+    const keyMode = tags.includes('KEYNEST') ? 'keynest' : tags.includes('LOCKBOX') ? 'lockbox' : null;
     const a = l.address || {};
     const pc = a.zipcode || ((a.full || '').match(/[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}/i) || [''])[0].toUpperCase();
     const n = l.nickname || l.title || 'Unit';
     map.set(l._id, {
       id: l._id, name: n, label: n.includes(',') ? n.split(',')[0].trim() : n,
       building: ov(cfg.buildingOverrides) || cleanStreet(a.street) || cleanStreet(a.full) || n,
-      postcode: pc, address: a.full || '', unitType,
+      postcode: pc, address: a.full || '', unitType, keyMode,
       checkInTime: l.defaultCheckInTime || cfg.defaultIn, checkOutTime: l.defaultCheckOutTime || cfg.defaultOut,
     });
     if (allow && !allow(map.get(l._id).building)) map.delete(l._id);
@@ -538,10 +541,11 @@ async function propertiesData(env, ctx, user) {
   const cfg = config(env);
   const snap = await getSnapshot(env, ctx);
   const listings = listingMap(snap.listings, cfg, allowBuildingFor(user));
+  const codes = can(user, 'view_cleaning') ? ((await env.STORE.get('lockboxCodes', 'json')) || {}) : {};
   const groups = new Map();
   for (const l of listings.values()) {
     if (!groups.has(l.building)) groups.set(l.building, { name: l.building, postcode: l.postcode, units: [] });
-    groups.get(l.building).units.push({ id: l.id, name: l.name, label: l.label, address: l.address, unitType: l.unitType, checkIn: fmtTime(l.checkInTime), checkOut: fmtTime(l.checkOutTime) });
+    groups.get(l.building).units.push({ id: l.id, name: l.name, label: l.label, address: l.address, unitType: l.unitType, checkIn: fmtTime(l.checkInTime), checkOut: fmtTime(l.checkOutTime), keyMode: l.keyMode, lockbox: codes[l.id] || null });
   }
   const buildings = [...groups.values()].sort((a, b) => byBuilding(a.name, b.name));
   for (const b of buildings) b.units.sort((x, y) => natural(x.label, y.label));
@@ -640,6 +644,81 @@ async function markCleanInGuesty(env, listingId) {
   }
 }
 
+// ---------------------------------------------------------------- KeyNest
+// Flats tagged KEYNEST in Guesty can only be completed once KeyNest reports the key back in a store.
+// Needs KEYNEST_API_KEY in Railway. Each flat is linked to a KeyNest key on the Properties page
+// (or matched automatically when the KeyNest key name equals the flat's Guesty nickname).
+const KEYNEST_DEFAULT = 'https://api.keynest.com/api/v3';
+const KEYNEST_IN = /^(in store|in locker|in office)/i;
+let knCache = null; // { at, keys }
+async function keynestGet(env, path) {
+  if (!env.KEYNEST_API_KEY) throw userError('KeyNest isn’t connected yet. An admin needs to add KEYNEST_API_KEY in Railway.', 400);
+  const r = await fetch((env.KEYNEST_API_URL || KEYNEST_DEFAULT) + path, { headers: { ApiKey: env.KEYNEST_API_KEY, Accept: 'application/json' } });
+  const text = await r.text();
+  let j = null; try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
+  if (!r.ok || !j || (j.Status && j.Status !== 'Success')) {
+    console.log('[keynest]', path.split('/')[1], r.status, (j && j.ResponseMessage) || text.slice(0, 200));
+    throw userError(r.status === 401 || r.status === 403 ? 'KeyNest didn’t accept the API key. Check KEYNEST_API_KEY in Railway.' : `KeyNest didn’t answer properly (error ${r.status}). Try again in a minute.`, 502);
+  }
+  return j;
+}
+const knKey = (k) => ({ id: k.KeyId, name: k.KeyName || '', status: k.StatusType || k.CurrentStatus || '', lastMovement: k.LastMovement || null, postcode: k.PropertyPostcode || '', address: k.Address || '' });
+async function keynestKeys(env, fresh) {
+  if (!fresh && knCache && Date.now() - knCache.at < 60e3) return knCache.keys;
+  const j = await keynestGet(env, '/Keys');
+  const keys = ((j.ResponsePacket && j.ResponsePacket.KeyList) || []).map(knKey);
+  knCache = { at: Date.now(), keys };
+  return keys;
+}
+const normName = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+async function keynestLink(env, l) {
+  const links = (await env.STORE.get('keynestLinks', 'json')) || {};
+  if (links[l.id]) return { keyId: links[l.id], how: 'linked' };
+  if (!env.KEYNEST_API_KEY) return null;
+  const want = new Set([normName(l.name), normName(l.label + l.building)]);
+  const m = (await keynestKeys(env)).filter((k) => want.has(normName(k.name)));
+  return m.length === 1 ? { keyId: m[0].id, how: 'auto' } : null;
+}
+// KeyNest times have no time zone; reading them as UTC can only make them look later (London is UTC or UTC+1),
+// so a drop-off is never missed. The key must be back in KeyNest and have moved since the cleaning started.
+const knTime = (s) => (!s ? 0 : Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(s) ? s : s + 'Z') || 0);
+async function keynestCheck(env, rec, keyId) {
+  const j = await keynestGet(env, '/Keys/' + encodeURIComponent(keyId));
+  const p = j.ResponsePacket || {};
+  const k = knKey((p.KeyList && p.KeyList[0]) || p);
+  const drops = (await env.STORE.get('keynestDrops', 'json')) || {};
+  const moved = Math.max(knTime(k.lastMovement), Date.parse(drops[keyId] || '') || 0);
+  const since = Date.parse(rec.startedAt) - 5 * 60e3;
+  return { ok: KEYNEST_IN.test(k.status) && moved >= since, status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
+}
+const webhookKeyFor = async (env, name) => (await hmac(await secretKey(env), name)).slice(0, 32);
+
+async function keynestAdminApi(req, env, ctx, me, parts) {
+  if (!can(me, 'manage_users')) return json({ error: 'Only admins can set up KeyNest.' }, 403);
+  const links = (await env.STORE.get('keynestLinks', 'json')) || {};
+  if (req.method === 'GET') {
+    const base = (env.PUBLIC_URL || '').replace(/\/$/, '');
+    const snap = await getSnapshot(env, ctx);
+    const flats = [...listingMap(snap.listings, config(env)).values()].filter((l) => l.keyMode === 'keynest');
+    const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null, keys: [], flats: [], error: null };
+    if (out.connected) { try { out.keys = await keynestKeys(env, true); } catch (e) { out.error = e.userMessage || e.message; } }
+    for (const l of flats) {
+      let link = null; try { link = await keynestLink(env, l); } catch (_) { /* shown via out.error */ }
+      out.flats.push({ id: l.id, label: l.label, name: l.name, building: l.building, keyId: link ? link.keyId : null, how: link ? link.how : null });
+    }
+    return json(out);
+  }
+  if (req.method === 'PUT' && parts[3] === 'link') {
+    const body = await req.json().catch(() => ({}));
+    const listingId = String(body.listingId || '');
+    if (!listingId) return json({ error: 'Pick a flat.' }, 400);
+    if (body.keyId) links[listingId] = String(body.keyId).slice(0, 64); else delete links[listingId];
+    await env.STORE.put('keynestLinks', JSON.stringify(links));
+    return json({ ok: true });
+  }
+  return json({ error: 'Not supported' }, 405);
+}
+
 async function cleaningsApi(req, env, ctx, me, parts, url) {
   const [, , , id, action] = parts; // /api/cleanings/:id/:action
   const list = await loadList(env, 'cleanings');
@@ -667,7 +746,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     const l = await listingInfo(env, ctx, String(body.listingId || ''));
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
     if (!inScope(me, l.building)) return deny('That property isn’t one of your buildings.');
-    const active = list.find((c) => c.listingId === l.id && ['in_progress', 'checklist', 'awaiting_video'].includes(c.status));
+    const active = list.find((c) => c.listingId === l.id && ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key'].includes(c.status));
     if (active) {
       const at = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', minute: '2-digit' }).format(new Date(active.startedAt));
       return json({ error: `${active.cleanerName} already started cleaning ${l.label} at ${at}.`, cleaning: active }, 409);
@@ -675,7 +754,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     const rec = {
       id: newId(), listingId: l.id, listingName: l.name, label: l.label, building: l.building, unitType: l.unitType,
       cleanerId: me.id, cleanerName: me.name, startedAt: nowIso(), endedAt: null, completedAt: null,
-      date: londonDate(), status: 'in_progress', checklist: [], media: [], guesty: null,
+      date: londonDate(), status: 'in_progress', checklist: [], media: [], guesty: null, keyMode: l.keyMode || null, key: null,
     };
     list.push(rec);
     await saveList(env, 'cleanings', list);
@@ -720,6 +799,19 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     await saveList(env, 'cleanings', list);
     return json({ cleaning: rec });
   }
+  // Final step: mark completed and tell Guesty the flat is clean (in the background).
+  const finish = async () => {
+    rec.completedAt = nowIso();
+    rec.status = 'completed';
+    await saveList(env, 'cleanings', list);
+    ctx.waitUntil((async () => {
+      const g = await markCleanInGuesty(env, rec.listingId);
+      const l2 = await loadList(env, 'cleanings');
+      const r2 = l2.find((c) => c.id === rec.id);
+      if (r2) { r2.guesty = g; await saveList(env, 'cleanings', l2); }
+    })());
+    return json({ cleaning: await withMedia(env, rec) });
+  };
   if (req.method === 'POST' && action === 'complete') {
     if (!isMine) return deny();
     if (rec.status !== 'awaiting_video') return json({ error: 'Finish the checklist first.' }, 400);
@@ -729,17 +821,54 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     if (!videos.length) return json({ error: 'A video of the flat is required before you can finish.' }, 400);
     const all = await mediaReady(env, ids);
     rec.media = all.map((m) => m.id);
-    rec.completedAt = nowIso();
-    rec.status = 'completed';
-    await saveList(env, 'cleanings', list);
-    const done = async () => {
-      const g = await markCleanInGuesty(env, rec.listingId);
-      const l2 = await loadList(env, 'cleanings');
-      const r2 = l2.find((c) => c.id === rec.id);
-      if (r2) { r2.guesty = g; await saveList(env, 'cleanings', l2); }
-    };
-    ctx.waitUntil(done());
-    return json({ cleaning: await withMedia(env, rec) });
+    rec.videoAt = nowIso();
+    // Flats tagged LOCKBOX or KEYNEST in Guesty have one more step: returning the key.
+    const l = await listingInfo(env, ctx, rec.listingId);
+    const mode = (l && l.keyMode) || null;
+    if (mode) {
+      rec.keyMode = mode;
+      rec.status = 'awaiting_key';
+      await saveList(env, 'cleanings', list);
+      return json({ cleaning: await withMedia(env, rec) });
+    }
+    return finish();
+  }
+  if (req.method === 'GET' && action === 'key-status') {
+    // Live KeyNest status for the cleaner's "hand the key in" screen.
+    if (!isMine && !isAdmin) return deny();
+    if (rec.keyMode !== 'keynest') return json({ ok: false, status: null });
+    if (!env.KEYNEST_API_KEY) return json({ ok: false, status: null, error: 'KeyNest isn’t connected yet. Ask an admin.' });
+    const l = await listingInfo(env, ctx, rec.listingId);
+    const link = l && await keynestLink(env, l);
+    if (!link) return json({ ok: false, status: null, error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it on the Properties page.' });
+    return json(await keynestCheck(env, rec, link.keyId));
+  }
+  if (req.method === 'POST' && action === 'key') {
+    if (!isMine) return deny();
+    if (rec.status !== 'awaiting_key') return json({ error: rec.status === 'completed' ? 'This cleaning is already complete.' : 'Upload the video first.' }, 400);
+    const body = await req.json().catch(() => ({}));
+    if (rec.keyMode === 'lockbox') {
+      const code = String(body.code || '').trim();
+      if (!/^\d{4}$/.test(code)) return json({ error: 'Enter the new lockbox code: exactly 4 numbers.' }, 400);
+      if (body.confirmCode !== undefined && String(body.confirmCode).trim() !== code) return json({ error: 'The two codes don’t match. Check the lockbox and enter it again.' }, 400);
+      if (body.keyReturned !== true) return json({ error: 'Confirm the key is back in the lockbox.' }, 400);
+      rec.key = { mode: 'lockbox', code, returnedAt: nowIso() };
+      const codes = (await env.STORE.get('lockboxCodes', 'json')) || {};
+      codes[rec.listingId] = { code, at: rec.key.returnedAt, by: me.name, cleaningId: rec.id };
+      await env.STORE.put('lockboxCodes', JSON.stringify(codes));
+      return finish();
+    }
+    if (rec.keyMode === 'keynest') {
+      if (!env.KEYNEST_API_KEY) return json({ error: 'KeyNest isn’t connected yet. Ask an admin.' }, 400);
+      const l = await listingInfo(env, ctx, rec.listingId);
+      const link = l && await keynestLink(env, l);
+      if (!link) return json({ error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it on the Properties page.' }, 400);
+      const chk = await keynestCheck(env, rec, link.keyId);
+      if (!chk.ok) return json({ error: `KeyNest doesn’t show the key handed in yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
+      rec.key = { mode: 'keynest', keyId: link.keyId, status: chk.status, lastMovement: chk.lastMovement, confirmedAt: nowIso() };
+      return finish();
+    }
+    return finish();
   }
   if (req.method === 'POST' && action === 'cancel') {
     if (!isMine && !isAdmin) return deny();
@@ -837,6 +966,19 @@ async function handle(req, env, ctx) {
 
   if (p === '/health') return json({ ok: true, mock: config(env).mock });
 
+  if (p.startsWith('/webhooks/keynest/') && req.method === 'POST') {
+    // KeyNest DROPPED events: remember when each key was last handed in (backs up the status check).
+    if (!safeEqual(p.split('/')[3] || '', await webhookKeyFor(env, 'keynest'))) return new Response('unauthorised', { status: 401 });
+    const body = await req.json().catch(() => ({}));
+    if (String(body.EventName || '').toUpperCase() === 'DROPPED' && body.KeyId) {
+      const drops = (await env.STORE.get('keynestDrops', 'json')) || {};
+      drops[String(body.KeyId)] = new Date(knTime(body.WhenHappened) || Date.now()).toISOString();
+      await env.STORE.put('keynestDrops', JSON.stringify(drops));
+      console.log('[keynest] dropped', body.KeyName || body.KeyId);
+    }
+    return new Response('ok');
+  }
+
   if (p.startsWith('/webhooks/guesty/') && req.method === 'POST') {
     const expectedKey = (await hmac(await secretKey(env), 'webhook')).slice(0, 32);
     if (!safeEqual(p.split('/')[3] || '', expectedKey)) return new Response('unauthorised', { status: 401 });
@@ -905,6 +1047,7 @@ async function handle(req, env, ctx) {
     return json({ version: snap.hash, at: snap.at, webhook: hook });
   }
   if (p === '/api/cleanings' || p.startsWith('/api/cleanings/')) return cleaningsApi(req, env, ctx, me, p.split('/'), url);
+  if (p === '/api/keynest' || p.startsWith('/api/keynest/')) return keynestAdminApi(req, env, ctx, me, p.split('/'));
   if (p === '/api/damages' || p.startsWith('/api/damages/')) return damagesApi(req, env, ctx, me, p.split('/'), url);
   // Internal checks used by server.mjs for uploads and playback (same-process only; not reachable from outside).
   if (p === '/api/internal/media-check' && req.headers.get('x-internal') === env.__INTERNAL_KEY) {

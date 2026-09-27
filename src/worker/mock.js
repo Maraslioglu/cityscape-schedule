@@ -39,7 +39,7 @@ const MOCK = (() => {
     return out;
   }
   return {
-    listings: () => UNITS.map(([_id, nickname, full, street, bedrooms]) => ({ _id, nickname, title: nickname, bedrooms, active: true, address: { full, street, zipcode: full.split(', ').pop() }, defaultCheckInTime: '15:00', defaultCheckOutTime: '10:00' })),
+    listings: () => UNITS.map(([_id, nickname, full, street, bedrooms]) => ({ _id, nickname, title: nickname, bedrooms, active: true, tags: _id === 'm4' ? ['LOCKBOX'] : _id === 'm5' ? ['KEYNEST'] : [], address: { full, street, zipcode: full.split(', ').pop() }, defaultCheckInTime: '15:00', defaultCheckOutTime: '10:00' })),
     stays: (from, to, statuses) => { all = all || build(); return all.filter((r) => r.checkInDateLocalized <= to && r.checkOutDateLocalized >= from && statuses.includes(r.status)); },
   };
 })();
