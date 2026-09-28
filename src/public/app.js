@@ -97,7 +97,7 @@
 
   // ---------- rendering ----------
   function render() {
-    const { weekStart, weekEnd, today, totals, linen, warnings, mock } = data;
+    const { weekStart, weekEnd, today, totals, warnings, mock } = data;
     const isThisWeek = data.dates.includes(today);
     $('week-title').textContent = `${shortDate(weekStart)} – ${shortDate(weekEnd)}`;
     $('when').textContent = isThisWeek ? 'This week' : weekStart > today ? 'Upcoming' : 'Past week';
@@ -109,15 +109,10 @@
     for (const w of warnings || []) banners.push(`<div class="banner">${esc(w)}</div>`);
     $('banners').innerHTML = banners.join('');
 
-    $('m-out').textContent = totals.checkOuts;
-    $('m-in').textContent = totals.checkIns;
-    $('m-turn').textContent = totals.turnovers;
-    if (totals.linenSets !== null) $('m-linen').innerHTML = linen.map((r) => `<div class="item"><div class="v">${r.sets}</div><div class="t">${esc(r.type)}</div></div>`).join('') +
-      `<div class="item total"><div class="v">${totals.linenSets}</div><div class="t">Total sets</div></div>`;
-
     renderStrip();
     renderDay();
     if (view === 'board') renderBoard();
+    setPageHead();
     renderFoot();
   }
 
@@ -130,10 +125,9 @@
     $('strip').innerHTML = data.days.map((d) => {
       const cls = ['dbtn', d.date === data.today ? 'today' : '', d.date < data.today ? 'past' : ''].join(' ');
       return `<button class="${cls}" role="tab" aria-selected="${d.date === selected}" data-date="${d.date}">
-        ${d.hasNew ? '<i class="newdot" title="New booking"></i>' : ''}
-        <div class="dn">${WD_SHORT.format(D(d.date))}</div>
-        <div class="dd">${D(d.date).getUTCDate()}</div>
-        <div class="dc"><b>${d.cleans}</b><span class="lbl"> out</span><span class="sep"> · </span><em>${d.arrivals}</em><span class="lbl"> in</span></div>
+        <span class="dtop"><span class="dn">${WD_SHORT.format(D(d.date))}</span>${d.date === data.today ? '<span class="dtoday">Today</span>' : d.hasNew ? '<i class="newdot" title="New booking"></i>' : ''}</span>
+        <span class="dd">${D(d.date).getUTCDate()}</span>
+        <span class="dc">${d.cleans}<span class="lbl"> out</span><span class="sep"> · </span>${d.arrivals}<span class="lbl"> in</span></span>
       </button>`;
     }).join('');
   }
@@ -143,6 +137,7 @@
     selected = b.dataset.date;
     $('strip').querySelectorAll('.dbtn').forEach((x) => x.setAttribute('aria-selected', x === b));
     renderDay();
+    setPageHead();
   });
 
   function chip(kind, e) {
@@ -157,28 +152,40 @@
     }
     return [...map.values()];
   }
+  const KEY_ICON = { keynest: '<svg class="r-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="KeyNest" role="img"><title>KeyNest</title><circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14 9l2 2"/></svg>',
+    lockbox: '<svg class="r-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Lockbox" role="img"><title>Lockbox</title><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg>' };
+  // Where a time sits on the day's line, which runs from 07:00 to 21:00.
+  const linePos = (hm) => { const m = /^(\d{1,2}):(\d\d)/.exec(hm || ''); return m ? Math.min(100, Math.max(0, ((Number(m[1]) + Number(m[2]) / 60 - 7) / 14) * 100)) : null; };
+  const TICKS = ['07', '09', '11', '13', '15', '17', '19', '21'];
+  function timeline(u) {
+    const o = u.checkOut ? linePos(u.checkOut.timeRaw) : null, n = u.checkIn ? linePos(u.checkIn.timeRaw) : null;
+    const from = o === null ? (n === null ? 0 : n) : o, to = n === null ? (o === null ? 0 : 100) : n;
+    const mark = (cls, pos, e) => (pos === null ? '' : `<span class="r-m ${cls}" style="left:${pos}%"><em>${esc(e.time || '')}${e.planned ? '*' : ''}</em><i></i></span>`);
+    return `<span class="r-line" aria-hidden="true"><i class="r-track"></i>${o !== null ? `<i class="r-win${n !== null ? ' turn' : ''}" style="left:${from}%;width:${Math.max(0, to - from)}%"></i>` : ''}${mark('o', o, u.checkOut || {})}${mark('n', n, u.checkIn || {})}</span>`;
+  }
   function section(kind, title, hint, units) {
     if (!units.length) return '';
     const groups = groupByBuilding(units).map((g) => `
-      <div class="bldg">
-        <div class="bldg-name">${esc(g.name)}<span>${esc(g.postcode)}</span></div>
+      <div class="bldg card">
+        <div class="bldg-name">${esc(g.name)}<span>${esc(g.postcode)}</span><em>${g.units.length === 1 ? '1 flat' : `${g.units.length} flats`}</em></div>
         ${g.units.map((u) => {
           const isNew = (u.checkIn && u.checkIn.isNew) || (u.checkOut && u.checkOut.isNew);
           const guests = u.checkIn && u.checkIn.guests ? `${u.checkIn.guests} guest${u.checkIn.guests > 1 ? 's' : ''}` : '';
-          return `<div class="row tap" data-listing="${esc(u.listingId)}" role="button" tabindex="0" aria-label="Open ${esc(u.label)}">
-            <span class="u">${esc(u.label)}</span>
-            <span class="t">${esc(shortType(u.unitType))}</span>
-            ${guests ? `<span class="g">· ${guests}</span>` : ''}
-            ${isNew ? '<span class="new">New</span>' : ''}
-            <span class="cbadge" data-cbadge="${esc(u.listingId)}"></span><span data-achip="${esc(u.listingId)}"></span>
-            <span class="times">${chip('out', u.checkOut)}${u.checkOut && u.checkIn ? '<span class="arrow">→</span>' : ''}${chip('in', u.checkIn)}</span>
+          const said = [u.label, u.checkOut && `out ${u.checkOut.time}`, u.checkIn && `in ${u.checkIn.time}`].filter(Boolean).join(', ');
+          return `<div class="row tap" data-listing="${esc(u.listingId)}" role="button" tabindex="0" aria-label="Open ${esc(said)}">
+            <span class="r-flat"><span class="r-l"><span class="u">${esc(u.label)}</span>${KEY_ICON[u.keyMode] || ''}${isNew ? '<span class="new">New</span>' : ''}</span>
+              <span class="t">${esc(shortType(u.unitType))}${guests ? ` · ${guests}` : ''}</span></span>
+            ${timeline(u)}
+            <span class="r-who" data-achip="${esc(u.listingId)}" data-needs="${u.checkOut ? '1' : ''}"></span>
+            <span class="r-st" data-cbadge="${esc(u.listingId)}" data-kind="${kind}"></span>
           </div>`;
         }).join('')}
       </div>`).join('');
-    return `<div class="section s-${kind}">
-      <div class="shead"><span class="bar"></span><h3>${title}</h3><span class="count">${units.length}</span><span class="hint">${hint}</span></div>
+    return `<section class="section s-${kind}">
+      <div class="shead"><h2>${title}</h2><span class="hint">${hint} · ${units.length === 1 ? '1 flat' : `${units.length} flats`}</span></div>
+      <div class="axis" aria-hidden="true"><span></span><span class="ax">${TICKS.map((t, i) => `<i style="left:${(i / 7) * 100}%">${t}</i>`).join('')}</span><span></span><span></span></div>
       ${groups}
-    </div>`;
+    </section>`;
   }
   function renderDay() {
     const day = data.days.find((d) => d.date === selected);
@@ -186,12 +193,12 @@
     const turn = day.units.filter((u) => u.checkOut && u.checkIn);
     const outs = day.units.filter((u) => u.checkOut && !u.checkIn);
     const ins = day.units.filter((u) => !u.checkOut && u.checkIn);
-    const linenBits = Object.entries(day.linen).map(([t, n]) => `${esc(shortType(t))} <b>${n}</b>`).join(' · ');
+    const linenBits = can('view_linen') ? Object.entries(day.linen).map(([t, n]) => `${esc(shortType(t))} <b>${n}</b>`).join(' · ') : '';
     $('daypanel').innerHTML = `
-      <div class="dayhead"><h2>${esc(longDate(day.date))}</h2>${linenBits ? `<span class="dlinen">Linen: ${linenBits}</span>` : ''}</div>
-      ${day.units.length ? '' : '<div class="empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
-      ${section('turn', 'Same-day turnovers', 'Clean between check-out and check-in', turn)}
-      ${section('out', 'Check-outs', 'Clean — nobody arriving today', outs)}
+      ${linenBits ? `<div class="dlinen">Linen for this day: ${linenBits}</div>` : ''}
+      ${day.units.length ? '' : '<div class="card empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
+      ${section('turn', 'Same-day turnovers', 'Guests leave and arrive the same day', turn)}
+      ${section('out', 'Check-outs', 'Clean once the guest leaves', outs)}
       ${section('in', 'Arrivals', 'Make sure the flat is ready', ins)}`;
     decorateDay();
   }
@@ -229,7 +236,7 @@
     if (!b) return;
     selected = b.dataset.date;
     setView('day');
-    renderStrip(); renderDay();
+    renderStrip(); renderDay(); setPageHead();
   });
 
   async function loadProps() {
@@ -339,6 +346,19 @@
   }
 
   // ---------- views ----------
+  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account' };
+  function setPageHead() {
+    const eb = $('page-eyebrow'), h = $('page-title');
+    if ((view === 'day' || view === 'board') && data) {
+      const when = data.dates.includes(data.today) ? 'This week' : data.weekStart > data.today ? 'Upcoming week' : 'Past week';
+      eb.textContent = `Schedule · ${when}`;
+      if (view === 'day') h.innerHTML = `${esc(WD_LONG.format(D(selected)))}, <span>${D(selected).getUTCDate()} ${esc(MON.format(D(selected)))}</span>`;
+      else h.innerHTML = `The week, <span>${esc(shortDate(data.weekStart))} – ${esc(shortDate(data.weekEnd))}</span>`;
+    } else {
+      eb.textContent = view === 'day' || view === 'board' ? 'Schedule' : GROUP[view] || '';
+      h.textContent = TITLES[view] || '';
+    }
+  }
   function setView(v) {
     if (!allowed(v)) v = ['day', 'board', 'props', 'account'].find(allowed);
     view = v;
@@ -348,7 +368,7 @@
     document.querySelectorAll('.range [data-range]').forEach((b) => b.setAttribute('aria-selected', b.dataset.range === v));
     $('me-btn').setAttribute('aria-current', v === 'account' ? 'page' : 'false');
     $('me-btn2').setAttribute('aria-selected', v === 'account');
-    $('page-title').textContent = TITLES[v] || '';
+    setPageHead();
     closeCopyMenu();
     $('week-area').classList.toggle('hidden', !(v === 'day' || v === 'board'));
     $('view-day').classList.toggle('hidden', v !== 'day');
@@ -377,8 +397,6 @@
     document.querySelector('.range [data-range="day"]').classList.toggle('hidden', !allowed('day'));
     document.querySelector('.range [data-range="board"]').classList.toggle('hidden', !allowed('board'));
     document.querySelector('.copy-wrap').classList.toggle('hidden', !can('copy_print'));
-    document.querySelector('.metric.linen').classList.toggle('hidden', !can('view_linen'));
-    document.querySelector('.summary').classList.toggle('no-linen', !can('view_linen'));
     $('me-avatar').textContent = initials(me.name);
     $('me-avatar2').textContent = initials(me.name);
     $('me-name').textContent = me.name;
@@ -520,10 +538,12 @@
   // ---------- live updates ----------
   // Guesty tells the server about every booking change; the page checks a tiny "version" every 15 seconds.
   function setLive(state, title) {
-    const el = $('live');
-    el.className = 'live' + (state === 'on' ? ' on' : '');
-    el.querySelector('.lbl').textContent = state === 'on' ? 'Live' : state === 'preview' ? 'Preview' : 'Auto';
-    el.title = title;
+    document.querySelectorAll('.live').forEach((el) => {
+      el.classList.toggle('on', state === 'on');
+      const side = el.classList.contains('side-live');
+      el.querySelector('.lbl').textContent = state === 'on' ? (side ? 'Live from Guesty' : 'Live') : state === 'preview' ? 'Preview' : (side ? 'Checking Guesty' : 'Auto');
+      el.title = title;
+    });
   }
   let polling = false;
   async function checkVersion() {
@@ -665,23 +685,115 @@
     } catch (_) { /* try again on the next tick */ }
   }
 
-  // Badges on Day view rows: "Cleaning · 12:04" (live) or "Cleaned · 49 min"
+  // Each row's status ("Cleaning · 12:04" live, "Cleaned · 49 min", "To clean") and its cleaner.
+  const cleanState = (listingId) => {
+    const list = forListing(listingId, selected);
+    return { active: list.find((c) => ACTIVE.includes(c.status)), done: list.filter((c) => c.status === 'completed').pop() };
+  };
   function decorateDay() {
     if (data && me && cRange !== cleaningRange()) { cRange = 'loading'; refreshCleanings(); }
     document.querySelectorAll('[data-cbadge]').forEach((el) => {
-      const list = forListing(el.dataset.cbadge, selected);
-      const active = list.find((c) => ACTIVE.includes(c.status));
-      const done = list.filter((c) => c.status === 'completed').pop();
-      if (active) el.innerHTML = `<span class="cb running"><i></i>${esc(active.cleanerName.split(' ')[0])} · <b data-since="${esc(active.startedAt)}" data-until="${esc(active.endedAt || '')}">${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</b></span>`;
+      const { active, done } = cleanState(el.dataset.cbadge);
+      if (active) el.innerHTML = `<span class="cb running"><i></i>${active.status === 'in_progress' ? 'Cleaning' : esc(STEP_WORD[active.status] || 'Cleaning')}${active.status === 'in_progress' ? ` · <b data-since="${esc(active.startedAt)}" data-until="${esc(active.endedAt || '')}">${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</b>` : ''}</span>`;
       else if (done) el.innerHTML = `<span class="cb done">✓ Cleaned · ${durWords(Date.parse(done.endedAt) - Date.parse(done.startedAt))}</span>`;
-      else el.innerHTML = '';
+      else el.innerHTML = el.dataset.kind === 'in' ? '<span class="cb arr">Arriving</span>' : '<span class="cb todo">To clean</span>';
     });
     // Who's assigned to each flat that day.
     document.querySelectorAll('[data-achip]').forEach((el) => {
       const a = assignments[`${selected}|${el.dataset.achip}`];
-      el.innerHTML = a ? `<span class="achip${a.cleanerId === me.id ? ' mine' : ''}" title="Assigned to ${esc(a.cleanerName)}">${PERSON_ICON}${a.cleanerId === me.id ? 'You' : esc(a.cleanerName.split(' ')[0])}</span>` : '';
+      el.innerHTML = a ? `<span class="achip${a.cleanerId === me.id ? ' mine' : ''}" title="Assigned to ${esc(a.cleanerName)}"><span class="avatar sm">${esc(initials(a.cleanerName))}</span>${a.cleanerId === me.id ? 'You' : esc(a.cleanerName.split(' ')[0])}</span>`
+        : el.dataset.needs && isManager() ? '<span class="achip none"><span class="avatar sm dash" aria-hidden="true">+</span>Assign</span>' : '';
     });
+    renderSummary();
+    renderRail();
   }
+
+  // ---- the selected day at a glance: summary band and the right-hand column ----
+  let openDamage = null, knUnlinked = [];
+  function dayStats() {
+    const day = data && data.days.find((d) => d.date === selected);
+    const units = day ? day.units : [];
+    const cleans = units.filter((u) => u.checkOut);
+    const st = cleans.map((u) => ({ u, ...cleanState(u.listingId), a: assignments[`${selected}|${u.listingId}`] }));
+    return { day, units, cleans, st, done: st.filter((x) => x.done && !x.active).length, running: st.filter((x) => x.active).length,
+      unassigned: st.filter((x) => !x.a), arrivals: units.filter((u) => u.checkIn) };
+  }
+  const seesCleaning = () => isManager() || can('view_cleaning');
+  function renderSummary() {
+    if (!data) return;
+    const s = dayStats();
+    const firstIn = s.arrivals.map((u) => u.checkIn.timeRaw || '').filter(Boolean).sort()[0];
+    const turns = s.cleans.filter((u) => u.checkIn).length;
+    $('m-clean').textContent = s.cleans.length;
+    $('m-clean-s').textContent = s.cleans.length ? `${turns} same-day · ${s.cleans.length - turns} check-out${s.cleans.length - turns === 1 ? '' : 's'}` : 'Nothing to clean';
+    $('m-in').textContent = s.arrivals.length;
+    $('m-in-s').textContent = firstIn ? `First guests from ${s.arrivals.find((u) => u.checkIn.timeRaw === firstIn).checkIn.time}` : 'No arrivals';
+    if (isManager()) {
+      $('m-third-k').textContent = 'Not assigned';
+      $('m-third').textContent = s.unassigned.length;
+      $('m-third').classList.toggle('warnv', s.unassigned.length > 0);
+      $('m-third-s').textContent = s.unassigned.length ? s.unassigned.map((x) => x.u.label).slice(0, 4).join(' · ') + (s.unassigned.length > 4 ? ' …' : '') : 'Everyone has a cleaner';
+    } else {
+      const mine = s.st.filter((x) => x.a && x.a.cleanerId === me.id);
+      $('m-third-k').textContent = 'Assigned to you';
+      $('m-third').textContent = mine.length;
+      $('m-third').classList.remove('warnv');
+      $('m-third-s').textContent = mine.length ? mine.map((x) => x.u.label).slice(0, 4).join(' · ') : 'Nothing assigned yet';
+    }
+    $('m-done-box').classList.toggle('hidden', !seesCleaning());
+    $('m-done').textContent = s.done;
+    $('m-done-of').textContent = ` / ${s.cleans.length}`;
+    const pct = (n) => (s.cleans.length ? (n / s.cleans.length) * 100 : 0);
+    $('m-bar').querySelector('.d').style.width = pct(s.done) + '%';
+    $('m-bar').querySelector('.p').style.width = pct(s.running) + '%';
+  }
+  function renderRail() {
+    const rail = $('rail');
+    if (!data || !rail) return;
+    const s = dayStats();
+    const cards = [];
+    const dayWord = selected === data.today ? 'today' : WD_LONG.format(D(selected));
+    if (seesCleaning() && s.cleans.length) {
+      const n = s.cleans.length, C = 2 * Math.PI * 34, seg = (k) => (k / n) * C;
+      cards.push(`<div class="card rcard"><div class="rc-h"><h3>Progress</h3><span>${esc(dayWord)}</span></div>
+        <div class="ring-row"><svg class="ring" viewBox="0 0 84 84" role="img" aria-label="${s.done} of ${n} cleaned, ${s.running} being cleaned">
+          <circle cx="42" cy="42" r="34" class="rt"/>
+          ${s.done ? `<circle cx="42" cy="42" r="34" class="rd" stroke-dasharray="${seg(s.done)} ${C}" transform="rotate(-90 42 42)"/>` : ''}
+          ${s.running ? `<circle cx="42" cy="42" r="34" class="rp" stroke-dasharray="${seg(s.running)} ${C}" stroke-dashoffset="${-seg(s.done)}" transform="rotate(-90 42 42)"/>` : ''}
+          <text x="42" y="48" text-anchor="middle">${s.done}/${n}</text></svg>
+          <ul class="legend-l"><li><i class="d"></i>${s.done} cleaned</li><li><i class="p"></i>${s.running} being cleaned</li><li><i class="t"></i>${n - s.done - s.running} to clean</li></ul></div></div>`);
+    }
+    if (seesCleaning() && s.cleans.length) {
+      const by = new Map();
+      for (const x of s.st) { const k = x.a ? x.a.cleanerId : ''; if (!by.has(k)) by.set(k, { name: x.a ? x.a.cleanerName : '', items: [] }); by.get(k).items.push(x); }
+      const line = (x) => x.active ? `${x.u.label} cleaning since ${fmtClock(x.active.startedAt)}` : x.done ? `${x.u.label} done ${fmtClock(x.done.endedAt)}` : `${x.u.label} to clean`;
+      const rows = [...by.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : 0)).map(([id, g]) => id
+        ? `<div class="rrow"><span class="avatar">${esc(initials(g.name))}</span><span class="rtxt"><b>${id === me.id ? 'You' : esc(g.name)}</b><span>${esc(g.items.map(line).join(' · '))}</span></span><em>${g.items.filter((x) => x.done).length}/${g.items.length}</em></div>`
+        : `<div class="rrow"><span class="avatar dash" aria-hidden="true"></span><span class="rtxt"><b>Not assigned</b><span>${esc(g.items.map((x) => x.u.label).join(' · '))}</span></span></div>`).join('');
+      cards.push(`<div class="card rcard"><div class="rc-h"><h3>Team ${esc(dayWord)}</h3></div>${rows}</div>`);
+    }
+    const att = [];
+    if (openDamage) att.push(`<button class="rrow link" data-go="damage"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${openDamage} open damage report${openDamage === 1 ? '' : 's'}</b><span>Review and resolve</span></span>${CHEV}</button>`);
+    if (knUnlinked.length) att.push(`<button class="rrow link" data-go="${isManager() ? 'settings' : 'props'}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${knUnlinked.length} KeyNest flat${knUnlinked.length === 1 ? '' : 's'} not linked</b><span>${esc(knUnlinked.map((f) => f.label).join(' · '))}</span></span>${CHEV}</button>`);
+    for (const u of s.units.filter((x) => x.checkIn && x.checkIn.isNew)) att.push(`<button class="rrow link" data-flat="${esc(u.listingId)}"><span class="ric new">${ICONS.star}</span><span class="rtxt"><b>${esc(u.label)} is a new booking</b><span>Arrives ${esc(u.checkIn.time)}${u.checkIn.guests ? ` · ${u.checkIn.guests} guest${u.checkIn.guests > 1 ? 's' : ''}` : ''}</span></span>${CHEV}</button>`);
+    cards.push(`<div class="card rcard"><div class="rc-h"><h3>Needs attention</h3></div>${att.join('') || '<p class="muted rnone">Nothing right now.</p>'}</div>`);
+    const t = data.totals;
+    cards.push(`<div class="card rcard"><div class="rc-h"><h3>This week</h3></div>
+      <div class="wk"><div><b>${t.checkOuts}</b><span>cleans</span></div><div><b>${t.checkIns}</b><span>arrivals</span></div><div><b>${t.turnovers}</b><span>same-day</span></div></div>
+      ${can('view_linen') && t.linenSets !== null ? `<div class="wk-linen"><span class="lh">Linen sets <em>1 per check-out</em></span>${data.linen.map((r) => `<span class="li"><b>${r.sets}</b>${esc(shortType(r.type))}</span>`).join('')}<span class="li total"><b>${t.linenSets}</b>total</span></div>` : ''}</div>`);
+    rail.innerHTML = cards.join('');
+  }
+  const CHEV = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>';
+  const ICONS = {
+    damage: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5M12 17.2v.3"/></svg>',
+    key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14 9l2 2"/></svg>',
+    star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 13.8 10.2 20.5 12 13.8 13.8 12 20.5 10.2 13.8 3.5 12 10.2 10.2z"/></svg>',
+  };
+  $('rail').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-go], [data-flat]');
+    if (!b) return;
+    if (b.dataset.flat) openSheet(b.dataset.flat); else setView(b.dataset.go);
+  });
   let assignments = {}; // "date|listingId" → { cleanerId, cleanerName, … }
   const PERSON_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>';
   // One clock for every running timer on the page.
@@ -826,10 +938,24 @@
         ${(can('view_cleaning') || c.cleanerId === me.id) ? mediaTiles(c.media) : ''}
       </div>`).join('');
 
-    const t = [u.checkOut && `Out ${u.checkOut.time}`, u.checkIn && `In ${u.checkIn.time}`].filter(Boolean).join(' · ');
+    // This flat on the selected day: check-out, check-in and the window between them.
+    const du = (data && unitOn(sheetListing, selected)) || u;
+    const o = du.checkOut, n = du.checkIn;
+    const hrs = (a, b) => { const m = (x) => { const r = /^(\d{1,2}):(\d\d)/.exec(x || ''); return r ? Number(r[1]) * 60 + Number(r[2]) : null; }; const d = m(b) - m(a); return m(a) === null || m(b) === null || d <= 0 ? null : d; };
+    const win = o && n ? hrs(o.timeRaw, n.timeRaw) : null;
+    const stay = (e) => (e ? [e.nights && `${e.nights} night${e.nights > 1 ? 's' : ''}`, e.guests && `${e.guests} guest${e.guests > 1 ? 's' : ''}`, e.planned && 'planned time', e.isNew && 'new booking'].filter(Boolean).join(' · ') : '');
+    const times = (o || n) ? `<div class="sh-times">
+        <div><span>Check-out</span><b class="o">${o ? esc(o.time) : '—'}</b><em>${esc(stay(o))}</em></div>
+        <div><span>Check-in</span><b class="n">${n ? esc(n.time) : '—'}</b><em>${esc(stay(n))}</em></div>
+        <div class="w"><span>Cleaning window</span><b>${win ? (win % 60 ? `${Math.floor(win / 60)} h ${win % 60} min` : `${win / 60} h`) : o ? 'Open' : '—'}</b><em>${o && !n ? 'No arrival this day' : n && !o ? 'Arrival only' : ''}</em></div>
+      </div>` : '';
+    const pill = active ? `<span class="cb running"><i></i>${esc(STEP_WORD[active.status] || 'Cleaning')}</span>` : done.length ? '<span class="cb done">✓ Cleaned</span>' : o ? '<span class="cb todo">To clean</span>' : '';
     $('sheet-body').innerHTML = `
-      <div class="sh-head"><div><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(u.building || '')}${t ? ' · ' + esc(t) : ''}</div></div><button class="btn sq" data-close aria-label="Close">✕</button></div>
+      <div class="sh-head"><div class="sh-title"><span class="eyebrow">${esc(u.building || '')}${u.postcode ? ` · ${esc(u.postcode)}` : ''}</span><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(shortType(u.unitType || ''))}</div></div>
+        <div class="sh-right">${pill}<button class="btn sq" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div></div>
+      ${times}
       ${assignBlock()}
+      ${active ? milestones(active) : ''}
       ${body}
       ${history ? `<h3 class="sh-h3">${done.some((c) => c.date !== selected) ? 'Cleaned' : `Cleaned ${selected === (data && data.today) ? 'today' : esc(longDate(selected))}`}</h3>${history}` : ''}
       <div id="sheet-damages"></div>
@@ -859,6 +985,22 @@
     if (active && mine && active.status === 'awaiting_video') wireEvidence(active);
     if (active && mine && active.status === 'awaiting_key') wireKey(active);
     loadSheetDamages(sheetListing);
+  }
+
+  // A cleaning's milestones: started → cleaned → checklist → video → key back, each ticked with its time.
+  const STEP_WORD = { in_progress: 'Cleaning', checklist: 'Final checks', awaiting_video: 'Video to upload', awaiting_key: 'Key to return' };
+  function milestones(c) {
+    const at = ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key', 'completed'].indexOf(c.status);
+    const st = (i) => (at > i ? 'done' : at === i ? 'now' : 'next');
+    const keyAt = c.key && (c.key.returnedAt || c.key.confirmedAt);
+    const rows = [
+      ['Started', `by ${c.cleanerId === me.id ? 'you' : c.cleanerName.split(' ')[0]}`, c.startedAt, 'done'],
+      ['Cleaning', c.endedAt ? durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt)) : 'in progress', c.endedAt, st(0)],
+      ['Final checks', `${(c.checklist || []).length} of ${checklistDef.length || 5} confirmed`, c.checksConfirmedAt, st(1)],
+      ['Video walkthrough', (c.media || []).some((m) => m.kind === 'video') ? 'uploaded' : 'full quality, from Files', c.videoAt, st(2)],
+      ...(c.keyMode ? [[c.keyMode === 'lockbox' ? 'Key back in the lockbox' : 'Key back in KeyNest', c.keyMode === 'lockbox' ? 'with a new 4-digit code' : '', keyAt, st(3)]] : []),
+    ];
+    return `<ol class="miles">${rows.map(([label, detail, time, state]) => `<li class="${state}"><span class="mdot" aria-hidden="true"></span><span class="mtxt"><b>${esc(label)}</b>${detail ? `<small>${esc(detail)}</small>` : ''}</span><em>${time && state === 'done' ? fmtClock(time) : state === 'now' ? 'Now' : ''}</em></li>`).join('')}</ol>`;
   }
 
   function confirmInline(text, yes) {
@@ -1391,11 +1533,13 @@
         const n = (await getJSON('/api/damages?status=open')).damages.length;
         $('nb-damage').textContent = n > 9 ? '9+' : String(n);
         $('nb-damage').classList.toggle('hidden', !n);
+        openDamage = n;
       } catch (_) {}
     }
     if (allowed('props')) {
-      try { const p = await getJSON('/api/properties'); $('nd-props').classList.toggle('hidden', !(p.keynest && p.keynest.unlinked.length)); } catch (_) {}
+      try { const p = await getJSON('/api/properties'); knUnlinked = (p.keynest && p.keynest.unlinked) || []; $('nd-props').classList.toggle('hidden', !knUnlinked.length); } catch (_) {}
     }
+    renderRail();
   }
   $('cv-date').onchange = (e) => { cvDate = e.target.value; loadCleaningView(); };
   $('cv-prev').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };

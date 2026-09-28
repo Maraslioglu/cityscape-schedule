@@ -475,7 +475,7 @@ function buildWeek(start, rawListings, stays, cfg, meta, allow) {
       const c = cells[date];
       if (!c.out && !c.in) continue;
       const l = listings.get(id);
-      units.push({ listingId: id, name: l.name, label: l.label, building: l.building, postcode: l.postcode, address: l.address, unitType: l.unitType, checkOut: c.out, checkIn: c.in });
+      units.push({ listingId: id, name: l.name, label: l.label, building: l.building, postcode: l.postcode, address: l.address, unitType: l.unitType, keyMode: l.keyMode, checkOut: c.out, checkIn: c.in });
       if (c.out) { checkOuts++; linen[l.unitType] = (linen[l.unitType] || 0) + 1; dayLinen[l.unitType] = (dayLinen[l.unitType] || 0) + 1; }
       if (c.in) { checkIns++; if (c.in.isNew) newBookings++; }
       if (c.in && c.out) turnovers++;
