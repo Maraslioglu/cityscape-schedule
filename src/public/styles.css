@@ -573,8 +573,11 @@ button, .btn, .row.tap, .dbtn { touch-action: manipulation; }
 .kn-open { font-weight: 600; color: var(--ink-2); }
 .kn-open.on { color: var(--in); }
 .kn-open.off { color: var(--out); }
-.kn-maps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.kn-maps .btn { flex: 1 1 0; min-width: 0; padding: 0 8px; font-size: 13.5px; }
+.kn-store.top { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.kn-badge { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; letter-spacing: .02em; vertical-align: 2px; }
+.kn-used { font-size: 12.5px; }
+.kn-go { width: 100%; height: 42px; margin-top: 8px; gap: 8px; font-weight: 600; }
+.kn-go svg { width: 17px; height: 17px; }
 @keyframes pulse { 50% { opacity: .35; } }
 .keystep .btn.wide { margin-bottom: 10px; }
 .kbadge { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
