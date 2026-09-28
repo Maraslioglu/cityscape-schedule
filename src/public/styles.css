@@ -1036,3 +1036,15 @@ td.unit .u { font-weight: 600; }
   .sh-times b { font-size: 17px; }
   .sh-times > div { padding: 11px 12px; }
 }
+
+/* Sidebar: everything fits inside it with even space on both sides, and no scrollbars (it still scrolls on short screens). */
+@media (min-width: 761px) {
+  body { padding-left: 256px; }
+  .side { width: 256px; padding: 26px 16px 18px; overflow-x: hidden; scrollbar-width: none; border-right: 0; box-shadow: inset -1px 0 0 var(--line); }
+  .side::-webkit-scrollbar { display: none; }
+  .side-brand { gap: 8px; padding: 0 6px 22px; min-width: 0; }
+  .side-brand .cs-mark { width: 25px; height: 23px; }
+  .side-brand .name { font-size: 20px; }
+  .side .tag { font-size: 8.5px; letter-spacing: .16em; padding: 3px 6px; flex: none; }
+  .active-bar { left: 256px; }
+}
