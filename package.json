@@ -2,6 +2,9 @@
   "name": "cityscape-schedule",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node server.mjs" },
+  "scripts": {
+    "start": "node server.mjs",
+    "build": "node src/worker/build.cjs && cp src/dist/worker.js worker.js && cp src/dist/server.mjs server.mjs"
+  },
   "engines": { "node": ">=20" }
 }
