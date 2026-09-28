@@ -988,6 +988,7 @@
       <div class="ev-head"><b>Last step: the key must be in KeyNest.</b> <span class="req">Required</span></div>
       <p class="ev-note">If you collected the key from KeyNest, hand it back in at the store. As soon as KeyNest shows it in the store, you can complete the cleaning.</p>
       <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span class="kn-body"><span id="kn-text">Checking KeyNest…</span><small id="kn-when"></small></span></div>
+      <div class="kn-stores" id="kn-stores"></div>
       <button class="btn wide" id="kn-check">Check again</button>
       <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
     </div>`;
@@ -1020,6 +1021,26 @@
       return;
     }
     const box = $('kn-status'), text = $('kn-text'), when = $('kn-when'), again = $('kn-check');
+    // While KeyNest shows the key out, suggest where to drop it off: nearest KeyNest to the flat and nearest 24-hour one.
+    let stores = null; // loaded once
+    const mapLinks = (st) => {
+      const ll = `${Number(st.lat)},${Number(st.lng)}`;
+      return `<div class="kn-maps"><a class="btn" target="_blank" rel="noopener" href="https://maps.apple.com/?daddr=${ll}&q=${encodeURIComponent(st.name)}">Apple Maps</a>`
+        + `<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${ll}">Google Maps</a>`
+        + `<a class="btn" target="_blank" rel="noopener" href="https://waze.com/ul?ll=${ll}&navigate=yes">Waze</a></div>`;
+    };
+    const storeCard = (title, st) => `<div class="kn-store"><div class="kn-store-h"><span>${esc(title)}</span><b>${esc(st.miles)} mi</b></div>
+      <div class="kn-store-name">${esc(st.name)}</div>${st.address ? `<div class="muted">${esc(st.address)}</div>` : ''}
+      ${st.today ? `<div class="kn-open ${st.openNow === true ? 'on' : st.openNow === false ? 'off' : ''}">${st.is24 ? '' : st.openNow === true ? 'Open now · ' : st.openNow === false ? 'Closed now · ' : ''}${esc(st.today)}</div>` : ''}${mapLinks(st)}</div>`;
+    const showStores = async (show) => {
+      const el = $('kn-stores');
+      if (!el) return;
+      if (!show) { el.innerHTML = ''; return; }
+      if (!stores) { try { stores = await getJSON(`/api/cleanings/${a.id}/key-stores`); } catch (e) { stores = { error: e.message }; } }
+      const n = stores.nearest, n24 = stores.nearest24;
+      el.innerHTML = stores.error ? `<p class="muted">${esc(stores.error)}</p>` : !n ? '' : `<h4>Where to drop the key off</h4>${
+        n24 && n24.id === n.id ? storeCard('Nearest KeyNest · open 24 hours', n) : storeCard('Nearest KeyNest to the flat', n) + (n24 ? storeCard('Nearest open 24 hours', n24) : '')}`;
+    };
     let checking = false;
     const check = async () => {
       if (!$('kn-status')) { clearInterval(keyPoll); keyPoll = null; return; }
@@ -1030,6 +1051,7 @@
         box.className = 'kn-status ' + (r.ok ? 'ok' : r.error ? 'err' : 'wait');
         text.textContent = r.error ? r.error : r.ok ? `Key is in KeyNest ✓ (${r.status})` : `Waiting for the key · KeyNest shows: ${r.status}`;
         done.disabled = !r.ok;
+        showStores(!r.ok && !r.error);
       } catch (e) { box.className = 'kn-status err'; text.textContent = e.message; done.disabled = true; }
       checking = false; again.disabled = false; again.textContent = 'Check again';
       when.textContent = `Checked at ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Europe/London' })}`;
