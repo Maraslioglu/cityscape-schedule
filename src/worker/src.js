@@ -689,21 +689,14 @@ async function keynestLink(env, l) {
   const m = (await keynestKeys(env)).filter((k) => want.has(normName(k.name)));
   return m.length === 1 ? { keyId: m[0].id, how: 'auto' } : null;
 }
-// KeyNest times have no time zone; reading them as UTC can only make them look later (London is UTC or UTC+1),
-// so a drop-off is never missed. The key must be back in KeyNest and have moved since the cleaning started.
-const knTime = (s) => (!s ? 0 : Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(s) ? s : s + 'Z') || 0);
-async function keynestCheck(env, rec, keyId) {
+// The key only has to be back in KeyNest. It needn't have moved during the cleaning: cleaners sometimes use a spare
+// key and never touch the one in KeyNest.
+async function keynestCheck(env, keyId) {
   const j = await keynestGet(env, '/Keys/' + encodeURIComponent(keyId));
   const p = j.ResponsePacket || {};
   const k = knKey((p.KeyList && p.KeyList[0]) || p);
-  const drops = (await env.STORE.get('keynestDrops', 'json')) || {};
-  const moved = Math.max(knTime(k.lastMovement), Date.parse(drops[keyId] || '') || 0);
-  const since = Date.parse(rec.startedAt) - 5 * 60e3;
-  const inStore = KEYNEST_IN.test(k.status);
-  // inStore but not ok: KeyNest's last drop-off is from before this cleaning (the key was never collected and handed back).
-  return { ok: inStore && moved >= since, inStore, status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
+  return { ok: KEYNEST_IN.test(k.status), status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
 }
-const webhookKeyFor = async (env, name) => (await hmac(await secretKey(env), name)).slice(0, 32);
 
 // Admin and User roles run the operation: settings & integrations, assigning cleanings. Supervisors and cleaners don't.
 const isManager = (u) => Boolean(u && (u.role === 'admin' || u.role === 'user'));
@@ -728,10 +721,9 @@ async function keynestAdminApi(req, env, ctx, me, parts) {
   if (!isManager(me)) return json({ error: 'Only Admins and Users can change KeyNest settings.' }, 403);
   const links = (await env.STORE.get('keynestLinks', 'json')) || {};
   if (req.method === 'GET') {
-    const base = (env.PUBLIC_URL || '').replace(/\/$/, '');
     const snap = await getSnapshot(env, ctx);
     const flats = [...listingMap(snap.listings, config(env), allowBuildingFor(me)).values()].filter((l) => l.keyMode === 'keynest');
-    const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null, keys: [], flats: [], error: null };
+    const out = { connected: Boolean(env.KEYNEST_API_KEY), keys: [], flats: [], error: null };
     if (out.connected) { try { out.keys = await keynestKeys(env, true); } catch (e) { out.error = e.userMessage || e.message; } }
     for (const l of flats) {
       let link = null; try { link = await keynestLink(env, l); } catch (_) { /* shown via out.error */ }
@@ -1060,14 +1052,14 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     return finish();
   }
   if (req.method === 'GET' && action === 'key-status') {
-    // Live KeyNest status for the cleaner's "hand the key in" screen.
+    // Live KeyNest status for the cleaner's "key back in KeyNest" screen.
     if (!isMine && !isAdmin) return deny();
     if (rec.keyMode !== 'keynest') return json({ ok: false, status: null });
     if (!env.KEYNEST_API_KEY) return json({ ok: false, status: null, error: 'KeyNest isn’t connected yet. Ask an admin.' });
     const l = await listingInfo(env, ctx, rec.listingId);
     const link = l && await keynestLink(env, l);
     if (!link) return json({ ok: false, status: null, error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' });
-    return json(await keynestCheck(env, rec, link.keyId));
+    return json(await keynestCheck(env, link.keyId));
   }
   if (req.method === 'POST' && action === 'key') {
     if (!isMine) return deny();
@@ -1089,10 +1081,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
       const l = await listingInfo(env, ctx, rec.listingId);
       const link = l && await keynestLink(env, l);
       if (!link) return json({ error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' }, 400);
-      const chk = await keynestCheck(env, rec, link.keyId);
-      if (!chk.ok) return json({ error: chk.inStore
-        ? 'KeyNest hasn’t recorded a drop-off since this cleaning started. Hand the key in at the KeyNest store, then check again.'
-        : `KeyNest doesn’t show the key handed in yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
+      const chk = await keynestCheck(env, link.keyId);
+      if (!chk.ok) return json({ error: `KeyNest doesn’t show the key in the store yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
       rec.key = { mode: 'keynest', keyId: link.keyId, status: chk.status, lastMovement: chk.lastMovement, confirmedAt: nowIso() };
       return finish();
     }
@@ -1196,19 +1186,6 @@ async function handle(req, env, ctx) {
   const ip = req.headers.get('CF-Connecting-IP') || 'x';
 
   if (p === '/health') return json({ ok: true, mock: config(env).mock });
-
-  if (p.startsWith('/webhooks/keynest/') && req.method === 'POST') {
-    // KeyNest DROPPED events: remember when each key was last handed in (backs up the status check).
-    if (!safeEqual(p.split('/')[3] || '', await webhookKeyFor(env, 'keynest'))) return new Response('unauthorised', { status: 401 });
-    const body = await req.json().catch(() => ({}));
-    if (String(body.EventName || '').toUpperCase() === 'DROPPED' && body.KeyId) {
-      const drops = (await env.STORE.get('keynestDrops', 'json')) || {};
-      drops[String(body.KeyId)] = new Date(knTime(body.WhenHappened) || Date.now()).toISOString();
-      await env.STORE.put('keynestDrops', JSON.stringify(drops));
-      console.log('[keynest] dropped', body.KeyName || body.KeyId);
-    }
-    return new Response('ok');
-  }
 
   if (p.startsWith('/webhooks/guesty/') && req.method === 'POST') {
     const expectedKey = (await hmac(await secretKey(env), 'webhook')).slice(0, 32);

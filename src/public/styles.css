@@ -639,8 +639,6 @@ button, .btn, .row.tap, .dbtn { touch-action: manipulation; }
 .confirm-box p { margin: 6px 0 0; font-size: 13px; }
 .confirm-box .form-actions { margin-top: 12px; }
 .confirm-box .form-actions .btn { margin-top: 0; }
-.kn-hook { margin-top: 14px; font-size: 13px; }
-.kn-hook code { word-break: break-all; }
 
 /* Properties: KeyNest flats that aren't linked */
 .warn-banner { background: var(--out-soft); color: var(--ink); border: 1px solid color-mix(in srgb, var(--out) 25%, transparent); line-height: 1.7; }
