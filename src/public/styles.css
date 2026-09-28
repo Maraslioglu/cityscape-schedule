@@ -729,6 +729,11 @@ button.metric:disabled { cursor: default; }
 .dt-tick { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 12px; background: var(--accent-soft); color: var(--accent); }
 .dt-checks li.no .dt-tick { background: var(--line-2); color: var(--ink-3); }
 .dt-code { font-size: 16px; letter-spacing: .08em; }
+.dt-moves { list-style: none; margin: 4px 0 0; padding: 0; }
+.dt-moves li { display: grid; grid-template-columns: 110px 90px 1fr; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line-2); font-size: 13.5px; }
+.dt-moves b { color: var(--ink); }
+.kn-hook { margin-top: 14px; font-size: 13px; }
+.kn-hook code { word-break: break-all; }
 @media (max-width: 600px) { .dt-grid { grid-template-columns: 120px 1fr; } }
 @media print { .side { display: none !important; } body { padding-left: 0; } }
 @media (max-width: 760px) {

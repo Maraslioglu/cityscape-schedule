@@ -292,7 +292,8 @@
       <div class="set-actions" id="kn-actions">${!live || !k.flats.length ? '' : !knEdit
         ? '<button class="btn" id="kn-edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>Edit links</button><span class="muted">Locked to prevent accidental changes.</span>'
         : `<span class="edit-note">Editing — changes aren’t saved until you confirm.</span><span class="spacer"></span><button class="btn" id="kn-cancel">Cancel</button><button class="btn primary" id="kn-review" ${changes.length ? '' : 'disabled'}>Review ${changes.length || ''} change${changes.length === 1 ? '' : 's'}</button>`}</div>
-      <div id="kn-confirm"></div>`;
+      <div id="kn-confirm"></div>
+      ${k.webhookUrl ? `<details class="muted kn-hook"><summary>Key movement record ${k.lastHook ? `· last message from KeyNest ${esc(fmtWhen(k.lastHook.at))}` : '· no messages from KeyNest yet'}</summary>To record when keys are collected and dropped off (shown in each cleaning’s details), add this webhook address in KeyNest: <code>${esc(k.webhookUrl)}</code></details>` : ''}`;
     const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
     on('kn-edit', () => { knEdit = true; knDraft = {}; renderKeynest(); });
     on('kn-cancel', () => { knEdit = false; knDraft = {}; renderKeynest(); });
@@ -607,6 +608,7 @@
   let holdMs = 3000;
   const ACTIVE = ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key'];
   const fmtClock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
+  const londonDay = (iso) => new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }); // YYYY-MM-DD
   const fmtDur = (ms) => {
     const s = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -1303,6 +1305,12 @@
         : c.key && c.key.mode === 'lockbox' ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>`
         : c.key && c.key.mode === 'keynest' ? `<p>Key in KeyNest ✓ (${esc(c.key.status || 'in store')}) · checked ${t(c.key.confirmedAt)}</p>`
         : `<p class="warn">Key not returned yet (${esc(c.keyMode === 'keynest' ? 'KeyNest' : 'lockbox')}).</p>`;
+      // What KeyNest recorded for this flat's key around the cleaning (from its webhook): who collected it and when it came back.
+      const KN_EV = { COLLECTED: 'Collected', DROPPED: 'Dropped off', HANDOVER: 'Handed over' };
+      const moveWhen = (iso) => (londonDay(iso) === c.date ? '' : `${WD_SHORT.format(D(londonDay(iso)))} `) + fmtClock(iso);
+      const moves = !r.keyMoves ? '' : r.keyMoves.length
+        ? `<ul class="dt-moves">${r.keyMoves.map((m) => `<li><b>${esc(KN_EV[m.event] || m.event.charAt(0) + m.event.slice(1).toLowerCase())}</b><span>${esc(moveWhen(m.at))}</span><span class="muted">${esc([m.who, m.store].filter(Boolean).join(' · '))}</span></li>`).join('')}</ul>`
+        : '<p class="muted">KeyNest recorded no movements of this key around the cleaning (perhaps a spare key was used).</p>';
       const guesty = c.guesty === 'updated' ? 'Marked clean ✓' : c.guesty === 'failed' ? '<span class="warn">Couldn’t update Guesty</span>' : c.guesty === 'preview' ? 'Sample data (not sent)' : c.guesty === 'off' ? 'Turned off' : c.status === 'completed' ? 'Sending…' : '—';
       $('detail-body').innerHTML = `
         <div class="sh-head"><div><h2>${esc(c.label)} <span class="muted dt-bld">· ${esc(c.building)}</span></h2><div class="sh-sub">${esc(fmtDay(c.date))} · ${esc(c.cleanerName)}</div></div><button class="btn sq" data-close-detail aria-label="Close">✕</button></div>
@@ -1321,7 +1329,7 @@
         <h3 class="sh-h3">Checklist · ${(c.checklist || []).length}/${defs.length}</h3>
         <ul class="dt-checks">${checks}</ul>
         <h3 class="sh-h3">Key</h3>
-        ${key}
+        ${key}${moves}
         <h3 class="sh-h3">Videos &amp; photos</h3>
         ${(c.media || []).length ? mediaTiles(c.media) : '<p class="muted">None uploaded.</p>'}
         <h3 class="sh-h3">Damage reported during this clean</h3>

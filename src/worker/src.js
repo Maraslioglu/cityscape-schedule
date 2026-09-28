@@ -698,6 +698,54 @@ async function keynestCheck(env, keyId) {
   return { ok: KEYNEST_IN.test(k.status), status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
 }
 
+// KeyNest webhook: every key movement (COLLECTED, DROPPED, HANDOVER…) is kept as a record, shown in each cleaning's details.
+// It doesn't decide anything: completing only needs the key to be in the store.
+const webhookKeyFor = async (env, name) => (await hmac(await secretKey(env), name)).slice(0, 32);
+const KN_KEEP_DAYS = 120;
+const londonOffsetMs = (t) => {
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(t));
+  const g = (k) => Number(p.find((x) => x.type === k).value);
+  return Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute')) - Math.floor(t / 60e3) * 60e3;
+};
+// KeyNest times have no time zone ("2026-09-27T16:08:19.89" or "27/09/2026 16:08:19"). Read them as London time or
+// UTC, whichever is nearer to when the message arrived; if the time can't be read, use the arrival time.
+function knTime(s, received) {
+  s = String(s || '');
+  if (/[zZ]$|[+-]\d\d:?\d\d$/.test(s) && Date.parse(s)) return Date.parse(s);
+  const iso = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?/.exec(s), uk = /^(\d\d)\/(\d\d)\/(\d{4}) (\d\d):(\d\d)(?::(\d\d))?/.exec(s);
+  const utc = iso ? Date.UTC(+iso[1], iso[2] - 1, +iso[3], +iso[4], +iso[5], +(iso[6] || 0))
+    : uk ? Date.UTC(+uk[3], uk[2] - 1, +uk[1], +uk[4], +uk[5], +(uk[6] || 0)) : NaN;
+  if (!Number.isFinite(utc)) return received;
+  const london = utc - londonOffsetMs(utc);
+  return Math.abs(london - received) < Math.abs(utc - received) ? london : utc;
+}
+async function keynestRecord(env, b) {
+  const now = Date.now();
+  const event = String(b.EventName || '').toUpperCase().replace(/[^A-Z_]/g, '').slice(0, 30);
+  await env.STORE.put('keynestHook', JSON.stringify({ at: new Date(now).toISOString(), event: event || null })); // shown in Settings
+  if (!event || !b.KeyId) return;
+  const s = (v) => String(v ?? '').trim().slice(0, 120);
+  const holder = (st) => (/^In Use\s*\((.+)\)$/i.exec(s(st)) || [])[1] || '';
+  // Who: the person now holding the key; for a drop-off, the person who had it.
+  const who = event === 'DROPPED' ? holder(b.PreviousStatus) : s(b.CurrentUserName) || holder(b.CurrentStatus);
+  const move = { event, at: new Date(knTime(b.WhenHappened, now)).toISOString(), who, store: s(b.StoreName), status: s(b.CurrentStatus) };
+  const id = s(b.KeyId);
+  const moves = (await env.STORE.get('keynestMoves', 'json')) || {};
+  moves[id] = [...(moves[id] || []).filter((m) => now - Date.parse(m.at) < KN_KEEP_DAYS * 864e5), move]
+    .sort((x, y) => x.at.localeCompare(y.at)).slice(-100);
+  await env.STORE.put('keynestMoves', JSON.stringify(moves));
+  console.log('[keynest]', event.toLowerCase(), s(b.KeyName) || id);
+}
+// The KeyNest movements of this flat's key from 6 hours before the cleaning started to 3 hours after it finished.
+async function keyMovesFor(env, ctx, rec) {
+  if (rec.keyMode !== 'keynest') return null;
+  let keyId = rec.key && rec.key.keyId;
+  if (!keyId) { try { const l = await listingInfo(env, ctx, rec.listingId); keyId = l && (await keynestLink(env, l) || {}).keyId; } catch (_) { /* KeyNest down: no record */ } }
+  if (!keyId) return [];
+  const from = Date.parse(rec.startedAt) - 6 * 3600e3, to = Date.parse(rec.completedAt || rec.cancelledAt || nowIso()) + 3 * 3600e3;
+  return (((await env.STORE.get('keynestMoves', 'json')) || {})[keyId] || []).filter((m) => { const t = Date.parse(m.at); return t >= from && t <= to; });
+}
+
 // Admin and User roles run the operation: settings & integrations, assigning cleanings. Supervisors and cleaners don't.
 const isManager = (u) => Boolean(u && (u.role === 'admin' || u.role === 'user'));
 
@@ -721,9 +769,11 @@ async function keynestAdminApi(req, env, ctx, me, parts) {
   if (!isManager(me)) return json({ error: 'Only Admins and Users can change KeyNest settings.' }, 403);
   const links = (await env.STORE.get('keynestLinks', 'json')) || {};
   if (req.method === 'GET') {
+    const base = (env.PUBLIC_URL || '').replace(/\/$/, '');
     const snap = await getSnapshot(env, ctx);
     const flats = [...listingMap(snap.listings, config(env), allowBuildingFor(me)).values()].filter((l) => l.keyMode === 'keynest');
-    const out = { connected: Boolean(env.KEYNEST_API_KEY), keys: [], flats: [], error: null };
+    const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null,
+      lastHook: await env.STORE.get('keynestHook', 'json'), keys: [], flats: [], error: null };
     if (out.connected) { try { out.keys = await keynestKeys(env, true); } catch (e) { out.error = e.userMessage || e.message; } }
     for (const l of flats) {
       let link = null; try { link = await keynestLink(env, l); } catch (_) { /* shown via out.error */ }
@@ -1099,7 +1149,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
   }
   if (req.method === 'GET') {
     if (!isMine && !(can(me, 'view_cleaning') && inScope(me, rec.building))) return deny();
-    return json({ cleaning: await withMedia(env, rec), checklist: CHECKLIST, holdMs: HOLD_MS });
+    return json({ cleaning: await withMedia(env, rec), keyMoves: await keyMovesFor(env, ctx, rec), checklist: CHECKLIST, holdMs: HOLD_MS });
   }
   return json({ error: 'Not supported' }, 405);
 }
@@ -1186,6 +1236,12 @@ async function handle(req, env, ctx) {
   const ip = req.headers.get('CF-Connecting-IP') || 'x';
 
   if (p === '/health') return json({ ok: true, mock: config(env).mock });
+
+  if (p.startsWith('/webhooks/keynest/') && req.method === 'POST') {
+    if (!safeEqual(p.split('/')[3] || '', await webhookKeyFor(env, 'keynest'))) return new Response('unauthorised', { status: 401 });
+    await keynestRecord(env, await req.json().catch(() => ({})));
+    return new Response('ok');
+  }
 
   if (p.startsWith('/webhooks/guesty/') && req.method === 'POST') {
     const expectedKey = (await hmac(await secretKey(env), 'webhook')).slice(0, 32);
