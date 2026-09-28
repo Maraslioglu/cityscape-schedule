@@ -1,11 +1,12 @@
 // Runs the Cityscape Schedule app (worker.js) on Railway with Node 20+.
 // Everything is stored on the Railway volume at /data:
 //   /data/store.json      logins, users, cleanings, damage reports, Guesty token, pre-loaded bookings
-//   /data/media/          cleaning videos and photos (original upload, then a smaller copy for playback)
+//   /data/media/          cleaning videos and photos: the untouched original, plus a copy for quick playback
 import http from 'node:http';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import worker from './worker.js';
@@ -17,7 +18,14 @@ const MEDIA = `${DIR}/media`;
 fs.mkdirSync(MEDIA, { recursive: true });
 const MAX_FILE = 20 * 1024 ** 3;          // 20 GB per file — no practical limit on video length
 const MAX_CHUNK = 16 * 1024 ** 2;         // browser sends 8 MB pieces; this is the hard cap per request
+const FREE_MARGIN = 3 * 1024 ** 3;        // refuse new uploads when the disk would get within 3 GB of full
 const HAS_FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0;
+const HAS_FFPROBE = spawnSync('ffprobe', ['-version']).status === 0;
+// HDR videos (iPhone default) need tone mapping, or the playback copy looks washed out.
+const HAS_ZSCALE = HAS_FFMPEG && /\bzscale\b/.test(spawnSync('ffmpeg', ['-hide_banner', '-filters'], { encoding: 'utf8' }).stdout || '');
+// Full-quality originals of cleaning videos/photos are deleted after this many days (0 = keep forever).
+// Damage-report media is never deleted. The playback copy is kept.
+const KEEP_ORIGINAL_DAYS = Number(process.env.KEEP_ORIGINAL_DAYS ?? 30);
 
 // ---------------- simple key-value storage saved to disk ----------------
 let data = {};
@@ -26,8 +34,10 @@ let saveTimer = null;
 const save = () => {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    fs.writeFileSync(FILE + '.tmp', JSON.stringify(data));
-    fs.renameSync(FILE + '.tmp', FILE);
+    try {
+      fs.writeFileSync(FILE + '.tmp', JSON.stringify(data));
+      fs.renameSync(FILE + '.tmp', FILE);
+    } catch (e) { console.log('[store] could not save', e.message); } // e.g. disk full: keep running, retry on next change
   }, 200);
 };
 const STORE = {
@@ -92,12 +102,14 @@ async function check(req, body) {
   if (r.status === 401) return { status: 401 };
   return { status: r.status, ...(await r.json().catch(() => ({}))) };
 }
+// Only plain video/image types are ever stored or sent back (never SVG/XML/HTML, which a browser could run as a page).
+const safeMediaType = (t) => { t = String(t || '').toLowerCase().slice(0, 60); return /^(video|image)\/[\w.+-]+$/.test(t) && !/svg|xml|html/.test(t) ? t : ''; };
 const fileFor = (m, variant) => path.join(MEDIA, variant === 'thumb' ? `${m.id}.thumb.jpg` : variant === 'orig' ? `${m.id}.orig` : m.file || `${m.id}.orig`);
 
 // ---------------- compression queue (one job at a time) ----------------
 const queue = [];
 let working = false;
-function enqueue(id) { queue.push(id); pump(); }
+function enqueue(id, first = false) { if (first) queue.unshift(id); else queue.push(id); pump(); } // photos go first: they take seconds
 async function pump() {
   if (working) return;
   const id = queue.shift();
@@ -109,49 +121,140 @@ async function pump() {
 }
 function run(args) {
   return new Promise((resolve) => {
-    const p = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn('ffmpeg', ['-hide_banner', '-nostdin', ...args], { stdio: ['ignore', 'ignore', 'pipe'] });
+    try { os.setPriority(p.pid, 15); } catch (_) {} // low priority, so the app stays quick while a video converts
     let err = '';
     p.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
+    p.on('error', (e) => resolve({ code: -1, err: e.message }));
     p.on('close', (code) => resolve({ code, err }));
   });
 }
-function probeDuration(file) {
-  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { encoding: 'utf8' });
-  const d = parseFloat(r.stdout);
-  return Number.isFinite(d) ? Math.round(d) : null;
+// What was actually uploaded: resolution (as shown, i.e. after the phone's rotation), frame rate, codec, HDR.
+function probe(file) {
+  if (!HAS_FFPROBE) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const p = spawn('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', file], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.on('error', () => resolve(null));
+    p.on('close', () => {
+      let j; try { j = JSON.parse(out); } catch (_) { return resolve(null); }
+      const v = (j.streams || []).find((s) => s.codec_type === 'video');
+      if (!v || !v.width) return resolve(null);
+      let rot = Number(v.tags && v.tags.rotate) || 0;
+      for (const sd of v.side_data_list || []) if (sd.rotation != null) rot = Number(sd.rotation);
+      const turned = Math.abs(rot) % 180 === 90;
+      const [n, d] = String(v.avg_frame_rate || v.r_frame_rate || '0/1').split('/').map(Number);
+      const duration = Number(j.format && j.format.duration);
+      resolve({
+        width: turned ? v.height : v.width, height: turned ? v.width : v.height,
+        fps: d && n ? Math.round((n / d) * 100) / 100 : null, codec: v.codec_name || null,
+        bitrate: Number(v.bit_rate || (j.format && j.format.bit_rate)) || null,
+        hdr: ['arib-std-b67', 'smpte2084'].includes(v.color_transfer),
+        duration: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
+      });
+    });
+  });
 }
 async function processMedia(id) {
   const m = await getMeta(id);
   if (!m) return;
   const orig = fileFor(m, 'orig');
+  if (!m.origType) m.origType = m.type || '';
+  if (!m.info) m.info = await probe(orig);
+  if (m.info && m.info.duration) m.duration = m.info.duration;
+  m.hasOrig = true; // the original is never replaced; only the retention sweep removes it, after KEEP_ORIGINAL_DAYS
   if (!HAS_FFMPEG) { Object.assign(m, { status: 'ready', file: `${m.id}.orig` }); await putMeta(m); return; }
   m.status = 'processing'; await putMeta(m);
+  const started = Date.now();
   if (m.kind === 'video') {
-    // A smaller copy for quick playback: 720p, H.264, starts playing before it has fully loaded.
+    // Playback copy: 1080p H.264 at high quality, a keyframe every second so pausing and scrubbing are precise,
+    // and it starts playing before it has fully loaded. Managers can still open the untouched original.
     const out = path.join(MEDIA, `${m.id}.mp4`);
-    const r = await run(['-y', '-i', orig, '-vf', "scale='min(1280,iw)':-2", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
-      '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', out]);
-    await run(['-y', '-ss', '1', '-i', orig, '-frames:v', '1', '-vf', "scale='min(640,iw)':-2", path.join(MEDIA, `${m.id}.thumb.jpg`)]);
+    const hdr = Boolean(m.info && m.info.hdr);
+    const vf = ["scale=w='if(gt(iw,ih),-2,min(1080,iw))':h='if(gt(iw,ih),min(1080,ih),-2)':flags=lanczos"];
+    if (hdr && HAS_ZSCALE) vf.push('zscale=t=linear:npl=100', 'format=gbrpf32le', 'zscale=p=bt709', 'tonemap=tonemap=hable:desat=0', 'zscale=t=bt709:m=bt709:r=tv');
+    vf.push('format=yuv420p');
+    const args = (audio) => ['-y', '-i', orig, '-map', '0:v:0', ...(audio ? ['-map', '0:a:0?'] : []), '-vf', vf.join(','),
+      '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-profile:v', 'high', '-force_key_frames', 'expr:gte(t,n_forced*1)',
+      ...(hdr ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'] : []),
+      ...(audio ? ['-c:a', 'aac', '-b:a', '128k', '-ac', '2'] : ['-an']), '-movflags', '+faststart', '-f', 'mp4', out + '.part'];
+    let r = await run(args(true));
+    if (r.code !== 0) r = await run(args(false)); // e.g. an audio format ffmpeg can't read: keep the picture at least
     if (r.code === 0) {
-      m.duration = probeDuration(out);
+      await fsp.rename(out + '.part', out);
+      const thumb = path.join(MEDIA, `${m.id}.thumb.jpg`);
+      await run(['-y', '-ss', '1', '-i', out, '-frames:v', '1', '-vf', "scale='min(1280,iw)':-2", '-q:v', '3', thumb]);
+      if (!fs.existsSync(thumb)) await run(['-y', '-i', out, '-frames:v', '1', '-vf', "scale='min(1280,iw)':-2", '-q:v', '3', thumb]); // under 1 second long
       m.file = `${m.id}.mp4`; m.type = 'video/mp4'; m.status = 'ready';
       m.compressedSize = fs.statSync(out).size;
-      if (process.env.KEEP_ORIGINALS !== '1') await fsp.rm(orig, { force: true });
     } else {
+      await fsp.rm(out + '.part', { force: true });
       console.log('[media] video conversion failed, keeping original', r.err.slice(-300));
       m.file = `${m.id}.orig`; m.status = 'ready';
     }
   } else {
     const out = path.join(MEDIA, `${m.id}.jpg`);
-    const r = await run(['-y', '-i', orig, '-vf', "scale='min(2000,iw)':-2", '-q:v', '4', out]);
-    await run(['-y', '-i', orig, '-vf', "scale='min(640,iw)':-2", '-q:v', '5', path.join(MEDIA, `${m.id}.thumb.jpg`)]);
-    if (r.code === 0) {
-      m.file = `${m.id}.jpg`; m.type = 'image/jpeg'; m.status = 'ready';
-      if (process.env.KEEP_ORIGINALS !== '1') await fsp.rm(orig, { force: true });
-    } else { m.file = `${m.id}.orig`; m.status = 'ready'; }
+    const r = await run(['-y', '-i', orig, '-vf', "scale='min(2560,iw)':-2", '-q:v', '2', out]);
+    await run(['-y', '-i', orig, '-vf', "scale='min(640,iw)':-2", '-q:v', '4', path.join(MEDIA, `${m.id}.thumb.jpg`)]);
+    if (r.code === 0) { m.file = `${m.id}.jpg`; m.type = 'image/jpeg'; m.status = 'ready'; m.compressedSize = fs.statSync(out).size; }
+    else { m.file = `${m.id}.orig`; m.status = 'ready'; }
   }
   await putMeta(m);
-  console.log(`[media] ${m.kind} ${m.id} ready (${Math.round(m.size / 1e6)} MB → ${Math.round((m.compressedSize || m.size) / 1e6)} MB)`);
+  const i = m.info;
+  console.log(`[media] ${m.kind} ${m.id} ready in ${Math.round((Date.now() - started) / 1000)}s: original ${Math.round(m.size / 1e6)} MB` +
+    (i ? ` ${i.width}x${i.height} ${i.codec || ''}${i.fps ? ' ' + i.fps + 'fps' : ''}${i.hdr ? ' HDR' : ''}${i.bitrate ? ' ' + Math.round(i.bitrate / 1e5) / 10 + ' Mb/s' : ''}` : '') +
+    ` → copy ${Math.round((m.compressedSize || m.size) / 1e6)} MB`);
+}
+
+// An original can be deleted once it's safe to: fully uploaded and converted, not damage evidence, and its
+// playback copy exists (so the cleaning still has a video).
+const freeBytes = () => { try { const s = fs.statfsSync(MEDIA); return s.bavail * s.bsize; } catch (_) { return Infinity; } };
+function originalDeletable(m) {
+  return m && m.uploaded && m.status === 'ready' && m.purpose !== 'damage' && m.file && m.file !== `${m.id}.orig`
+    && fs.existsSync(path.join(MEDIA, m.file)) && fs.existsSync(path.join(MEDIA, `${m.id}.orig`));
+}
+async function dropOriginal(m, why) {
+  await fsp.rm(path.join(MEDIA, `${m.id}.orig`), { force: true });
+  const live = await getMeta(m.id);
+  if (live) { live.hasOrig = false; live.origDeletedAt = new Date().toISOString(); await putMeta(live); }
+  console.log(`[media] original of ${m.kind} ${m.id} deleted: ${why}`);
+}
+// When the disk runs low, delete the oldest deletable originals early rather than refusing cleaners' uploads.
+const LOW_WATER = FREE_MARGIN + 5 * 1024 ** 3;
+let warnedLow = 0;
+async function freeSpace(need = LOW_WATER) {
+  if (freeBytes() >= need) return;
+  const oldest = Object.keys(data).filter((k) => k.startsWith('media:'))
+    .map((k) => { try { return JSON.parse(data[k].v); } catch (_) { return null; } })
+    .filter(originalDeletable).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  for (const m of oldest) {
+    if (freeBytes() >= need) break;
+    await dropOriginal(m, 'disk nearly full');
+  }
+  if (Date.now() - warnedLow > 3600e3) { warnedLow = Date.now(); console.log(`[media] WARNING: disk nearly full (${Math.round(freeBytes() / 1e9)} GB free); originals are being deleted early. Grow the volume or lower KEEP_ORIGINAL_DAYS.`); }
+}
+
+// Delete full-quality originals of cleaning media after KEEP_ORIGINAL_DAYS, and uploads idle for 3 days.
+// Never touches damage-report media, or an original that is the only copy.
+async function sweepMedia() {
+  const now = Date.now();
+  for (const k of Object.keys(data)) {
+    if (!k.startsWith('media:')) continue;
+    let m; try { m = JSON.parse(data[k].v); } catch (_) { continue; }
+    const age = now - Date.parse(m.createdAt || 0);
+    if (!m.uploaded) {
+      if (now - Date.parse(m.lastChunkAt || m.createdAt || 0) > 3 * 864e5 && !(await getMeta(m.id) || {}).busy) {
+        await fsp.rm(path.join(MEDIA, `${m.id}.orig`), { force: true });
+        metaCache.delete(m.id); await STORE.delete(k);
+        console.log(`[media] removed abandoned upload ${m.id}`);
+      }
+      continue;
+    }
+    if (!(KEEP_ORIGINAL_DAYS > 0) || age < KEEP_ORIGINAL_DAYS * 864e5 || !originalDeletable(m)) continue;
+    await dropOriginal(m, `older than ${KEEP_ORIGINAL_DAYS} days`);
+  }
+  await freeSpace();
 }
 
 // ---------------- media routes ----------------
@@ -167,9 +270,14 @@ async function mediaRoute(req, res, url) {
     const c = await check(req, { mode: 'upload', purpose: body.purpose, ownerId: body.ownerId, listingId: body.listingId });
     if (c.status === 401) return sendJson(res, 401, { error: 'Not signed in' });
     if (!c.ok) return sendJson(res, 403, { error: 'You can’t upload for this right now.' });
+    await freeSpace(size + LOW_WATER);
+    if (freeBytes() < size + FREE_MARGIN) {
+      console.log(`[media] refused ${Math.round(size / 1e6)} MB upload: only ${Math.round(freeBytes() / 1e9)} GB free`);
+      return sendJson(res, 507, { error: 'The server is out of space for videos. Please tell an admin.' });
+    }
     const m = {
       id: crypto.randomBytes(12).toString('hex'), kind, purpose: body.purpose, ownerId: body.ownerId || null, listingId: body.listingId || null,
-      building: c.building || null, name: String(body.name || kind).slice(0, 120), type: String(body.type || '').slice(0, 60), size,
+      building: c.building || null, name: String(body.name || kind).slice(0, 120), type: safeMediaType(body.type), size,
       received: 0, uploaded: false, status: 'uploading', byId: c.user.id, byName: c.user.name, createdAt: new Date().toISOString(),
     };
     await fsp.writeFile(fileFor(m, 'orig'), '');
@@ -185,48 +293,77 @@ async function mediaRoute(req, res, url) {
     if (me.status === 401) return sendJson(res, 401, { error: 'Not signed in' });
     if (!me.ok) return sendJson(res, 403, { error: 'Not allowed' });
 
-    if (req.method === 'GET' && !parts[3]) return sendJson(res, 200, { id: m.id, received: m.received, uploaded: m.uploaded, status: m.status });
+    if (req.method === 'GET' && !parts[3]) return sendJson(res, 200, { id: m.id, received: m.received, size: m.size, uploaded: m.uploaded, status: m.status, byMe: me.userId === m.byId, info: m.info || null });
 
     // Resumable upload: PUT /api/media/:id?offset=N with the next piece of the file as the body.
     if (req.method === 'PUT' && !parts[3]) {
       if (me.userId !== m.byId) { req.resume(); return sendJson(res, 403, { error: 'Only the person uploading can send this file.' }); }
-      if (m.uploaded) return sendJson(res, 200, { received: m.received, uploaded: true });
+      if (m.uploaded) { req.resume(); return sendJson(res, 200, { received: m.received, uploaded: true, info: m.info || null }); }
       const offset = Number(url.searchParams.get('offset'));
       if (offset !== m.received || m.busy) { req.resume(); return sendJson(res, 409, { received: m.received }); } // tells the phone where to carry on from
       m.busy = true;
       try {
-      const out = fs.createWriteStream(fileFor(m, 'orig'), { flags: 'a' });
-      let n = 0, tooBig = false;
+      const f = fileFor(m, 'orig');
+      // The file must end exactly where the phone continues. A restart mid-piece can leave extra bytes (drop them;
+      // the phone re-sends that piece) or a lost save can leave fewer (tell the phone where to carry on from).
+      const onDisk = fs.statSync(f).size;
+      if (onDisk < offset) { req.resume(); m.received = onDisk; await putMeta(m); return sendJson(res, 409, { received: onDisk }); }
+      if (onDisk > offset) await fsp.truncate(f, offset);
+      if (freeBytes() < MAX_CHUNK + 512 * 1024 ** 2) await freeSpace(MAX_CHUNK + FREE_MARGIN);
+      if (freeBytes() < MAX_CHUNK + 512 * 1024 ** 2) { req.resume(); return sendJson(res, 507, { received: offset, error: 'The server is out of space for videos. Please tell an admin.' }); }
+      const out = fs.createWriteStream(f, { flags: 'a' });
+      let n = 0, tooBig = false, writeErr = null;
+      out.on('error', (e) => { writeErr = e; });
       await new Promise((resolve) => {
-        req.on('data', (c) => { n += c.length; if (n > MAX_CHUNK || m.received + n > m.size) { tooBig = true; req.destroy(); } else out.write(c); });
+        req.on('data', (c) => { n += c.length; if (n > MAX_CHUNK || m.received + n > m.size) { tooBig = true; req.destroy(); } else if (!writeErr) out.write(c); });
         req.on('end', resolve); req.on('close', resolve); req.on('error', resolve);
       });
-      await new Promise((r) => out.end(r));
-      const actual = fs.statSync(fileFor(m, 'orig')).size;
+      await new Promise((r) => { if (writeErr) return r(); out.once('error', r); out.end(r); });
+      if (writeErr) {
+        console.log('[media] could not write upload', m.id, writeErr.message);
+        await fsp.truncate(f, offset).catch(() => {}); m.received = offset; await putMeta(m);
+        return sendJson(res, 507, { received: offset, error: 'The server couldn’t save the video. Please tell an admin.' });
+      }
+      const actual = fs.statSync(f).size;
       m.received = actual;
-      if (tooBig) { await fsp.truncate(fileFor(m, 'orig'), offset); m.received = offset; await putMeta(m); return sendJson(res, 413, { received: offset }); }
-      if (m.received >= m.size) { m.uploaded = true; m.status = 'queued'; }
+      m.lastChunkAt = new Date().toISOString();
+      if (tooBig) { await fsp.truncate(f, offset); m.received = offset; await putMeta(m); return sendJson(res, 413, { received: offset }); }
+      if (m.received >= m.size) {
+        m.uploaded = true; m.status = 'queued';
+        m.origType = m.type || '';
+        m.info = await probe(fileFor(m, 'orig')); // so the phone can warn straight away if the video is low quality
+      }
       await putMeta(m);
-      if (m.uploaded) enqueue(m.id);
-      return sendJson(res, 200, { received: m.received, uploaded: m.uploaded });
+      if (m.uploaded) enqueue(m.id, m.kind === 'photo');
+      return sendJson(res, 200, { received: m.received, uploaded: m.uploaded, info: m.info || null });
       } finally { m.busy = false; }
     }
   }
 
-  // Playback: GET /media/:id  and  /media/:id/thumb  (supports seeking)
+  // Playback: GET /media/:id, /media/:id/thumb and /media/:id/orig (the untouched full-quality upload); all support seeking
   if (req.method === 'GET' && parts[0] === 'media' && parts[1]) {
     const m = await getMeta(parts[1]);
     if (!m) { res.writeHead(404); return res.end('Not found'); }
     const c = await check(req, { mode: 'view', id: m.id });
     if (!c.ok) { res.writeHead(c.status === 401 ? 401 : 403); return res.end('Not allowed'); }
-    const variant = parts[2] === 'thumb' ? 'thumb' : 'main';
+    const variant = parts[2] === 'thumb' ? 'thumb' : parts[2] === 'orig' ? 'orig' : 'main';
+    if (variant === 'orig' && !m.uploaded) { res.writeHead(404); return res.end('Not found'); }
     let file = fileFor(m, variant);
-    if (variant === 'thumb' && !fs.existsSync(file)) { res.writeHead(404); return res.end(''); }
+    if (variant !== 'main' && !fs.existsSync(file)) { res.writeHead(404); return res.end(variant === 'orig' ? 'The full-quality original is no longer kept' : ''); }
     if (!fs.existsSync(file)) file = fileFor(m, 'orig');
     const stat = fs.statSync(file);
-    const type = variant === 'thumb' ? 'image/jpeg' : (m.type || (m.kind === 'video' ? 'video/mp4' : 'image/jpeg'));
-    const headers = { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff' };
-    if (url.searchParams.get('download') === '1') headers['Content-Disposition'] = `attachment; filename="${m.kind}-${m.id}${path.extname(file) || ''}"`;
+    const isOrig = file === fileFor(m, 'orig');
+    const origType = safeMediaType(m.origType || (m.file && m.file !== `${m.id}.orig` ? '' : m.type));
+    const type = variant === 'thumb' ? 'image/jpeg'
+      : isOrig ? (origType || (m.kind === 'video' ? 'video/mp4' : 'image/jpeg'))
+      : (safeMediaType(m.type) || (m.kind === 'video' ? 'video/mp4' : 'image/jpeg'));
+    const etag = `"${m.id}-${variant}-${stat.size}-${Math.round(stat.mtimeMs)}"`;
+    // Only whitelisted video/image types are sent (safeMediaType), so a file can't run as a page. (A CSP sandbox
+    // here would also stop the browser's own player loading the video when "Full quality" opens it in a tab.)
+    const headers = { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff', ETag: etag, 'Last-Modified': stat.mtime.toUTCString() };
+    const ext = isOrig ? (path.extname(m.name || '').toLowerCase().replace(/[^.a-z0-9]/g, '') || (m.kind === 'video' ? '.mov' : '.jpg')) : path.extname(file);
+    if (url.searchParams.get('download') === '1') headers['Content-Disposition'] = `attachment; filename="${m.kind}-${m.id}${isOrig ? '-original' : ''}${ext}"`;
+    if (req.headers['if-none-match'] === etag && !req.headers.range) { res.writeHead(304, headers); return res.end(); }
     const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
     if (range) {
       let start = range[1] ? Number(range[1]) : stat.size - Number(range[2]);
@@ -278,8 +415,18 @@ http.createServer(async (req, res) => {
   }
 }).listen(PORT, async () => {
   console.log(`Cityscape Schedule running on port ${PORT}${!process.env.GUESTY_CLIENT_ID ? ' (sample data)' : ''}${HAS_FFMPEG ? '' : ' — ffmpeg not installed, videos kept at full size'}`);
-  // Finish any uploads that were being compressed when the server last restarted.
-  for (const k of Object.keys(data)) if (k.startsWith('media:')) { const m = JSON.parse(data[k].v); if (m.uploaded && m.status !== 'ready') enqueue(m.id); }
+  console.log(`[media] ffmpeg ${HAS_FFMPEG ? 'yes' : 'no'}, ffprobe ${HAS_FFPROBE ? 'yes' : 'no'}, HDR tone mapping ${HAS_ZSCALE ? 'yes' : 'no'}, originals kept ${KEEP_ORIGINAL_DAYS > 0 ? KEEP_ORIGINAL_DAYS + ' days' : 'forever'}`);
+  // Finish any uploads that were being compressed when the server last restarted, and note which originals still exist.
+  for (const k of Object.keys(data)) {
+    if (!k.startsWith('media:')) continue;
+    const m = await getMeta(k.slice(6));
+    if (!m) continue;
+    if (m.uploaded && m.status !== 'ready') enqueue(m.id, m.kind === 'photo');
+    const has = Boolean(m.uploaded) && fs.existsSync(fileFor(m, 'orig'));
+    if (m.hasOrig !== has) { m.hasOrig = has; await putMeta(m); }
+  }
+  setTimeout(() => sweepMedia().catch((e) => console.log('[media] sweep failed', e.message)), 60e3);
+  setInterval(() => sweepMedia().catch((e) => console.log('[media] sweep failed', e.message)), 6 * 3600e3);
   const tick = () => worker.scheduled({}, env, ctx).catch((e) => console.log('[refresh]', e.message));
   setTimeout(tick, 1000);
   setInterval(tick, 5 * 60e3);

@@ -577,7 +577,9 @@
       cleanings = r.cleanings; checklistDef = r.checklist; holdMs = r.holdMs;
       decorateDay();
       renderActiveBar();
-      if (sheetListing) renderSheet();
+      // Only redraw the open panel if something in it changed: redrawing wipes what's being typed (lockbox code,
+      // damage description) and the damage form's upload list.
+      if (sheetListing && sheetMode === 'main' && sheetSig() !== lastSheetSig) renderSheet();
     } catch (_) { /* try again on the next tick */ }
   }
 
@@ -639,16 +641,28 @@
   }
   $('sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet' || e.target.closest('[data-close]')) closeSheet(); });
 
+  // "4K", "1080p"… from the uploaded video's shorter side (works for upright and sideways videos).
+  const qualityName = (m) => { const s = Math.min(m.width, m.height); return s >= 2160 ? '4K' : s >= 1080 ? '1080p' : s >= 720 ? '720p' : `${m.width}×${m.height}`; };
+  function videoBar(m) {
+    const bits = [];
+    if (m.width && m.height) bits.push(isLowQuality(m) ? `<span class="warn">Low quality · ${m.width}×${m.height}</span>` : `<span class="mt-q">${qualityName(m)}${m.hdr ? ' HDR' : ''}</span>`);
+    if (m.hasOrig) bits.push(`<a href="/media/${esc(m.id)}/orig" target="_blank" rel="noopener">Full quality</a>`, `<a href="/media/${esc(m.id)}/orig?download=1">Download original</a>`);
+    return bits.length ? `<div class="mt-bar">${bits.join('')}</div>` : '';
+  }
   function mediaTiles(media) {
     if (!media || !media.length) return '';
     return `<div class="media-grid">${media.map((m) => m.kind === 'video'
-      ? `<div class="mt video">${m.status === 'ready' ? `<video controls preload="none" playsinline poster="/media/${m.id}/thumb" src="/media/${m.id}"></video>` : `<div class="mt-wait">Processing video…</div>`}${m.duration ? `<span class="mt-d">${fmtDur(m.duration * 1000)}</span>` : ''}</div>`
-      : `<a class="mt photo" href="/media/${m.id}" target="_blank" rel="noopener"><img loading="lazy" src="/media/${m.id}/thumb" onerror="this.src='/media/${m.id}'" alt="Photo"></a>`).join('')}</div>`;
+      ? `<div class="mt video">${m.status === 'ready' ? `<video controls preload="none" playsinline poster="/media/${m.id}/thumb" src="/media/${m.id}"></video>` : `<div class="mt-wait">Processing video…</div>`}${m.duration ? `<span class="mt-d">${fmtDur(m.duration * 1000)}</span>` : ''}</div>${videoBar(m)}`
+      : `<a class="mt photo" href="/media/${m.id}${m.hasOrig ? '/orig' : ''}" target="_blank" rel="noopener"><img loading="lazy" src="/media/${m.id}/thumb" onerror="this.src='/media/${m.id}'" alt="Photo"></a>`).join('')}</div>`;
   }
 
+  let lastSheetSig = null;
+  const sheetSig = () => JSON.stringify([sheetListing, selected, forListing(sheetListing, selected).map((c) =>
+    [c.id, c.status, c.endedAt, c.guesty, c.checklist && c.checklist.length, c.key && c.key.mode, (c.media || []).map((m) => [m.id, m.status, m.hasOrig])])]);
   async function renderSheet() {
     const u = unitFor(sheetListing);
     if (!u) return;
+    if (sheetMode !== 'damage') lastSheetSig = sheetSig();
     const list = forListing(sheetListing, selected);
     const active = list.find((c) => ACTIVE.includes(c.status));
     const done = list.filter((c) => c.status === 'completed');
@@ -887,15 +901,24 @@
     keyPoll = setInterval(check, 20000);
   }
 
+  // Safari's own camera ("Take Video") records at about 480×360, whatever the iPhone's settings, and the
+  // Photo Library may re-encode. Filming in the Camera app and choosing the file from Files keeps full 4K.
+  const videoTip = (button) => `<details class="ev-tip"><summary>How to upload in full 4K quality</summary><ol>
+      <li>Film in the <b>Camera</b> app (Settings › Camera › Record Video: 4K at 30 fps).</li>
+      <li>In <b>Photos</b>, open the video, tap <b>Share</b> › <b>Save to Files</b>.</li>
+      <li>Here, tap <b>${button}</b> › <b>Choose File</b> and pick it.</li>
+    </ol><p>Avoid <b>Take Video</b> (very low quality) and <b>Photo Library</b> (may lower the quality).</p></details>`;
+  const isLowQuality = (i) => Boolean(i && i.width && i.height && Math.max(i.width, i.height) < 1920);
+  const lowQualityNote = (i) => `<span class="up-warn">Low quality (${i.width}×${i.height}). Please upload the original from Files for full quality.</span>`;
   function evidenceStep(a) {
     return `<div class="evidence">
       <div class="ev-head"><b>Almost done.</b> Record a video walking through the flat. <span class="req">Video required</span></div>
       <div class="ev-btns">
-        <label class="btn big primary file"><input type="file" accept="video/*" capture="environment" id="ev-rec"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>Record video</label>
-        <label class="btn file"><input type="file" accept="video/*" id="ev-pick">Choose a video</label>
+        <label class="btn big primary file"><input type="file" accept="video/*" id="ev-pick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>Upload walkthrough video</label>
         <label class="btn file"><input type="file" accept="image/*" multiple id="ev-photos">Add photos (optional)</label>
       </div>
-      <p class="ev-note">A video is preferred and needed to finish. Photos can be added as well. Keep this screen open until uploads finish.</p>
+      ${videoTip('Upload walkthrough video')}
+      <p class="ev-note">A video is needed to finish. Keep this screen open until uploads finish.</p>
       <div id="ev-list"></div>
       <button class="btn big primary" id="ev-finish" disabled>Finish cleaning</button>
     </div>`;
@@ -910,7 +933,6 @@
       }
       drawUploads(a);
     };
-    $('ev-rec').onchange = (e) => add(e.target.files, 'video');
     $('ev-pick').onchange = (e) => add(e.target.files, 'video');
     $('ev-photos').onchange = (e) => add(e.target.files, 'photo');
     $('ev-finish').onclick = async () => {
@@ -934,7 +956,8 @@
     list.innerHTML = mine.map(([k, u]) => `<div class="up ${u.error ? 'err' : u.done ? 'ok' : ''}" data-up="${k}">
       <span class="up-k">${u.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(u.file.name || u.kind)} · ${(u.file.size / 1e6).toFixed(u.file.size > 1e7 ? 0 : 1)} MB</span>
       <span class="up-s">${u.error ? esc(u.error) : u.done ? 'Uploaded ✓' : u.waiting ? 'Waiting for signal…' : Math.floor(u.progress * 100) + '%'}</span>
-      <span class="up-bar"><i style="transform:scaleX(${u.done ? 1 : u.progress})"></i></span></div>`).join('');
+      <span class="up-bar"><i style="transform:scaleX(${u.done ? 1 : u.progress})"></i></span>
+      ${u.kind === 'video' && isLowQuality(u.info) ? lowQualityNote(u.info) : ''}</div>`).join('');
     const hasVideo = mine.some(([, u]) => u.kind === 'video' && u.done);
     const busy = mine.some(([, u]) => !u.done && !u.error);
     const btn = $('ev-finish');
@@ -947,27 +970,57 @@
   async function holdWake() { try { if (!wakeLock && navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {} }
   function releaseWake() { if (!uploadsBusy() && wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; } }
 
+  // Uploads in progress, remembered on this phone so picking the same file again after the page reloads
+  // carries on where it stopped instead of starting a large video from zero. The server drops them after 3 days.
+  const savedUploads = () => { let s = {}; try { s = JSON.parse(store.get('cs_uploads') || '{}') || {}; } catch (_) {} for (const k of Object.keys(s)) if (!(Date.now() - s[k].at < 3 * 864e5)) delete s[k]; return s; };
+  const rememberUpload = (k, id) => { const s = savedUploads(); if (id) s[k] = { id, at: Date.now() }; else delete s[k]; store.set('cs_uploads', JSON.stringify(s)); };
+
   // Resumable upload in 8 MB pieces; carries on after signal drops.
   async function runUpload(key, redraw) {
     const u = uploads.get(key);
     const draw = () => { if (redraw) redraw(); else { const a = myActive(); if (a) drawUploads(a); } };
+    const rkey = [u.purpose, u.ownerId || u.listingId, u.file.name, u.file.size, u.file.lastModified || 0].join('|');
     holdWake();
     try {
-      const start = await send('POST', '/api/media', { kind: u.kind, purpose: u.purpose, ownerId: u.ownerId, listingId: u.listingId, name: u.file.name, size: u.file.size, type: u.file.type });
-      u.id = start.id;
-      const CH = start.chunk || 8 * 1024 * 1024;
-      let received = start.received || 0, fails = 0;
+      let CH = 8 * 1024 * 1024, received = 0, fails = 0;
+      const saved = savedUploads()[rkey];
+      if (saved && ![...uploads.values()].some((x) => x !== u && x.id === saved.id)) {
+        // Only start again from zero if the server says the earlier upload is gone; a bad signal just means retry.
+        for (let t = 0; ; t++) {
+          let r = null;
+          try { r = await fetch('/api/media/' + saved.id, { credentials: 'same-origin' }); } catch (_) {}
+          if (r && r.status === 401) { location.href = '/login'; throw new Error('signed out'); }
+          if (r && (r.status === 404 || r.status === 403)) break;
+          const s = r && r.ok ? await r.json().catch(() => null) : null;
+          if (s) { if (s.byMe && s.size === u.file.size) { u.id = s.id; received = s.uploaded ? u.file.size : s.received; u.info = s.info; } break; }
+          u.waiting = true; draw();
+          await new Promise((ok) => setTimeout(ok, Math.min(30000, 1000 * 2 ** Math.min(t + 1, 5))));
+        }
+        u.waiting = false;
+      }
+      if (!u.id) {
+        const start = await send('POST', '/api/media', { kind: u.kind, purpose: u.purpose, ownerId: u.ownerId, listingId: u.listingId, name: u.file.name, size: u.file.size, type: u.file.type });
+        u.id = start.id; CH = start.chunk || CH; received = start.received || 0;
+        rememberUpload(rkey, u.id);
+      }
+      u.progress = received / u.file.size; draw();
       while (received < u.file.size) {
         const end = Math.min(u.file.size, received + CH);
         const r = await putChunk(u.id, received, u.file.slice(received, end), (loaded) => { u.progress = (received + loaded) / u.file.size; draw(); });
-        if (r.ok) { received = r.received; fails = 0; u.waiting = false; u.progress = received / u.file.size; draw(); continue; }
-        if (r.status === 409 && typeof r.received === 'number') { received = r.received; continue; }
+        if (r.ok) { received = r.received; if (r.info) u.info = r.info; fails = 0; u.waiting = false; u.progress = received / u.file.size; draw(); continue; }
+        if (r.status === 409 && typeof r.received === 'number') {
+          if (r.received === received) await new Promise((ok) => setTimeout(ok, 1000)); // previous piece still being written
+          received = r.received; continue;
+        }
         if (r.status === 401 || r.status === 403) throw new Error('Upload not allowed — sign in again');
+        if (r.status === 404) { rememberUpload(rkey, null); throw new Error('Upload expired — please choose the video again'); }
+        if (r.status === 507) throw new Error('The server is out of space — please tell an admin');
         fails++; u.waiting = true; draw();
         await new Promise((ok) => setTimeout(ok, Math.min(30000, 1000 * 2 ** Math.min(fails, 5))));
-        try { const s = await getJSON('/api/media/' + u.id); received = s.received; } catch (_) {}
+        try { const s = await getJSON('/api/media/' + u.id); received = s.uploaded ? u.file.size : s.received; if (s.info) u.info = s.info; } catch (_) {}
       }
       u.done = true; u.progress = 1;
+      rememberUpload(rkey, null);
     } catch (e) { u.error = e.message || 'Upload failed'; }
     draw();
     releaseWake();
@@ -978,10 +1031,10 @@
       x.open('PUT', `/api/media/${id}?offset=${offset}`);
       x.setRequestHeader('Content-Type', 'application/octet-stream');
       x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
-      x.onload = () => { let b = {}; try { b = JSON.parse(x.responseText); } catch (_) {} resolve({ ok: x.status === 200, status: x.status, received: b.received }); };
+      x.onload = () => { let b = {}; try { b = JSON.parse(x.responseText); } catch (_) {} resolve({ ok: x.status === 200, status: x.status, received: b.received, info: b.info }); };
       x.onerror = () => resolve({ ok: false, status: 0 });
       x.ontimeout = () => resolve({ ok: false, status: 0 });
-      x.timeout = 120000;
+      x.timeout = 280000; // slow mobile signal; the server allows up to 5 minutes per piece
       x.send(blob);
     });
   }
@@ -998,10 +1051,11 @@
         <input id="dmg-where" type="text" placeholder="e.g. Bathroom, living room">
         <label>Evidence <span class="req">Video or photo required</span></label>
         <div class="ev-btns">
-          <label class="btn primary file"><input type="file" accept="video/*" capture="environment" id="dmg-rec">Record video</label>
+          <label class="btn primary file"><input type="file" accept="video/*" id="dmg-rec">Upload video</label>
           <label class="btn file"><input type="file" accept="image/*" capture="environment" id="dmg-cam">Take photo</label>
           <label class="btn file"><input type="file" accept="video/*,image/*" multiple id="dmg-pick">Choose files</label>
         </div>
+        ${videoTip('Upload video')}
         <div id="dmg-list"></div>
         <div class="form-msg" id="dmg-msg"></div>
         <button class="btn big primary" type="submit" id="dmg-send" disabled>Send report</button>
@@ -1009,7 +1063,7 @@
     const listingId = sheetListing;
     const keys = [];
     const draw = () => {
-      $('dmg-list') && ($('dmg-list').innerHTML = keys.map((k) => { const x = uploads.get(k); return `<div class="up ${x.error ? 'err' : x.done ? 'ok' : ''}"><span class="up-k">${x.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(x.file.name || x.kind)}</span><span class="up-s">${x.error ? esc(x.error) : x.done ? 'Uploaded ✓' : x.waiting ? 'Waiting for signal…' : Math.floor(x.progress * 100) + '%'}</span><span class="up-bar"><i style="transform:scaleX(${x.done ? 1 : x.progress})"></i></span></div>`; }).join(''));
+      $('dmg-list') && ($('dmg-list').innerHTML = keys.map((k) => { const x = uploads.get(k); return `<div class="up ${x.error ? 'err' : x.done ? 'ok' : ''}"><span class="up-k">${x.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(x.file.name || x.kind)}</span><span class="up-s">${x.error ? esc(x.error) : x.done ? 'Uploaded ✓' : x.waiting ? 'Waiting for signal…' : Math.floor(x.progress * 100) + '%'}</span><span class="up-bar"><i style="transform:scaleX(${x.done ? 1 : x.progress})"></i></span>${x.kind === 'video' && isLowQuality(x.info) ? lowQualityNote(x.info) : ''}</div>`; }).join(''));
       const ok = keys.some((k) => uploads.get(k).done), busy = keys.some((k) => { const x = uploads.get(k); return !x.done && !x.error; });
       if ($('dmg-send')) { $('dmg-send').disabled = !ok || busy; $('dmg-send').textContent = busy ? 'Uploading…' : 'Send report'; }
     };

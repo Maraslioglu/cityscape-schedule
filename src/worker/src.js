@@ -620,7 +620,12 @@ async function mediaReady(env, ids, kindWanted) {
   return out;
 }
 function publicMedia(m) {
-  return { id: m.id, kind: m.kind, status: m.status, name: m.name, size: m.size, duration: m.duration || null, createdAt: m.createdAt, by: m.byName };
+  const i = m.info || {};
+  return {
+    id: m.id, kind: m.kind, status: m.status, name: m.name, size: m.size, duration: m.duration || null, createdAt: m.createdAt, by: m.byName,
+    // What was actually uploaded, and whether the untouched original can still be opened at /media/:id/orig.
+    width: i.width || null, height: i.height || null, fps: i.fps || null, codec: i.codec || null, hdr: Boolean(i.hdr), hasOrig: Boolean(m.hasOrig),
+  };
 }
 async function withMedia(env, rec) {
   const media = [];
