@@ -1503,9 +1503,188 @@ async function damagesApi(req, env, ctx, me, parts, url) {
   return json({ damage: await withMedia(env, rec) });
 }
 
+// ---------------------------------------------------------------- maintenance tasks
+// Anyone can report an issue at a flat (with photos/videos). Admins and Users triage: priority, due date, repeating
+// schedule, cost, and who does it: a team member (any role) or a contractor (name + phone, no login). The person it's
+// assigned to, and supervisors of the building, move it along (In progress, Waiting, Done) and add notes. Marking a
+// repeating task done creates the next one. One list, the newest 2000 tasks.
+const MT_PRIORITY = ['urgent', 'high', 'normal', 'low'];
+const MT_STATUS = ['open', 'in_progress', 'waiting', 'done', 'cancelled'];
+const MT_UNITS = ['days', 'weeks', 'months', 'years'];
+const MT_WORD = { open: 'open', in_progress: 'in progress', waiting: 'waiting', done: 'done', cancelled: 'cancelled' };
+function addInterval(date, r) {
+  const d = new Date(date + 'T00:00:00Z');
+  if (r.unit === 'days' || r.unit === 'weeks') { d.setUTCDate(d.getUTCDate() + r.every * (r.unit === 'weeks' ? 7 : 1)); return d.toISOString().slice(0, 10); }
+  const months = r.every * (r.unit === 'years' ? 12 : 1);
+  const y = d.getUTCFullYear(), m = d.getUTCMonth() + months, day = d.getUTCDate();
+  const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate(); // 31 Jan + 1 month = 28/29 Feb, not 3 Mar
+  return new Date(Date.UTC(y, m, Math.min(day, last))).toISOString().slice(0, 10);
+}
+const realDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '') && new Date(v + 'T00:00:00Z').toISOString().slice(0, 10) === v;
+async function maintenanceApi(req, env, ctx, me, parts, url) {
+  const [, , , id, action] = parts; // /api/maintenance/:id/:action
+  const tasks = await loadList(env, 'maintenance');
+  const save = () => saveList(env, 'maintenance', tasks.slice(-2000));
+  const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await req.json().catch(() => ({}));
+  const manage = (t) => isManager(me) && inScope(me, t.building);
+  const mine = (t) => t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id;
+  const canSee = (t) => (inScope(me, t.building) && (isManager(me) || me.role === 'supervisor')) || t.reporterId === me.id || mine(t);
+  const canMove = (t) => manage(t) || mine(t) || (me.role === 'supervisor' && inScope(me, t.building));
+  const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
+  const link = (t) => `/?view=maintenance&task=${t.id}`;
+  const log = (t, txt, kind = 'event') => { t.log = [...(t.log || []), { id: newId(), at: nowIso(), byId: me.id, byName: me.name, kind, text: txt }].slice(-200); t.updatedAt = nowIso(); };
+  const shape = async (t) => ({ ...(await withMedia(env, t)), canManage: manage(t), canMove: canMove(t), overdue: Boolean(t.due && t.due < londonDate() && !['done', 'cancelled'].includes(t.status)) });
+  const who = (a) => (!a ? 'nobody' : a.type === 'contractor' ? `${a.name} (contractor)` : a.name);
+  // Who a task is for: a team member (any role, covering the building) or a contractor, remembered for next time.
+  async function readAssignee(a, t) {
+    if (!a || !a.type) return null;
+    if (a.type === 'user') {
+      const u = (await loadUsers(env)).find((x) => x.id === String(a.id) && x.active !== false);
+      if (!u || !coversBuilding(u, t.building)) throw userError('Pick someone who covers this building.', 400);
+      return { type: 'user', id: u.id, name: u.name };
+    }
+    const name = text(a.name, 80), phone = text(a.phone, 30).replace(/[^\d+ ()-]/g, ''), trade = text(a.trade, 60);
+    if (name.length < 2) throw userError('Give the contractor’s name.', 400);
+    if (phone.replace(/\D/g, '').length < 7) throw userError('Give the contractor’s phone number.', 400);
+    const book = (await env.STORE.get('contractors', 'json')) || [];
+    const k = normName(name);
+    const i = book.findIndex((c) => normName(c.name) === k);
+    const c = { name, phone, trade: trade || (i >= 0 ? book[i].trade : '') };
+    if (i >= 0) book[i] = { ...book[i], ...c }; else book.push({ id: newId(), ...c });
+    await env.STORE.put('contractors', JSON.stringify(book.slice(-300)));
+    return { type: 'contractor', ...c };
+  }
+  const readRepeat = (r) => {
+    if (!r || !r.every) return null;
+    const every = Math.round(Number(r.every));
+    if (!(every >= 1 && every <= 60) || !MT_UNITS.includes(r.unit)) throw userError('Repeats every 1–60 days, weeks, months or years.', 400);
+    return { every, unit: r.unit };
+  };
+  const tellAssignee = async (t) => { if (t.assignee && t.assignee.type === 'user' && t.assignee.id !== me.id) await notify(env, ctx, [t.assignee.id], { type: 'maintenance', title: `Maintenance for you · ${t.label}`, body: t.title, url: link(t), tag: `mt-${t.id}` }); };
+
+  if (!id && req.method === 'GET') {
+    const status = url.searchParams.get('status') || 'open', listingId = url.searchParams.get('listingId');
+    const out = [];
+    for (const t of tasks) {
+      if (!canSee(t) || (listingId && t.listingId !== listingId)) continue;
+      const done = ['done', 'cancelled'].includes(t.status);
+      if ((status === 'open' && done) || (status === 'done' && !done)) continue;
+      out.push(await shape(t));
+    }
+    const open = tasks.filter((t) => canSee(t) && !['done', 'cancelled'].includes(t.status));
+    const late = (t) => Boolean(t.due && t.due < londonDate());
+    // The sidebar badge: yours to do, plus (for Admins/Users) tasks nobody has yet and anything overdue.
+    const counts = { mine: open.filter(mine).length, unassigned: isManager(me) ? open.filter((t) => !t.assignee).length : 0, overdue: open.filter(late).length,
+      badge: open.filter((t) => mine(t) || (isManager(me) && (!t.assignee || late(t)))).length };
+    return json({ tasks: out.reverse(), counts, canManage: isManager(me), contractors: isManager(me) ? ((await env.STORE.get('contractors', 'json')) || []) : [] });
+  }
+  if (id === 'people' && req.method === 'GET') {
+    if (!isManager(me)) return json({ error: 'Only Admins and Users assign maintenance.' }, 403);
+    const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
+    if (!l || !inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
+    const people = (await loadUsers(env)).filter((u) => u.active !== false && coversBuilding(u, l.building));
+    return json({ people: people.map((u) => ({ id: u.id, name: u.name, role: u.role })).sort((a, b) => a.name.localeCompare(b.name)) });
+  }
+  if (!id && req.method === 'POST') {
+    const l = await listingInfo(env, ctx, String(body.listingId || ''));
+    if (!l) return json({ error: 'Pick the flat.' }, 400);
+    if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
+    const title = text(body.title, 140);
+    if (title.length < 3) return json({ error: 'Say what needs fixing.' }, 400);
+    const t = {
+      id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
+      priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due: null, repeat: null, cost: null,
+      reporterId: me.id, reporterName: me.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
+      media: (await mediaReady(env, (body.mediaIds || []).map(String))).map((m) => m.id), log: [], damageId: body.damageId ? String(body.damageId) : null,
+    };
+    t.seriesId = t.id;
+    if (isManager(me)) { // triage details come from Admins and Users
+      t.assignee = await readAssignee(body.assignee, t);
+      if (body.due) { if (!realDate(body.due)) return json({ error: 'Pick a due date.' }, 400); t.due = body.due; }
+      t.repeat = readRepeat(body.repeat);
+      if (t.repeat && !t.due) t.due = londonDate();
+      if (body.cost !== undefined && body.cost !== null && body.cost !== '') t.cost = Math.max(0, Math.round(Number(body.cost) * 100) / 100) || null;
+    }
+    log(t, isManager(me) ? 'Created' : 'Reported');
+    if (t.assignee) log(t, `Assigned to ${who(t.assignee)}`);
+    tasks.push(t);
+    await save();
+    if (!isManager(me)) await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, me.id), { type: 'maintenance', title: `Maintenance reported · ${t.label}`, body: `${t.title} — ${me.name}`, url: link(t), tag: `mt-${t.id}` });
+    await tellAssignee(t);
+    console.log(`[maintenance] ${me.name} ${isManager(me) ? 'created' : 'reported'} "${t.title}" at ${t.label}`);
+    return json({ task: await shape(t) });
+  }
+  const t = tasks.find((x) => x.id === id);
+  if (!t || !canSee(t)) return json({ error: 'That task wasn’t found.' }, 404);
+  if (req.method === 'GET') return json({ task: await shape(t) });
+  if (req.method === 'PUT' && !action) {
+    if (!manage(t)) return json({ error: 'Only Admins and Users can change a task’s details.' }, 403);
+    const was = { assignee: who(t.assignee), due: t.due, priority: t.priority };
+    if (body.title !== undefined) { const v = text(body.title, 140); if (v.length < 3) return json({ error: 'Say what needs fixing.' }, 400); t.title = v; }
+    if (body.details !== undefined) t.details = text(body.details, 4000);
+    if (body.priority !== undefined && MT_PRIORITY.includes(body.priority)) t.priority = body.priority;
+    if (body.due !== undefined) { if (body.due && !realDate(body.due)) return json({ error: 'Pick a due date.' }, 400); t.due = body.due || null; }
+    if (body.repeat !== undefined) { t.repeat = readRepeat(body.repeat); if (t.repeat && !t.due) t.due = londonDate(); }
+    if (body.cost !== undefined) t.cost = body.cost === null || body.cost === '' ? null : Math.max(0, Math.round(Number(body.cost) * 100) / 100) || null;
+    const before = t.assignee;
+    if (body.assignee !== undefined) t.assignee = await readAssignee(body.assignee, t);
+    if (who(t.assignee) !== was.assignee) log(t, t.assignee ? `Assigned to ${who(t.assignee)}` : 'Unassigned');
+    if (t.due !== was.due) log(t, t.due ? `Due ${t.due}` : 'No due date');
+    if (t.priority !== was.priority) log(t, `Priority ${t.priority}`);
+    t.updatedAt = nowIso();
+    await save();
+    if (who(t.assignee) !== who(before)) await tellAssignee(t);
+    return json({ task: await shape(t) });
+  }
+  if (req.method === 'POST' && action === 'status') {
+    if (!canMove(t)) return json({ error: 'Only the person it’s assigned to, a supervisor of the building, or an Admin/User can change this.' }, 403);
+    const s = body.status;
+    if (!MT_STATUS.includes(s)) return json({ error: 'Pick a status.' }, 400);
+    if (s === 'cancelled' && !manage(t)) return json({ error: 'Only Admins and Users can cancel a task.' }, 403);
+    if (s === t.status) return json({ task: await shape(t) });
+    t.status = s;
+    t.doneAt = s === 'done' ? nowIso() : null; t.doneBy = s === 'done' ? me.name : null;
+    log(t, `Marked ${MT_WORD[s]}`);
+    let next = null;
+    if (s === 'done' && t.repeat && !tasks.some((x) => x.seriesId === t.seriesId && x.createdAt > t.createdAt)) {
+      // Repeating: the next one is due one interval after this one was due (or after today if it had no date).
+      next = { ...t, id: newId(), status: 'open', due: addInterval(t.due || londonDate(), t.repeat), doneAt: null, doneBy: null, media: [], cost: null,
+        createdAt: nowIso(), updatedAt: nowIso(), reporterId: me.id, reporterName: me.name, log: [], damageId: null };
+      log(next, `Repeats every ${t.repeat.every} ${t.repeat.every === 1 ? t.repeat.unit.replace(/s$/, '') : t.repeat.unit}: created when the last one was done`);
+      tasks.push(next);
+      log(t, `Next one due ${next.due}`);
+    }
+    await save();
+    if (s === 'done') {
+      const to = [...new Set([t.reporterId, ...(isManager(me) ? [] : await recipients(env, ['admin', 'user'], t.building, me.id))])].filter((x) => x && x !== me.id);
+      await notify(env, ctx, to, { type: 'maintenance', title: `Maintenance done · ${t.label}`, body: `${t.title} — ${me.name}`, url: link(t), tag: `mt-${t.id}` });
+    }
+    return json({ task: await shape(t), next: next ? await shape(next) : null });
+  }
+  if (req.method === 'POST' && action === 'notes') {
+    if (!canMove(t) && t.reporterId !== me.id) return json({ error: 'You can’t add notes to this task.' }, 403);
+    const txt = text(body.text, 2000), media = (await mediaReady(env, (body.mediaIds || []).map(String))).map((m) => m.id);
+    if (!txt && !media.length) return json({ error: 'Write a note or add a photo.' }, 400);
+    log(t, txt || `Added ${media.length} photo${media.length === 1 ? '' : 's'}/video${media.length === 1 ? '' : 's'}`, 'note');
+    t.media = [...new Set([...(t.media || []), ...media])];
+    await save();
+    const to = [t.reporterId, t.assignee && t.assignee.type === 'user' ? t.assignee.id : null].filter((x) => x && x !== me.id);
+    await notify(env, ctx, [...new Set(to)], { type: 'maintenance', title: `${me.name} added a note · ${t.label}`, body: (txt || t.title).slice(0, 140), url: link(t), tag: `mt-${t.id}` });
+    return json({ task: await shape(t) });
+  }
+  if (req.method === 'DELETE' && !action) {
+    if (!manage(t)) return json({ error: 'Only Admins and Users can delete tasks.' }, 403);
+    tasks.splice(tasks.indexOf(t), 1);
+    await save();
+    return json({ ok: true });
+  }
+  return json({ error: 'Not supported' }, 405);
+}
+
 // Used by server.mjs before accepting or serving media files.
 async function mediaAccess(env, ctx, me, body) {
   if (body.purpose === 'damage') return can(me, 'report_damage');
+  if (body.purpose === 'maintenance') return true; // anyone can report an issue at a flat in their buildings (checked below)
   if (body.purpose === 'cleaning') {
     const list = await loadList(env, 'cleanings');
     const c = list.find((x) => x.id === body.ownerId);
@@ -1618,13 +1797,14 @@ async function handle(req, env, ctx) {
   if (p.startsWith('/api/push/')) return pushApi(req, env, me, p.split('/'));
   if (p === '/api/assignments' || p === '/api/assignees') return assignmentsApi(req, env, ctx, me, url);
   if (p === '/api/forum' || p.startsWith('/api/forum/')) return forumApi(req, env, ctx, me, p.split('/'));
+  if (p === '/api/maintenance' || p.startsWith('/api/maintenance/')) return maintenanceApi(req, env, ctx, me, p.split('/'), url);
   // Internal checks used by server.mjs for uploads and playback (same-process only; not reachable from outside).
   if (p === '/api/internal/media-check' && req.headers.get('x-internal') === env.__INTERNAL_KEY) {
     const body = await req.json().catch(() => ({}));
     if (body.mode === 'upload') {
       if (!(await mediaAccess(env, ctx, me, body))) return json({ ok: false }, 403);
       let building = null;
-      if (body.purpose === 'damage') { const l = await listingInfo(env, ctx, String(body.listingId || '')); if (!l || !inScope(me, l.building)) return json({ ok: false }, 403); building = l.building; }
+      if (body.purpose === 'damage' || body.purpose === 'maintenance') { const l = await listingInfo(env, ctx, String(body.listingId || '')); if (!l || !inScope(me, l.building)) return json({ ok: false }, 403); building = l.building; }
       if (body.purpose === 'cleaning') { const c = (await loadList(env, 'cleanings')).find((x) => x.id === body.ownerId); building = c && c.building; }
       return json({ ok: true, user: { id: me.id, name: me.name }, building });
     }

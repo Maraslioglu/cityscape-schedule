@@ -16,14 +16,14 @@
   let view = store.get('cs_view') || 'day';
   let me = null;            // signed-in person and their permissions
   const can = (perm) => Boolean(me && me.perms && me.perms[perm]);
-  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null };
+  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null };
   // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
   const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
   const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
   // Sidebar: Schedule holds the Day and Week views; each other entry is one view.
-  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum' };
+  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum', maintenance: 'maintenance' };
   const navAllowed = (n) => (n === 'schedule' ? allowed('day') || allowed('board') : allowed(n));
-  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account', forum: 'Forum' };
+  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account', forum: 'Forum', maintenance: 'Maintenance' };
   let lastSched = store.get('cs_sched') || 'day';
   let selected = null;      // selected date in day view
   let version = null;       // bookings version from the server
@@ -339,6 +339,208 @@
 
   function fmtWhen(iso) { return new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
 
+  // ---------- Maintenance: issues at flats, triaged by Admins/Users, done by a team member or a contractor ----------
+  let mtCache = null, mtFilter = 'open', mtMine = false, taskId = null;
+  const PRIO = { urgent: 'Urgent', high: 'High', normal: 'Normal', low: 'Low' };
+  const MT_ST = { open: 'Open', in_progress: 'In progress', waiting: 'Waiting', done: 'Done', cancelled: 'Cancelled' };
+  const MT_ORDER = { urgent: 0, high: 1, normal: 2, low: 3 };
+  const everyText = (r) => (r ? `Every ${r.every === 1 ? '' : r.every + ' '}${r.every === 1 ? r.unit.replace(/s$/, '') : r.unit}` : '');
+  const todayStr = () => (data && data.today) || londonDay(new Date().toISOString());
+  function dueText(t) {
+    if (!t.due) return '';
+    const days = Math.round((D(t.due) - D(todayStr())) / 864e5);
+    if (['done', 'cancelled'].includes(t.status) || days > 6) return `Due ${WD_SHORT.format(D(t.due))} ${shortDate(t.due)}`;
+    return days < 0 ? `Overdue by ${-days} day${days === -1 ? '' : 's'}` : days === 0 ? 'Due today' : days === 1 ? 'Due tomorrow' : `Due ${WD_LONG.format(D(t.due))}`;
+  }
+  const whoHtml = (a) => (!a ? '<span class="mt-who none">Not assigned</span>'
+    : a.type === 'contractor' ? `<span class="mt-who"><span class="avatar sm ct" aria-hidden="true">${ICONS.tool}</span>${esc(a.name)}${a.trade ? ` <em>· ${esc(a.trade)}</em>` : ''}</span>`
+    : `<span class="mt-who"><span class="avatar sm">${esc(initials(a.name))}</span>${a.id === me.id ? 'You' : esc(a.name)}</span>`);
+  const mtCard = (t) => `<button class="card mtask${t.overdue ? ' late' : ''}" data-task="${esc(t.id)}">
+      <span class="mt-top"><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${t.repeat ? `<span class="mt-rep" title="${esc(everyText(t.repeat))}">${ICONS.repeat}${esc(everyText(t.repeat))}</span>` : ''}<span class="mt-flat">${esc(t.label)} · ${esc(t.building)}</span></span>
+      <span class="mt-title">${esc(t.title)}</span>
+      <span class="mt-bot">${whoHtml(t.assignee)}${t.due ? `<span class="mt-due${t.overdue ? ' late' : ''}">${esc(dueText(t))}</span>` : ''}${(t.media || []).length ? `<span class="mt-n">${(t.media || []).length} photo${(t.media || []).length === 1 ? '' : 's'}</span>` : ''}</span>
+    </button>`;
+  async function loadMaintenance() {
+    if (!mtCache) $('mt-list').innerHTML = '<div class="card"><div class="loading">Loading…</div></div>';
+    try { mtCache = await getJSON('/api/maintenance?status=' + mtFilter); renderMaintenance(); }
+    catch (e) { if (e.message !== 'signed out') $('mt-list').innerHTML = `<div class="banner error">${esc(e.message)}</div>`; }
+  }
+  function renderMaintenance() {
+    if (!mtCache) return;
+    const list = mtCache.tasks.filter((t) => !mtMine || (t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id) || t.reporterId === me.id)
+      .sort((a, b) => (mtFilter === 'done' ? (b.doneAt || '').localeCompare(a.doneAt || '') : (b.overdue - a.overdue) || (MT_ORDER[a.priority] - MT_ORDER[b.priority]) || (a.due || '9999').localeCompare(b.due || '9999') || b.createdAt.localeCompare(a.createdAt)));
+    const c = mtCache.counts;
+    $('mt-sum').innerHTML = mtFilter === 'open' ? [c.mine && `<span class="mt-chip"><b>${c.mine}</b> for you</span>`, mtCache.canManage && c.unassigned && `<span class="mt-chip warn"><b>${c.unassigned}</b> not assigned</span>`, c.overdue && `<span class="mt-chip bad"><b>${c.overdue}</b> overdue</span>`].filter(Boolean).join('') : '';
+    $('mt-list').innerHTML = list.length ? list.map(mtCard).join('') : `<div class="card empty"><b>${mtFilter === 'done' ? 'Nothing done yet' : 'Nothing to do'}</b>${mtFilter === 'open' ? 'Report an issue with New task, or from a flat’s panel.' : ''}</div>`;
+  }
+  document.querySelectorAll('[data-mtf]').forEach((b) => b.onclick = () => { mtFilter = b.dataset.mtf; document.querySelectorAll('[data-mtf]').forEach((x) => x.setAttribute('aria-selected', x === b)); mtCache = null; loadMaintenance(); });
+  $('mt-mine').onclick = () => { mtMine = !mtMine; $('mt-mine').setAttribute('aria-pressed', mtMine); renderMaintenance(); };
+  $('mt-new').onclick = () => taskForm({});
+  $('mt-list').addEventListener('click', (e) => { const b = e.target.closest('[data-task]'); if (b) openTask(b.dataset.task); });
+  async function loadSheetMaint(listingId) {
+    const box = $('sheet-maint');
+    if (!box) return;
+    try {
+      const r = await getJSON('/api/maintenance?status=open&listingId=' + encodeURIComponent(listingId));
+      if ($('sheet-maint') !== box || sheetListing !== listingId) return;
+      box.innerHTML = r.tasks.length ? `<h3 class="sh-h3">Maintenance · ${r.tasks.length} to do</h3><div class="mt-mini">${r.tasks.map(mtCard).join('')}</div>` : '';
+      box.querySelectorAll('[data-task]').forEach((b) => b.onclick = () => openTask(b.dataset.task));
+    } catch (_) {}
+  }
+  // Photos and videos for a task: uploaded as soon as they're picked (same resumable uploads as cleanings).
+  function mediaPicker(listingId, onChange) {
+    const keys = [];
+    const html = `<div class="ev-btns"><label class="btn file"><input type="file" accept="image/*" capture="environment" data-mp="cam">Take photo</label><label class="btn file"><input type="file" accept="video/*,image/*" multiple data-mp="pick">Choose photos/videos</label></div><div class="mp-list"></div>`;
+    const busy = () => keys.some((k) => { const x = uploads.get(k); return x && !x.done && !x.error; });
+    const ids = () => keys.map((k) => uploads.get(k)).filter((x) => x && x.done).map((x) => x.id);
+    const wire = (root) => {
+      const draw = () => {
+        const l = root.querySelector('.mp-list');
+        if (l) l.innerHTML = keys.map((k) => { const x = uploads.get(k); return `<div class="up ${x.error ? 'err' : x.done ? 'ok' : ''}"><span class="up-k">${x.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(x.file.name || x.kind)}</span><span class="up-s">${x.error ? esc(x.error) : x.done ? 'Uploaded ✓' : Math.floor(x.progress * 100) + '%'}</span><span class="up-bar"><i style="transform:scaleX(${x.done ? 1 : x.progress})"></i></span></div>`; }).join('');
+        onChange && onChange(busy());
+      };
+      root.querySelectorAll('[data-mp]').forEach((inp) => inp.onchange = (e) => {
+        for (const f of e.target.files) { const key = Math.random().toString(36).slice(2); uploads.set(key, { file: f, kind: (f.type || '').startsWith('image') ? 'photo' : 'video', progress: 0, done: false, error: null, purpose: 'maintenance', listingId: listingId() }); keys.push(key); runUpload(key, draw); }
+        e.target.value = ''; draw();
+      });
+    };
+    return { html, wire, busy, ids, clear: () => keys.forEach((k) => uploads.delete(k)) };
+  }
+  let mtFlats = null;
+  async function flatsForForm() {
+    if (mtFlats) return mtFlats;
+    try { const p = props || (await getJSON('/api/properties')); mtFlats = p.buildings.flatMap((b) => b.units.filter((u) => !u.hidden).map((u) => ({ id: u.id, label: u.label, building: b.name }))); }
+    catch (_) { mtFlats = data ? [...new Map(data.board.flatMap((b) => b.units.map((u) => [u.listingId, { id: u.listingId, label: u.label, building: b.name }]))).values()] : []; }
+    return mtFlats;
+  }
+  const UNITS = [['days', 'days'], ['weeks', 'weeks'], ['months', 'months'], ['years', 'years']];
+  // New task (anyone) or editing one (Admin/User). Triage fields — who, due, repeat, cost — are for Admins and Users.
+  async function taskForm(pre) {
+    const t = pre.id ? pre : null, mgr = isManager();
+    const flats = pre.listingId ? null : await flatsForForm();
+    openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Maintenance</span><h2>${t ? 'Edit task' : mgr ? 'New task' : 'Report an issue'}</h2><div class="sh-sub">${pre.listingId ? `${esc(pre.label || '')} · ${esc(pre.building || '')}` : 'Pick the flat, then say what needs doing.'}</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
+      <form class="pe-form" id="mt-form" autocomplete="off">
+        ${flats ? `<div class="pe-f"><label for="mt-flat">Flat</label><select id="mt-flat" required><option value="">Pick a flat…</option>${flats.map((f) => `<option value="${esc(f.id)}">${esc(f.label)} · ${esc(f.building)}</option>`).join('')}</select></div>` : ''}
+        <div class="pe-f"><label for="mt-title">What needs doing?</label><input id="mt-title" maxlength="140" required value="${esc(pre.title || '')}" placeholder="e.g. Shower is leaking, replace bathroom light bulb"></div>
+        <div class="pe-f"><label for="mt-details">Details <span class="muted">(optional)</span></label><textarea id="mt-details" rows="4" maxlength="4000" placeholder="Where exactly, what you’ve noticed, anything that would help">${esc(pre.details || '')}</textarea></div>
+        <div class="pe-f"><span class="pe-l">Priority</span><div class="range fkinds" role="radiogroup" aria-label="Priority">${Object.entries(PRIO).map(([k, w]) => `<button type="button" role="radio" data-p="${k}" aria-checked="${(pre.priority || 'normal') === k}" aria-selected="${(pre.priority || 'normal') === k}">${w}</button>`).join('')}</div></div>
+        ${mgr ? `
+        <div class="pe-f"><label for="mt-who">Who’s doing it?</label><select id="mt-who"><option value="">Not assigned yet</option><option value="c" ${t && t.assignee && t.assignee.type === 'contractor' ? 'selected' : ''}>A contractor…</option></select></div>
+        <div class="mt-ct ${t && t.assignee && t.assignee.type === 'contractor' ? '' : 'hidden'}" id="mt-ct">
+          <div class="pe-row"><div class="pe-f"><label for="mt-cname">Contractor’s name</label><input id="mt-cname" maxlength="80" list="mt-cbook" value="${esc(t && t.assignee && t.assignee.type === 'contractor' ? t.assignee.name : '')}"><datalist id="mt-cbook">${((mtCache && mtCache.contractors) || []).map((c) => `<option value="${esc(c.name)}">${esc(c.trade || c.phone)}</option>`).join('')}</datalist></div>
+          <div class="pe-f"><label for="mt-cphone">Phone</label><input id="mt-cphone" type="tel" maxlength="30" value="${esc(t && t.assignee && t.assignee.type === 'contractor' ? t.assignee.phone : '')}"></div></div>
+          <div class="pe-f"><label for="mt-ctrade">Trade <span class="muted">(optional)</span></label><input id="mt-ctrade" maxlength="60" placeholder="e.g. Plumber, electrician" value="${esc(t && t.assignee && t.assignee.type === 'contractor' ? t.assignee.trade || '' : '')}"></div>
+        </div>
+        <div class="pe-row"><div class="pe-f"><label for="mt-due">Due date <span class="muted">(optional)</span></label><input id="mt-due" type="date" value="${esc((t && t.due) || '')}"></div>
+          <div class="pe-f"><label for="mt-cost">Cost £ <span class="muted">(optional)</span></label><input id="mt-cost" type="number" min="0" step="0.01" inputmode="decimal" value="${t && t.cost !== null && t.cost !== undefined ? esc(t.cost) : ''}"></div></div>
+        <label class="pe-check"><input type="checkbox" id="mt-rep" ${t && t.repeat ? 'checked' : ''}> Repeats (e.g. gas safety every 12 months)</label>
+        <div class="pe-row mt-repbox ${t && t.repeat ? '' : 'hidden'}" id="mt-repbox"><div class="pe-f"><label for="mt-every">Every</label><input id="mt-every" type="number" min="1" max="60" value="${esc((t && t.repeat && t.repeat.every) || 12)}"></div>
+          <div class="pe-f"><label for="mt-unit">&nbsp;</label><select id="mt-unit">${UNITS.map(([k, w]) => `<option value="${k}" ${((t && t.repeat && t.repeat.unit) || 'months') === k ? 'selected' : ''}>${w}</option>`).join('')}</select></div></div>` : ''}
+        ${t ? '' : `<div class="pe-f"><span class="pe-l">Photos or videos <span class="muted">(optional)</span></span><div id="mt-media"></div></div>`}
+        <div class="form-msg" id="mt-msg"></div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="mt-go">${t ? 'Save' : mgr ? 'Create task' : 'Send report'}</button></div>
+      </form>`);
+    let prio = pre.priority || 'normal';
+    $('mt-form').querySelectorAll('[data-p]').forEach((b) => b.onclick = () => { prio = b.dataset.p; $('mt-form').querySelectorAll('[data-p]').forEach((x) => { x.setAttribute('aria-checked', x === b); x.setAttribute('aria-selected', x === b); }); });
+    const flatId = () => pre.listingId || ($('mt-flat') && $('mt-flat').value) || '';
+    let picker = null;
+    if (!t) {
+      picker = mediaPicker(flatId, (busy) => { $('mt-go').disabled = busy; $('mt-go').textContent = busy ? 'Uploading…' : mgr ? 'Create task' : 'Send report'; });
+      $('mt-media').innerHTML = picker.html;
+      picker.wire($('mt-media'));
+    }
+    if (mgr) {
+      const sel = $('mt-who');
+      const cur = t && t.assignee && t.assignee.type === 'user' ? t.assignee : null;
+      const loadPeople = async () => {
+        const id = flatId();
+        const keep = sel.value;
+        [...sel.querySelectorAll('option[data-u]')].forEach((o) => o.remove());
+        if (!id) return;
+        try {
+          const r = await getJSON('/api/maintenance/people?listingId=' + encodeURIComponent(id));
+          sel.querySelector('option[value="c"]').insertAdjacentHTML('beforebegin', r.people.map((p) => `<option data-u value="u:${esc(p.id)}">${esc(p.name)} (${esc(p.role)})</option>`).join(''));
+          sel.value = cur ? `u:${cur.id}` : keep;
+        } catch (_) {}
+      };
+      loadPeople();
+      if ($('mt-flat')) $('mt-flat').onchange = loadPeople;
+      sel.onchange = () => $('mt-ct').classList.toggle('hidden', sel.value !== 'c');
+      $('mt-cname').oninput = () => { const c = ((mtCache && mtCache.contractors) || []).find((x) => x.name === $('mt-cname').value); if (c) { $('mt-cphone').value = c.phone; if (!$('mt-ctrade').value) $('mt-ctrade').value = c.trade || ''; } };
+      $('mt-rep').onchange = () => $('mt-repbox').classList.toggle('hidden', !$('mt-rep').checked);
+    }
+    $('mt-form').onsubmit = async (e) => {
+      e.preventDefault();
+      if (picker && picker.busy()) return toast('Wait for the upload to finish');
+      const b = { title: $('mt-title').value, details: $('mt-details').value, priority: prio };
+      if (!t) Object.assign(b, { listingId: flatId(), mediaIds: [...(pre.mediaIds || []), ...(picker ? picker.ids() : [])], damageId: pre.damageId || null });
+      if (mgr) {
+        const w = $('mt-who').value;
+        b.assignee = !w ? null : w === 'c' ? { type: 'contractor', name: $('mt-cname').value, phone: $('mt-cphone').value, trade: $('mt-ctrade').value } : { type: 'user', id: w.slice(2) };
+        b.due = $('mt-due').value || '';
+        b.cost = $('mt-cost').value;
+        b.repeat = $('mt-rep').checked ? { every: Number($('mt-every').value), unit: $('mt-unit').value } : null;
+      }
+      $('mt-go').disabled = true;
+      try {
+        const r = t ? await send('PUT', `/api/maintenance/${encodeURIComponent(t.id)}`, b) : await send('POST', '/api/maintenance', b);
+        if (picker) picker.clear();
+        toast(t ? 'Saved' : mgr ? 'Task created' : 'Reported — thank you');
+        mtCache = null; if (view === 'maintenance') loadMaintenance(); refreshBadges();
+        if (sheetListing && !$('sheet').classList.contains('hidden')) loadSheetMaint(sheetListing);
+        openTask(r.task.id);
+      } catch (err) { $('mt-msg').className = 'form-msg err'; $('mt-msg').textContent = err.message; $('mt-go').disabled = false; }
+    };
+  }
+  async function openTask(id) {
+    try {
+      const { task: t } = await getJSON(`/api/maintenance/${encodeURIComponent(id)}`);
+      const done = ['done', 'cancelled'].includes(t.status);
+      const moves = !t.canMove ? [] : done ? [['open', 'Reopen']] : [
+        ...(t.status !== 'in_progress' ? [['in_progress', 'Start']] : []), ...(t.status !== 'waiting' ? [['waiting', 'Waiting (parts, access…)']] : []), ['done', 'Mark done'],
+      ];
+      const note = mediaPicker(() => t.listingId, (busy) => { if ($('mn-go')) $('mn-go').disabled = busy; });
+      openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Maintenance · ${esc(t.label)} · ${esc(t.building)}</span><h2 class="fp-h">${esc(t.title)}</h2>
+          <div class="sh-sub">Added by ${esc(t.reporterName)} · ${esc(fmtWhen(t.createdAt))}</div></div><div class="sh-right"><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${CLOSE_BTN}</div></div>
+        ${moves.length ? `<div class="mt-moves">${moves.map(([s, w]) => `<button class="btn ${s === 'done' ? 'primary' : ''}" data-move="${s}">${esc(w)}</button>`).join('')}</div>` : ''}
+        <dl class="mt-facts">
+          <div><dt>Priority</dt><dd><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span></dd></div>
+          <div><dt>Due</dt><dd class="${t.overdue ? 'late' : ''}">${t.due ? esc(dueText(t)) : '—'}</dd></div>
+          <div><dt>Who</dt><dd>${whoHtml(t.assignee)}${t.assignee && t.assignee.type === 'contractor' && t.assignee.phone ? ` <a class="mt-tel" href="tel:${esc(t.assignee.phone.replace(/[^\d+]/g, ''))}">${esc(t.assignee.phone)}</a>` : ''}</dd></div>
+          <div><dt>Repeats</dt><dd>${t.repeat ? esc(everyText(t.repeat)) : 'No'}</dd></div>
+          ${t.cost !== null && t.cost !== undefined ? `<div><dt>Cost</dt><dd>£${esc(Number(t.cost).toFixed(2))}</dd></div>` : ''}
+          ${t.doneAt ? `<div><dt>Done</dt><dd>${esc(fmtWhen(t.doneAt))} by ${esc(t.doneBy || '')}</dd></div>` : ''}
+        </dl>
+        ${t.details ? `<div class="fp-body">${esc(t.details)}</div>` : ''}
+        ${(t.media || []).length ? `<h3 class="sh-h3">Photos & videos</h3>${mediaTiles(t.media)}` : ''}
+        <h3 class="sh-h3">Updates</h3>
+        <ol class="mt-log">${(t.log || []).slice().reverse().map((l) => `<li class="${esc(l.kind)}"><span class="mt-lt">${l.kind === 'note' ? `<b>${esc(l.byName)}</b> ${esc(l.text)}` : `${esc(l.text)} <span class="muted">· ${esc(l.byName)}</span>`}</span><em>${esc(ago(l.at))}</em></li>`).join('')}</ol>
+        ${t.canMove || t.reporterId === me.id ? `<form class="fc-form" id="mn-form"><label for="mn-text" class="pe-l">Add an update</label><textarea id="mn-text" rows="2" maxlength="2000" placeholder="e.g. Plumber booked for Thursday 10am"></textarea>${note.html}<div class="form-actions"><span class="spacer"></span><button type="submit" class="btn primary" id="mn-go">Add</button></div></form>` : ''}
+        ${t.canManage ? `<div class="mt-admin"><button class="btn" id="mt-edit">Edit task</button>${!done ? '<button class="linkbtn" data-move="cancelled">Cancel task</button>' : ''}<button class="linkbtn fp-del" id="mt-del">Delete</button></div>` : ''}`);
+      taskId = id;
+      if ($('mn-form')) note.wire($('mn-form'));
+      $('detail-body').querySelectorAll('[data-move]').forEach((b) => b.onclick = async () => {
+        if (b.dataset.move === 'cancelled' && !confirm('Cancel this task?')) return;
+        try {
+          const r = await send('POST', `/api/maintenance/${encodeURIComponent(id)}/status`, { status: b.dataset.move });
+          toast(r.next ? `Done — next one due ${shortDate(r.next.due)}` : `Marked ${MT_ST[b.dataset.move].toLowerCase()}`);
+          mtCache = null; if (view === 'maintenance') loadMaintenance(); refreshBadges(); openTask(id);
+        } catch (e) { toast(e.message); }
+      });
+      if ($('mn-form')) $('mn-form').onsubmit = async (e) => {
+        e.preventDefault();
+        if (note.busy()) return toast('Wait for the upload to finish');
+        try { await send('POST', `/api/maintenance/${encodeURIComponent(id)}/notes`, { text: $('mn-text').value, mediaIds: note.ids() }); note.clear(); openTask(id); mtCache = null; if (view === 'maintenance') loadMaintenance(); }
+        catch (err) { toast(err.message); }
+      };
+      if ($('mt-edit')) $('mt-edit').onclick = () => taskForm(t);
+      if ($('mt-del')) $('mt-del').onclick = async () => {
+        if (!confirm('Delete this task and its updates? This can’t be undone.')) return;
+        try { await send('DELETE', `/api/maintenance/${encodeURIComponent(id)}`); toast('Task deleted'); closeDetail(); mtCache = null; if (view === 'maintenance') loadMaintenance(); refreshBadges(); } catch (e) { toast(e.message); }
+      };
+    } catch (e) { if (e.message !== 'signed out') toast(e.message); }
+  }
+
   // ---------- Forum: bugs, ideas and questions from the team, with likes, dislikes and comments ----------
   let forumCache = null, fKind = '', fSort = 'new', postId = null;
   const KIND = { bug: 'Bug', idea: 'Idea', question: 'Question', other: 'Other' };
@@ -530,7 +732,7 @@
     return 1 + Math.round(((d - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
   };
   const weekNo = () => isoWeek(data.dates.find((x) => D(x).getUTCDay() === 1) || data.weekStart);
-  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account', forum: 'Team' };
+  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account', forum: 'Team', maintenance: 'Day to day' };
   function setPageHead() {
     const eb = $('page-eyebrow'), h = $('page-title');
     if ((view === 'day' || view === 'board') && data) {
@@ -564,6 +766,7 @@
     $('view-settings').classList.toggle('hidden', v !== 'settings');
     $('view-damage').classList.toggle('hidden', v !== 'damage');
     $('view-forum').classList.toggle('hidden', v !== 'forum');
+    $('view-maintenance').classList.toggle('hidden', v !== 'maintenance');
     $('foot').classList.toggle('hidden', !(v === 'day' || v === 'board'));
     if (v === 'board' && data && boardDirty) renderBoard();
     if (v === 'props') loadProps();
@@ -573,6 +776,7 @@
     if (v === 'settings') loadSettings();
     if (v === 'damage') loadDamageView();
     if (v === 'forum') loadForum();
+    if (v === 'maintenance') loadMaintenance();
   }
 
   // ---------- who's signed in ----------
@@ -598,6 +802,10 @@
       <dt>Buildings</dt><dd>${b}</dd>
       <dt>Can use</dt><dd>${perms || '—'}</dd></dl>`;
     $('pw-form').classList.toggle('hidden', !!me.isOwner);
+    // On phones Users and Settings live here rather than in the tab bar.
+    $('acct-users').classList.toggle('hidden', !navAllowed('users'));
+    $('acct-settings').classList.toggle('hidden', !navAllowed('settings'));
+    $('acct-admin').classList.toggle('hidden', !navAllowed('users') && !navAllowed('settings'));
   }
   $('pw-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -784,6 +992,8 @@
   });
 
   $('me-btn').onclick = () => setView('account');
+  $('acct-users').onclick = () => setView('users');
+  $('acct-settings').onclick = () => setView('settings');
   $('me-btn2').onclick = () => setView('account');
   (async () => {
     const q0 = new URLSearchParams(location.search);
@@ -971,6 +1181,8 @@
   }
   const CHEV = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>';
   const ICONS = {
+    tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4.2 4.2 0 0 0-5.5 5.4L3.8 17.1a1.9 1.9 0 0 0 2.7 2.7l5.4-5.4a4.2 4.2 0 0 0 5.4-5.5l-2.5 2.5-2.3-.4-.4-2.3z"/></svg>',
+    repeat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 11V9.5A3.5 3.5 0 0 1 7 6h13.5M7 21.5 3.5 18 7 14.5"/><path d="M20.5 13v1.5A3.5 3.5 0 0 1 17 18H3.5"/></svg>',
     damage: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5M12 17.2v.3"/></svg>',
     key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14 9l2 2"/></svg>',
     star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 13.8 10.2 20.5 12 13.8 13.8 12 20.5 10.2 13.8 3.5 12 10.2 10.2z"/></svg>',
@@ -1146,7 +1358,9 @@
       ${body}
       ${history ? `<h3 class="sh-h3">${done.some((c) => c.date !== selected) ? 'Cleaned' : `Cleaned ${selected === (data && data.today) ? 'today' : esc(longDate(selected))}`}</h3>${history}` : ''}
       <div id="sheet-damages"></div>
-      ${can('report_damage') ? '<button class="btn wide" id="report-damage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Report damage</button>' : ''}`;
+      <div id="sheet-maint"></div>
+      ${can('report_damage') ? '<button class="btn wide" id="report-damage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Report damage</button>' : ''}
+      <button class="btn wide" id="report-maint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4.2 4.2 0 0 0-5.5 5.4L3.8 17.1a1.9 1.9 0 0 0 2.7 2.7l5.4-5.4a4.2 4.2 0 0 0 5.4-5.5l-2.5 2.5-2.3-.4-.4-2.3z"/></svg>Report a maintenance issue</button>`;
 
     const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
     if ($('sh-lbx')) {
@@ -1173,6 +1387,8 @@
     }));
     on('open-checklist', openChecklist);
     on('report-damage', () => { sheetMode = 'damage'; renderSheet(); });
+    on('report-maint', () => taskForm({ listingId: sheetListing, label: u.label, building: u.building }));
+    loadSheetMaint(sheetListing);
     if (active && mine && active.status === 'awaiting_video') wireEvidence(active);
     if (active && mine && active.status === 'awaiting_key') wireKey(active);
     loadSheetDamages(sheetListing);
@@ -1595,15 +1811,21 @@
     } catch (_) {}
   }
   function damageCard(d) {
+    dmgSeen.set(d.id, d);
     return `<div class="dmg ${d.status}">
       <div class="hist-h"><b>${esc(d.label)} · ${esc(d.location || 'Damage')}</b><span>${new Date(d.reportedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })} · ${esc(d.reporterName)}</span></div>
       <p class="dmg-desc">${esc(d.description)}</p>
       ${mediaTiles(d.media)}
       ${d.status === 'resolved' ? `<div class="hist-s">Resolved by ${esc(d.resolvedBy || '')}${d.note ? ' — ' + esc(d.note) : ''}</div>` : ''}
-      ${can('manage_damage') ? `<div class="form-actions"><button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button></div>` : ''}
+      ${can('manage_damage') || isManager() ? `<div class="form-actions">${can('manage_damage') ? `<button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button>` : ''}${isManager() ? `<button class="btn" data-dmg-mt="${esc(d.id)}">Create maintenance task</button>` : ''}</div>` : ''}
     </div>`;
   }
+  const dmgSeen = new Map(); // damage reports on screen, for "Create maintenance task"
   function wireDamageCards(root, after) {
+    root.querySelectorAll('[data-dmg-mt]').forEach((b) => b.onclick = () => {
+      const d = dmgSeen.get(b.dataset.dmgMt);
+      if (d) taskForm({ listingId: d.listingId, label: d.label, building: d.building, damageId: d.id, title: `Fix: ${d.description.split('\n')[0].slice(0, 90)}`, details: `${d.location ? d.location + ': ' : ''}${d.description}\n\nFrom a damage report by ${d.reporterName}.`, mediaIds: (d.media || []).map((m) => m.id) });
+    });
     root.querySelectorAll('[data-dmg]').forEach((b) => b.onclick = async () => {
       try { await send('PUT', '/api/damages/' + b.dataset.dmg, { status: b.dataset.to }); toast(b.dataset.to === 'resolved' ? 'Marked resolved' : 'Reopened'); after(); refreshBadges(); } catch (e) { toast(e.message); }
     });
@@ -1728,6 +1950,12 @@
       } catch (_) {}
     }
     try {
+      const m = await getJSON('/api/maintenance?status=open');
+      const n = m.counts.badge;
+      $('nb-maint').textContent = n > 9 ? '9+' : String(n);
+      $('nb-maint').classList.toggle('hidden', !n);
+    } catch (_) {}
+    try {
       const f = await getJSON('/api/forum');
       forumCache = f;
       const seen = store.get('cs_forum_seen') || '';
@@ -1753,7 +1981,7 @@
     if (m < 24 * 60) return `${Math.round(m / 60)} h ago`;
     return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   };
-  const NICON = { cleaned: '✓', damage: '!', assigned: '→', unassigned: '×', forum: '“' };
+  const NICON = { cleaned: '✓', damage: '!', assigned: '→', unassigned: '×', forum: '“', maintenance: '⚒' };
   async function loadNotifs() {
     if (!me) return;
     try {
@@ -1800,6 +2028,7 @@
     const v = q.get('view'), date = q.get('date'), flat = q.get('flat');
     const okDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '');
     if (v === 'forum') { if (view !== 'forum') setView('forum'); if (q.get('post')) openPost(q.get('post')); return; }
+    if (v === 'maintenance') { if (view !== 'maintenance') setView('maintenance'); if (q.get('task')) openTask(q.get('task')); return; }
     if (v === 'cleaning' && allowed('cleaning')) { if (okDate) cvDate = date; if (view === 'cleaning') loadCleaningView(); else setView('cleaning'); return; }
     if (v === 'day' && allowed('day')) {
       if (view !== 'day') setView('day');

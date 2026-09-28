@@ -1146,3 +1146,67 @@ td.unit .u { font-weight: 600; }
 .lbx { flex-wrap: nowrap; align-items: center; padding: 5px 11px; min-width: 0; }
 .lbx-k, .lbx-code { flex: none; }
 .lbx-by { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Maintenance ---------- */
+#view-maintenance .weekbar { gap: 10px; }
+.mt-mine[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent-strong); }
+.mt-sum { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+.mt-sum:empty { display: none; }
+.mt-chip { font-size: 12.5px; padding: 4px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); }
+.mt-chip.warn { background: var(--prog-soft); color: var(--prog); }
+.mt-chip.bad { background: var(--out-soft); color: var(--out); }
+#mt-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.mtask { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 15px 18px; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.mtask:hover .mt-title { color: var(--accent); }
+.mtask.late { box-shadow: inset 3px 0 0 var(--out), var(--shadow); }
+.mt-top, .mt-bot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mt-flat { margin-left: auto; font-size: 12px; color: var(--ink-3); }
+.mt-title { font: 500 16px/1.35 var(--font-head); color: var(--ink); }
+.prio, .mst { font: 600 10.5px var(--font); letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: var(--sunken); color: var(--ink-2); white-space: nowrap; }
+.prio.urgent { background: var(--out); color: #fff; }
+.prio.high { background: var(--out-soft); color: var(--out); }
+.prio.normal { background: var(--accent-tint); color: var(--accent); }
+.mst { background: none; border: 1px solid var(--line); color: var(--ink-3); }
+.mst.in_progress, .mst.waiting { border-color: transparent; background: var(--prog-soft); color: var(--prog); }
+.mst.done { border-color: transparent; background: var(--accent-soft); color: var(--accent-strong); }
+.mt-rep { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--ink-3); }
+.mt-rep svg { width: 13px; height: 13px; }
+.mt-who { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--ink); }
+.mt-who em { font-style: normal; color: var(--ink-3); font-weight: 400; }
+.mt-who.none { color: var(--prog); }
+.mt-who .avatar.sm { width: 24px; height: 24px; font-size: 9.5px; background: var(--accent-soft); color: var(--accent-strong); }
+.mt-who .avatar.ct svg { width: 13px; height: 13px; }
+.mt-due { font-size: 12.5px; color: var(--ink-2); }
+.mt-due.late, .mt-facts dd.late { color: var(--out); font-weight: 600; }
+.mt-n { font-size: 12px; color: var(--ink-3); }
+.mt-mini { display: flex; flex-direction: column; gap: 8px; }
+.mt-mini .mtask { padding: 12px 14px; box-shadow: none; }
+.mt-moves { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 16px; }
+.mt-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; margin: 0 0 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 16px; }
+.mt-facts div { min-width: 0; }
+.mt-facts dt { font-size: 11.5px; color: var(--ink-3); margin-bottom: 3px; }
+.mt-facts dd { margin: 0; font-size: 14px; color: var(--ink); }
+.mt-tel { display: block; margin-top: 3px; font-weight: 600; font-size: 13px; text-decoration: none; }
+.mt-log { list-style: none; margin: 0 0 16px; padding: 0; }
+.mt-log li { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line-2); font-size: 13.5px; color: var(--ink-2); }
+.mt-log li.note { color: var(--ink); }
+.mt-lt { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mt-log em { font-style: normal; font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.mt-admin { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+.mt-admin .fp-del { margin: 0 0 0 auto; }
+.mt-ct { display: flex; flex-direction: column; gap: 14px; padding: 12px; border-radius: 14px; background: var(--surface-2); }
+.mt-ct.hidden, .mt-repbox.hidden { display: none; }
+.mp-list { margin-top: 8px; }
+@media (max-width: 760px) {
+  #mt-list { grid-template-columns: 1fr; }
+  #view-maintenance .weekbar .range { flex: 1 1 auto; }
+  #mt-new { flex: 1 1 100%; order: 10; }
+  .mt-facts { grid-template-columns: 1fr 1fr; }
+}
+
+/* Phones: the tab bar keeps the everyday sections; Users and Settings are on the account page (tap your initials). */
+.acct-left { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.acct-links { display: flex; gap: 8px; flex-wrap: wrap; }
+.acct-links .btn { margin-top: 0; }
+@media (min-width: 761px) { .acct-admin { display: none; } }
+@media (max-width: 760px) { .snav button[data-group="admin"] { display: none !important; } }

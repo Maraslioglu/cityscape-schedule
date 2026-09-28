@@ -211,7 +211,7 @@ async function processMedia(id) {
 // playback copy exists (so the cleaning still has a video).
 const freeBytes = () => { try { const s = fs.statfsSync(MEDIA); return s.bavail * s.bsize; } catch (_) { return Infinity; } };
 function originalDeletable(m) {
-  return m && m.uploaded && m.status === 'ready' && m.purpose !== 'damage' && m.file && m.file !== `${m.id}.orig`
+  return m && m.uploaded && m.status === 'ready' && m.purpose !== 'damage' && m.purpose !== 'maintenance' && m.file && m.file !== `${m.id}.orig`
     && fs.existsSync(path.join(MEDIA, m.file)) && fs.existsSync(path.join(MEDIA, `${m.id}.orig`));
 }
 async function dropOriginal(m, why) {
@@ -236,7 +236,7 @@ async function freeSpace(need = LOW_WATER) {
 }
 
 // Delete full-quality originals of cleaning media after KEEP_ORIGINAL_DAYS, and uploads idle for 3 days.
-// Never touches damage-report media, or an original that is the only copy.
+// Never touches damage-report or maintenance media, or an original that is the only copy.
 async function sweepMedia() {
   const now = Date.now();
   for (const k of Object.keys(data)) {
