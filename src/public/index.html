@@ -12,9 +12,9 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.png" type="image/png">
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#f8f9f8">
+<meta name="theme-color" content="#f2f1ee">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <meta name="robots" content="noindex">
 <link rel="stylesheet" href="/styles.css">
 </head>
@@ -23,32 +23,37 @@
   <div class="side-brand"><svg class="cs-mark" viewBox="18.5 20 64.1 60" aria-hidden="true"><path fill="currentColor" d="M18.5 41.3 39.3 20H61v21.3H39.3V80H18.5zM61 41.3h21.6v14.5L61 80z"/></svg><b class="name">Cityscape</b><span class="tag">SCHEDULE</span></div>
   <nav class="snav" aria-label="Sections">
     <div class="nlbl" data-group="day">Day to day</div>
-    <button data-nav="schedule" data-group="day"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg><span class="nl">Schedule</span></button>
-    <button data-nav="cleaning" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="nl">Cleaning log</span><span class="ns">Cleaning</span></button>
-    <button data-nav="damage" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span class="nl">Damage reports</span><span class="ns">Damage</span><span class="nbadge hidden" id="nb-damage"></span></button>
+    <button data-nav="schedule" data-group="day"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg><span class="nl">Schedule</span></button>
+    <button data-nav="cleaning" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M4 12h10M4 17h6"/><path d="m15 16.5 2.2 2.2L21 14.5"/></svg><span class="nl">Cleaning log</span><span class="ns">Cleaning</span></button>
+    <button data-nav="damage" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5M12 17.2v.3"/></svg><span class="nl">Damage reports</span><span class="ns">Damage</span><span class="nbadge hidden" id="nb-damage"></span></button>
     <div class="nlbl" data-group="portfolio">Portfolio</div>
-    <button data-nav="props" data-group="portfolio"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg><span class="nl">Properties</span><span class="ndot hidden" id="nd-props" title="A KeyNest flat needs linking"></span></button>
+    <button data-nav="props" data-group="portfolio"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20.5V6.5l7-3v17M11 8.5l9 3v9M2.5 20.5h19M7 9v.01M7 12.5v.01M7 16v.01M15 14v.01M15 17.5v.01"/></svg><span class="nl">Properties</span><span class="ndot hidden" id="nd-props" title="A KeyNest flat needs linking"></span></button>
     <div class="nlbl" data-group="admin">Admin</div>
-    <button data-nav="users" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M1 21a8 8 0 0 1 16 0M17 4a4 4 0 0 1 0 8M23 21a8 8 0 0 0-5-7.4"/></svg><span class="nl">Users</span></button>
-    <button data-nav="settings" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg><span class="nl">Settings</span></button>
+    <button data-nav="users" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20c.6-3.6 3.3-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 5.2a3.3 3.3 0 0 1 0 6.6M17.5 14.8c2.2.6 3.6 2.4 4 5.2"/></svg><span class="nl">Users</span></button>
+    <button data-nav="settings" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span class="nl">Settings</span></button>
   </nav>
-  <button class="side-me" id="me-btn" title="My account"><span class="avatar" id="me-avatar"></span><span class="side-who"><b id="me-name"></b><span id="me-role"></span></span></button>
+  <div class="side-foot">
+    <span class="live side-live" title="Connecting…"><i></i><span class="lbl">Connecting</span></span>
+    <div class="side-card">
+      <button class="side-me" id="me-btn" title="My account"><span class="avatar" id="me-avatar"></span><span class="side-who"><b id="me-name"></b><span id="me-role"></span></span></button>
+      <a class="side-out" href="/logout" aria-label="Sign out" title="Sign out"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.5h4a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-4M10 16.5 5.5 12 10 7.5M5.5 12H15"/></svg></a>
+    </div>
+  </div>
 </aside>
 <header class="top">
   <div class="wrap">
     <div class="brand"><svg class="cs-mark" viewBox="18.5 20 64.1 60" aria-hidden="true"><path fill="currentColor" d="M18.5 41.3 39.3 20H61v21.3H39.3V80H18.5zM61 41.3h21.6v14.5L61 80z"/></svg><b class="name">Cityscape</b></div>
-    <h1 class="page-title" id="page-title"></h1>
     <span class="spacer"></span>
-    <span class="live" id="live" title="Connecting…"><i></i><span class="lbl">Connecting</span></span>
-    <button class="btn sq bell" id="bell" aria-label="Notifications" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg><span class="bell-n hidden" id="bell-n"></span></button>
+    <span class="live top-live" id="live" title="Connecting…"><i></i><span class="lbl">Connecting</span></span>
+    <button class="btn sq bell" id="bell" aria-label="Notifications" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16.5V11a6 6 0 1 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg><span class="bell-n hidden" id="bell-n"></span></button>
     <button class="btn me" id="me-btn2" title="My account"><span class="avatar" id="me-avatar2"></span></button>
   </div>
 </header>
 
 <main class="wrap">
+  <div class="page-head"><span class="eyebrow" id="page-eyebrow"></span><h1 class="page-title" id="page-title"></h1></div>
   <section id="week-area">
     <div class="weekbar">
-      <div class="range no-print" role="tablist" aria-label="Day or week"><button role="tab" data-range="day" aria-selected="true">Day</button><button role="tab" data-range="board" aria-selected="false">Week</button></div>
       <button class="btn sq no-print" id="prev" aria-label="Previous week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>
       <h1 id="week-title">Loading…</h1>
       <button class="btn sq no-print" id="next" aria-label="Next week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button>
@@ -56,25 +61,28 @@
       <span id="newpill"></span>
       <span class="spacer"></span>
       <button class="btn no-print" id="this">This week</button>
+      <div class="range no-print" role="tablist" aria-label="Day or week"><button role="tab" data-range="day" aria-selected="true">Day</button><button role="tab" data-range="board" aria-selected="false">Week</button></div>
       <div class="copy-wrap no-print">
-        <button class="btn act" id="copy" aria-haspopup="menu" aria-expanded="false" title="Copy as text for WhatsApp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><span class="btn-label">Copy for WhatsApp</span><svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></button>
+        <button class="btn act" id="copy" aria-haspopup="menu" aria-expanded="false" title="Copy as text for WhatsApp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 19.5 6 15.8A7.5 7.5 0 1 1 9 18.6z"/></svg><span class="btn-label">Copy for WhatsApp</span><svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></button>
         <div class="menu hidden" id="copy-menu" role="menu"><button role="menuitem" data-copy="day" id="copy-day">Copy this day</button><button role="menuitem" data-copy="week">Copy this week</button></div>
       </div>
     </div>
 
     <div id="banners"></div>
 
-    <div class="summary" id="summary">
-      <div class="metric"><div class="k"><i style="background:var(--out)"></i>Cleans</div><div class="v" id="m-out">–</div></div>
-      <div class="metric"><div class="k"><i style="background:var(--in)"></i>Arrivals</div><div class="v" id="m-in">–</div></div>
-      <div class="metric"><div class="k"><i style="background:var(--turn)"></i>Same-day</div><div class="v" id="m-turn">–</div></div>
-      <div class="metric linen"><div class="k">Linen sets for the week <span class="muted" style="font-weight:500">· 1 per check-out</span></div><div class="linen-row" id="m-linen"></div></div>
-    </div>
-
     <!-- DAY VIEW -->
     <div id="view-day">
       <div class="strip" id="strip" role="tablist" aria-label="Day"></div>
-      <div class="card" id="daypanel"><div class="loading">Loading from Guesty…</div></div>
+      <div class="summary" id="summary">
+        <div class="metric"><div class="k">To clean</div><div class="v" id="m-clean">–</div><div class="s" id="m-clean-s"></div></div>
+        <div class="metric"><div class="k">Arrivals</div><div class="v" id="m-in">–</div><div class="s" id="m-in-s"></div></div>
+        <div class="metric"><div class="k" id="m-third-k">Not assigned</div><div class="v" id="m-third">–</div><div class="s" id="m-third-s"></div></div>
+        <div class="metric" id="m-done-box"><div class="k">Cleaned</div><div class="v"><span id="m-done">–</span><small id="m-done-of"></small></div><div class="pbar" id="m-bar" aria-hidden="true"><i class="d"></i><i class="p"></i></div></div>
+      </div>
+      <div class="day-layout">
+        <div id="daypanel"><div class="card"><div class="loading">Loading from Guesty…</div></div></div>
+        <aside class="rail" id="rail" aria-label="At a glance"></aside>
+      </div>
     </div>
 
     <!-- BOARD VIEW -->
