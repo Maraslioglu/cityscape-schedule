@@ -251,7 +251,7 @@
         <h3>${esc(b.name)}</h3><div class="pc">${esc(b.postcode)}</div>
         ${b.units.map((u) => `<div class="prow${u.hidden ? ' off' : ''}" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span>${p.canManage ? `<button class="btn pedit" data-edit="${esc(u.id)}" aria-label="Edit ${esc(u.label)}">Edit</button>` : ''}</div>
           ${u.hidden || u.edited ? `<div class="ptags">${u.hidden ? '<span class="ptag off">Hidden from the schedule</span>' : ''}${u.edited ? `<span class="ptag" title="${u.editedBy ? `Changed by ${esc(u.editedBy)}${u.editedAt ? `, ${esc(fmtWhen(u.editedAt))}` : ''}` : ''}">Edited in the app</span>` : ''}</div>` : ''}
-          ${u.keyMode === 'lockbox' ? (u.lockboxNoCode ? NO_CODE : lockboxBlock(u.lockbox)) : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key must be back in KeyNest after each clean</span></div>' : ''}`).join('')}
+          ${u.keyMode === 'lockbox' ? (u.lockboxNoCode ? noCodeBlock(u.keyInstruction) : lockboxBlock(u.lockbox)) : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key must be back in KeyNest after each clean</span></div>' : ''}`).join('')}
       </div>`).join('');
       // KeyNest flats that aren't linked to a KeyNest key can't be completed by cleaners: say so at the top.
       const kn = p.keynest || { unlinked: [] };
@@ -268,7 +268,8 @@
   }
 
   // The lockbox code, big: cleaners check it every time they arrive.
-  const NO_CODE = '<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code needed</span></div>';
+  const noCodeBlock = (instr) => (instr ? `<div class="lbx none"><span class="lbx-k">Key</span><span class="lbx-by lbx-i" title="${esc(instr)}">${esc(instr)}</span></div>`
+    : '<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code needed</span></div>');
   const lockboxBlock = (lb) => (lb
     ? `<div class="lbx" title="Set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}"><span class="lbx-k">Lockbox code</span><b class="lbx-code">${esc(lb.code)}</b><span class="lbx-by">set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}</span></div>`
     : '<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code recorded yet</span></div>');
@@ -306,6 +307,7 @@
         </div>
         ${field('pe-key', 'Key returned by', `<select id="pe-key"><option value="">Use Guesty’s tag (${esc(KEY_WORDS[g.keyMode || 'none'])})</option>${Object.entries(KEY_WORDS).map(([k, w]) => `<option value="${k}" ${keyOwn === k ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select>`, KEY_WORDS[g.keyMode || 'none'])}
         <label class="pe-check" id="pe-code-row"><input type="checkbox" id="pe-code" ${u.lockboxNoCode ? '' : 'checked'}> Ask for a new lockbox code after each clean</label>
+        <div class="pe-f" id="pe-instr-row"><label for="pe-instr">What should the cleaner do with the key? <span class="muted">(optional)</span></label><input id="pe-instr" maxlength="300" value="${esc(u.keyInstruction || '')}" placeholder="Put the key back in the lockbox and close it."><span class="pe-g">Shown as the cleaner’s last step instead of a new code.</span></div>
         <label class="pe-check"><input type="checkbox" id="pe-show" ${u.hidden ? '' : 'checked'}> Show this flat on the schedule</label>
         <div id="pe-review"></div>
         <div class="form-actions">${u.edited ? '<button type="button" class="btn" id="pe-reset">Reset to Guesty</button>' : ''}<span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="pe-go">Review changes</button></div>
@@ -313,16 +315,21 @@
     const val = (id) => $(id).value.trim();
     const fields = () => ({ label: val('pe-label'), building: val('pe-building'), address: val('pe-address'), postcode: val('pe-postcode').toUpperCase(),
       unitType: $('pe-type').value, checkOutTime: $('pe-out').value, checkInTime: $('pe-in').value, keyMode: $('pe-key').value, hidden: !$('pe-show').checked,
-      lockboxNoCode: isLockbox($('pe-key').value) && !$('pe-code').checked });
+      lockboxNoCode: isLockbox($('pe-key').value) && !$('pe-code').checked,
+      keyInstruction: isLockbox($('pe-key').value) && !$('pe-code').checked ? val('pe-instr') : '' });
     // Only lockbox flats have the "new code" question.
     const isLockbox = (k) => (k || g.keyMode) === 'lockbox';
-    const codeRow = () => $('pe-code-row').classList.toggle('hidden', !isLockbox($('pe-key').value));
-    $('pe-key').onchange = codeRow; codeRow();
+    const codeRow = () => {
+      $('pe-code-row').classList.toggle('hidden', !isLockbox($('pe-key').value));
+      $('pe-instr-row').classList.toggle('hidden', !isLockbox($('pe-key').value) || $('pe-code').checked);
+    };
+    $('pe-key').onchange = codeRow; $('pe-code').onchange = codeRow; codeRow();
     const now = (f) => ({ label: f.label || g.label, building: f.building || g.building, address: f.address || g.address, postcode: f.postcode || g.postcode,
       unitType: shortType(f.unitType || g.unitType), checkOutTime: f.checkOutTime || g.checkOutTime, checkInTime: f.checkInTime || g.checkInTime,
       keyMode: KEY_WORDS[f.keyMode || g.keyMode || 'none'], shown: f.hidden ? 'Hidden' : 'Shown',
-      code: (f.keyMode || g.keyMode) === 'lockbox' ? (f.lockboxNoCode ? 'Not needed' : 'Asked after each clean') : '—' });
-    const WORD = { label: 'Flat name', building: 'Building', address: 'Address', postcode: 'Postcode', unitType: 'Bedrooms', checkOutTime: 'Check-out time', checkInTime: 'Check-in time', keyMode: 'Key returned by', code: 'New lockbox code', shown: 'On the schedule' };
+      code: (f.keyMode || g.keyMode) === 'lockbox' ? (f.lockboxNoCode ? 'Not needed' : 'Asked after each clean') : '—',
+      instr: (f.keyMode || g.keyMode) === 'lockbox' && f.lockboxNoCode ? f.keyInstruction || 'Standard (lockbox)' : '—' });
+    const WORD = { label: 'Flat name', building: 'Building', address: 'Address', postcode: 'Postcode', unitType: 'Bedrooms', checkOutTime: 'Check-out time', checkInTime: 'Check-in time', keyMode: 'Key returned by', code: 'New lockbox code', instr: 'Key instruction', shown: 'On the schedule' };
     const save = async (body, done) => {
       try {
         await send('PUT', `/api/properties/${encodeURIComponent(u.id)}`, { confirmed: true, ...body });
@@ -332,7 +339,7 @@
     };
     $('pe-form').onsubmit = (e) => {
       e.preventDefault();
-      const before = now({ ...Object.fromEntries(['label', 'building', 'address', 'postcode', 'unitType', 'checkOutTime', 'checkInTime'].map((k) => [k, own(k)])), keyMode: keyOwn, hidden: u.hidden, lockboxNoCode: Boolean(u.lockboxNoCode) });
+      const before = now({ ...Object.fromEntries(['label', 'building', 'address', 'postcode', 'unitType', 'checkOutTime', 'checkInTime'].map((k) => [k, own(k)])), keyMode: keyOwn, hidden: u.hidden, lockboxNoCode: Boolean(u.lockboxNoCode), keyInstruction: u.keyInstruction || '' });
       const f = fields(), after = now(f);
       const diff = Object.keys(WORD).filter((k) => before[k] !== after[k]);
       if (!diff.length) { $('pe-review').innerHTML = '<p class="muted">Nothing has changed yet.</p>'; return; }
@@ -1373,7 +1380,7 @@
     const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
     if ($('sh-lbx')) {
       const box = $('sh-lbx'), id = sheetListing;
-      getJSON(`/api/lockbox/${encodeURIComponent(id)}`).then((r) => { if ($('sh-lbx') === box && sheetListing === id) box.innerHTML = r.noCode ? NO_CODE : lockboxBlock(r.lockbox); }).catch(() => {});
+      getJSON(`/api/lockbox/${encodeURIComponent(id)}`).then((r) => { if ($('sh-lbx') === box && sheetListing === id) box.innerHTML = r.noCode ? noCodeBlock(r.instruction) : lockboxBlock(r.lockbox); }).catch(() => {});
     }
     wireAssign();
     on('begin-clean', async () => {
@@ -1413,7 +1420,7 @@
       ['Cleaning', c.endedAt ? durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt)) : 'in progress', c.endedAt, st(0)],
       ['Final checks', `${(c.checklist || []).length} of ${checklistDef.length || 5} confirmed`, c.checksConfirmedAt, st(1)],
       ['Video walkthrough', (c.media || []).some((m) => m.kind === 'video') ? 'uploaded' : 'full quality, from Files', c.videoAt, st(2)],
-      ...(c.keyMode ? [[c.keyMode === 'lockbox' ? 'Key back in the lockbox' : 'Key back in KeyNest', c.keyMode === 'lockbox' ? (c.keyNoCode || (c.key && c.key.noCode) ? 'no new code needed' : 'with a new 4-digit code') : '', keyAt, st(3)]] : []),
+      ...(c.keyMode ? [[c.keyMode === 'lockbox' ? (c.keyInstruction || (c.key && c.key.note) ? 'Key returned' : 'Key back in the lockbox') : 'Key back in KeyNest', c.keyMode === 'lockbox' ? (c.keyInstruction || (c.key && c.key.note) || (c.keyNoCode || (c.key && c.key.noCode) ? 'no new code needed' : 'with a new 4-digit code')) : '', keyAt, st(3)]] : []),
     ];
     return `<ol class="miles">${rows.map(([label, detail, time, state]) => `<li class="${state}"><span class="mdot" aria-hidden="true"></span><span class="mtxt"><b>${esc(label)}</b>${detail ? `<small>${esc(detail)}</small>` : ''}</span><em>${time && state === 'done' ? fmtClock(time) : state === 'now' ? 'Now' : ''}</em></li>`).join('')}</ol>`;
   }
@@ -1523,7 +1530,7 @@
   // ---------------- returning the key (Guesty tag LOCKBOX or KEYNEST) ----------------
   function keyNote(c) {
     if (!c.key) return '';
-    if (c.key.mode === 'lockbox') return c.key.code && can('view_cleaning') ? ` · key in lockbox, new code <b>${esc(c.key.code)}</b>` : ' · key back in the lockbox';
+    if (c.key.mode === 'lockbox') return c.key.code && can('view_cleaning') ? ` · key in lockbox, new code <b>${esc(c.key.code)}</b>` : c.key.note ? ' · key returned' : ' · key back in the lockbox';
     return ' · key back in KeyNest';
   }
   let keyPoll = null;
@@ -1531,8 +1538,8 @@
     if (a.keyMode === 'lockbox' && a.keyNoCode) {
       return `<div class="evidence keystep">
         <div class="ev-head"><b>Last step: the key.</b> <span class="req">Required</span></div>
-        <p class="ks-one">Put the key back in the lockbox and close it. No new code is needed for this flat.</p>
-        <label class="ks-check"><input type="checkbox" id="ks-back"> The key is back in the lockbox</label>
+        <p class="ks-one">${a.keyInstruction ? `<b>${esc(a.keyInstruction)}</b>` : 'Put the key back in the lockbox and close it.'}<br><span class="muted">No new code is needed for this flat.</span></p>
+        <label class="ks-check"><input type="checkbox" id="ks-back"> ${a.keyInstruction ? 'Done: the key is where it should be' : 'The key is back in the lockbox'}</label>
         <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
       </div>`;
     }
@@ -1907,7 +1914,7 @@
       const state = c.status === 'completed' ? '<span class="pill ok">Completed</span>' : c.status === 'cancelled' ? '<span class="pill off">Cancelled</span>' : `<span class="pill">${esc(STEP[c.status] || c.status)}</span>`;
       const checks = defs.map((d) => { const got = (c.checklist || []).find((x) => x.key === d.key); return `<li class="${got ? 'ok' : 'no'}"><span class="dt-tick" aria-hidden="true">${got ? '✓' : '–'}</span><span><b>${esc(d.title)}</b> ${esc(d.text)}</span><em>${got ? t(got.confirmedAt) : 'Not confirmed'}</em></li>`; }).join('');
       const key = !c.keyMode && !c.key ? '<p class="muted">No key step for this flat.</p>'
-        : c.key && c.key.mode === 'lockbox' ? (c.key.code ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>` : `<p>Key back in the lockbox (no new code needed) · ${t(c.key.returnedAt)}</p>`)
+        : c.key && c.key.mode === 'lockbox' ? (c.key.code ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>` : `<p>${c.key.note ? `Key returned: ${esc(c.key.note)}` : 'Key back in the lockbox (no new code needed)'} · ${t(c.key.returnedAt)}</p>`)
         : c.key && c.key.mode === 'keynest' ? `<p>Key in KeyNest ✓ (${esc(c.key.status || 'in store')}) · checked ${t(c.key.confirmedAt)}</p>`
         : `<p class="warn">Key not returned yet (${esc(c.keyMode === 'keynest' ? 'KeyNest' : 'lockbox')}).</p>`;
       // What KeyNest recorded for this flat's key around the cleaning (from its webhook): who collected it and when it came back.
