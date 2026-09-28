@@ -1023,15 +1023,20 @@
     const box = $('kn-status'), text = $('kn-text'), when = $('kn-when'), again = $('kn-check');
     // While KeyNest shows the key out, suggest where to drop it off: nearest KeyNest to the flat and nearest 24-hour one.
     let stores = null; // loaded once
-    const mapLinks = (st) => {
-      const ll = `${Number(st.lat)},${Number(st.lng)}`;
-      return `<div class="kn-maps"><a class="btn" target="_blank" rel="noopener" href="https://maps.apple.com/?daddr=${ll}&q=${encodeURIComponent(st.name)}">Apple Maps</a>`
-        + `<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${ll}">Google Maps</a>`
-        + `<a class="btn" target="_blank" rel="noopener" href="https://waze.com/ul?ll=${ll}&navigate=yes">Waze</a></div>`;
+    // One button: the phone's own maps. Android hands a geo: link to its default maps app; iPhones, iPads and Macs
+    // open Apple Maps (the built-in maps); anything else gets Google Maps in the browser. Walking directions where it can.
+    const directions = (st) => {
+      const ll = `${Number(st.lat)},${Number(st.lng)}`, ua = navigator.userAgent;
+      const href = /Android/i.test(ua) ? `geo:${ll}?q=${ll}(${encodeURIComponent(st.name)})`
+        : /iPhone|iPad|iPod|Macintosh/.test(ua) ? `https://maps.apple.com/?daddr=${ll}&dirflg=w`
+        : `https://www.google.com/maps/dir/?api=1&destination=${ll}&travelmode=walking`;
+      return `<a class="btn kn-go" href="${esc(href)}"${href.startsWith('geo:') ? '' : ' target="_blank" rel="noopener"'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/></svg>Get directions</a>`;
     };
-    const storeCard = (title, st) => `<div class="kn-store"><div class="kn-store-h"><span>${esc(title)}</span><b>${esc(st.miles)} mi</b></div>
-      <div class="kn-store-name">${esc(st.name)}</div>${st.address ? `<div class="muted">${esc(st.address)}</div>` : ''}
-      ${st.today ? `<div class="kn-open ${st.openNow === true ? 'on' : st.openNow === false ? 'off' : ''}">${st.is24 ? '' : st.openNow === true ? 'Open now · ' : st.openNow === false ? 'Closed now · ' : ''}${esc(st.today)}</div>` : ''}${mapLinks(st)}</div>`;
+    const walk = (m) => (m < 60 ? `${m} min walk` : `${Math.floor(m / 60)} h ${m % 60} min walk`);
+    const storeCard = (title, st) => `<div class="kn-store${st.mostUsed ? ' top' : ''}"><div class="kn-store-h"><span>${esc(title)}</span><b>${esc(st.miles)} mi · ${esc(walk(st.walkMin))}</b></div>
+      <div class="kn-store-name">${esc(st.name)}${st.mostUsed ? '<span class="kn-badge">Most used</span>' : ''}</div>${st.address ? `<div class="muted">${esc(st.address)}</div>` : ''}
+      ${st.today ? `<div class="kn-open ${st.openNow === true ? 'on' : st.openNow === false ? 'off' : ''}">${st.is24 ? '' : st.openNow === true ? 'Open now · ' : st.openNow === false ? 'Closed now · ' : ''}${esc(st.today)}</div>` : ''}
+      ${st.mostUsed ? `<div class="muted kn-used">This key was dropped off here ${esc(st.mostUsed.count)} of the last ${esc(st.mostUsed.total)} times.</div>` : ''}${directions(st)}</div>`;
     const showStores = async (show) => {
       const el = $('kn-stores');
       if (!el) return;
@@ -1039,7 +1044,8 @@
       if (!stores) { try { stores = await getJSON(`/api/cleanings/${a.id}/key-stores`); } catch (e) { stores = { error: e.message }; } }
       const n = stores.nearest, n24 = stores.nearest24;
       el.innerHTML = stores.error ? `<p class="muted">${esc(stores.error)}</p>` : !n ? '' : `<h4>Where to drop the key off</h4>${
-        n24 && n24.id === n.id ? storeCard('Nearest KeyNest · open 24 hours', n) : storeCard('Nearest KeyNest to the flat', n) + (n24 ? storeCard('Nearest open 24 hours', n24) : '')}`;
+        n24 && n24.id === n.id ? storeCard('Nearest KeyNest · open 24 hours', n) : storeCard('Nearest KeyNest to the flat', n) + (n24 ? storeCard('Nearest open 24 hours', n24) : '')}${
+        stores.usual ? storeCard('Where this key usually goes', stores.usual) : ''}`;
     };
     let checking = false;
     const check = async () => {

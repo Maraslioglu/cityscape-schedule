@@ -707,11 +707,24 @@ async function keynestCheck(env, keyId) {
 let knStores = null, knStoresFail = null; // { at, stores } / { at, err }
 function knStore(s) {
   const num = (...v) => { for (const x of v) if (x !== null && x !== undefined && x !== '' && Number.isFinite(Number(x))) return Number(x); return NaN; };
-  // Opening times: DayOfWeek 0 = Monday … 6 = Sunday; minutes from midnight (1439.98 = until midnight).
+  // Opening times: DayOfWeek 0 = Monday … 6 = Sunday (or a day name); minutes from midnight (1439.98 = until
+  // midnight) or "HH:MM". A closing time of 00:00 means midnight.
+  const dayOf = (v) => (typeof v === 'string' && /^[a-z]/i.test(v) ? ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].indexOf(v.slice(0, 3).toLowerCase()) : num(v));
+  const minOf = (v) => { const m = /^(\d{1,2}):(\d\d)/.exec(String(v ?? '')); return m ? Number(m[1]) * 60 + Number(m[2]) : Math.round(num(v)); };
   const times = s.StoreOpeningTimingsDetails || s.OpeningTimingsDetails || s.OpeningTimes || s.OpeningHours || [];
-  const hours = (Array.isArray(times) ? times : []).map((t) => ({ day: num(t.DayOfWeek, t.dayOfWeek), from: Math.round(num(t.StartMinuteOfDay, t.startMinuteOfDay)), to: Math.round(num(t.EndMinuteOfDay, t.endMinuteOfDay)) }))
-    .filter((h) => h.day >= 0 && h.day <= 6 && h.from >= 0 && h.to > h.from);
+  let hours = (Array.isArray(times) ? times : []).map((t) => {
+    const from = minOf(t.StartMinuteOfDay ?? t.startMinuteOfDay ?? t.StartTime ?? t.OpenTime ?? t.Open);
+    let to = minOf(t.EndMinuteOfDay ?? t.endMinuteOfDay ?? t.EndTime ?? t.CloseTime ?? t.Close);
+    if (to === 0 && from > 0) to = 1440;
+    return { day: dayOf(t.DayOfWeek ?? t.dayOfWeek ?? t.Day), from, to };
+  }).filter((h) => h.day >= 0 && h.day <= 6 && h.from >= 0 && h.to > h.from);
   const time = String(s.StoreTime || s.Storetime || '').trim();
+  // No usable times: read KeyNest's own summary when it's "Every day:08:00 - 00:00".
+  const every = /^every ?day\s*:?\s*(\d{1,2}:\d\d)\s*[-–]\s*(\d{1,2}:\d\d)/i.exec(time);
+  if (!hours.length && every) {
+    const from = minOf(every[1]), to = minOf(every[2]) || 1440;
+    if (to > from) hours = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, from, to }));
+  }
   const allDay = [0, 1, 2, 3, 4, 5, 6].every((d) => hours.some((h) => h.day === d && h.from <= 0 && h.to >= 1439));
   return {
     id: String(s.StoreId ?? s.Id ?? s.LocationCode ?? ''), name: String(s.StoreName || s.Name || '').trim(),
@@ -731,7 +744,9 @@ async function keynestStores(env) {
     try { raw = list(await keynestGet(env, '/KeyStore/StoreListByCountry', { base: v2, body: { Country: 'United Kingdom' } })); } catch (e) { console.log('[keynest] store list (v2) failed:', e.message); }
   }
   const stores = raw.map(knStore).filter((x) => x.name && Number.isFinite(x.lat) && Number.isFinite(x.lng) && (x.lat || x.lng));
-  console.log('[keynest] stores:', stores.length, 'usable of', raw.length, '·', stores.filter((x) => x.is24).length, 'open 24 hours · fields:', Object.keys(raw[0] || {}).join(','));
+  const timed = raw.find((r) => Array.isArray(r.StoreOpeningTimingsDetails) && r.StoreOpeningTimingsDetails.length);
+  console.log('[keynest] stores:', stores.length, 'usable of', raw.length, '·', stores.filter((x) => x.is24).length, 'open 24 hours ·', stores.filter((x) => x.hours.length).length, 'with opening times · fields:', Object.keys(raw[0] || {}).join(','),
+    '· times look like:', timed ? JSON.stringify(timed.StoreOpeningTimingsDetails[0]).slice(0, 200) : 'none', '· e.g.', JSON.stringify(raw[0] && raw[0].StoreTime));
   if (!stores.length) { const err = userError('Couldn’t load the KeyNest store list. Try again in a minute.'); knStoresFail = { at: Date.now(), err }; throw err; }
   knStores = { at: Date.now(), stores }; knStoresFail = null;
   return stores;
@@ -750,6 +765,21 @@ async function flatLatLng(l) {
     return g;
   } catch (_) { return null; }
 }
+// The store this key is dropped off at most (from the webhook record, the last 120 days): needs at least 2 drop-offs.
+function mostUsedStore(moves) {
+  const drops = (moves || []).filter((m) => m.event === 'DROPPED' && (m.storeId || m.store));
+  const by = new Map();
+  for (const m of drops) {
+    const k = m.storeId ? 'id:' + m.storeId : 'name:' + normName(m.store);
+    const e = by.get(k) || { storeId: m.storeId || '', name: m.store || '', count: 0, last: '' };
+    e.count += 1; if (m.at > e.last) { e.last = m.at; e.name = m.store || e.name; }
+    by.set(k, e);
+  }
+  const top = [...by.values()].sort((x, y) => y.count - x.count || y.last.localeCompare(x.last))[0];
+  return top && top.count >= 2 ? { ...top, total: drops.length } : null;
+}
+// Walking time from the straight-line distance: streets add about a quarter, at 3 mph.
+const walkMinutes = (miles) => Math.max(1, Math.round(((miles * 1.25) / 3) * 60));
 const milesBetween = (a, b) => {
   const r = (d) => (d * Math.PI) / 180, dLat = r(b.lat - a.lat), dLng = r(b.lng - a.lng);
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng / 2) ** 2;
@@ -799,7 +829,7 @@ async function keynestRecord(env, b) {
   const holder = (st) => (/^In Use\s*\((.+)\)$/i.exec(s(st)) || [])[1] || '';
   // Who: the person now holding the key; for a drop-off, the person who had it.
   const who = event === 'DROPPED' ? holder(b.PreviousStatus) : s(b.CurrentUserName) || holder(b.CurrentStatus);
-  const move = { event, at: new Date(knTime(b.WhenHappened, now)).toISOString(), who, store: s(b.StoreName), status: s(b.CurrentStatus) };
+  const move = { event, at: new Date(knTime(b.WhenHappened, now)).toISOString(), who, store: s(b.StoreName), storeId: s(b.StoreId), status: s(b.CurrentStatus) };
   const id = s(b.KeyId);
   const moves = (await env.STORE.get('keynestMoves', 'json')) || {};
   moves[id] = [...(moves[id] || []).filter((m) => now - Date.parse(m.at) < KN_KEEP_DAYS * 864e5), move]
@@ -1193,8 +1223,18 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     try { stores = await keynestStores(env); } catch (e) { return json({ error: e.userMessage || 'Couldn’t load the KeyNest stores. Try again in a minute.' }); }
     const now = londonNow();
     const ranked = stores.map((st) => ({ st, miles: milesBetween(at, st) })).sort((x, y) => x.miles - y.miles);
-    const view = (x) => x && { id: x.st.id, name: x.st.name, address: x.st.address, lat: x.st.lat, lng: x.st.lng, miles: Math.round(x.miles * 10) / 10, is24: x.st.is24, ...storeToday(x.st, now) };
-    return json({ nearest: view(ranked[0]), nearest24: view(ranked.find((x) => x.st.is24)) });
+    // Where this flat's key is usually dropped off (KeyNest webhook record).
+    let keyId = rec.key && rec.key.keyId;
+    if (!keyId) { try { keyId = (await keynestLink(env, l) || {}).keyId; } catch (_) { /* no record then */ } }
+    const top = keyId ? mostUsedStore(((await env.STORE.get('keynestMoves', 'json')) || {})[keyId]) : null;
+    const isTop = (st) => Boolean(top && (top.storeId ? String(st.id) === top.storeId : normName(st.name) === normName(top.name)));
+    const view = (x) => x && {
+      id: x.st.id, name: x.st.name, address: x.st.address, lat: x.st.lat, lng: x.st.lng, miles: Math.round(x.miles * 10) / 10,
+      walkMin: walkMinutes(x.miles), is24: x.st.is24, ...storeToday(x.st, now), mostUsed: isTop(x.st) ? { count: top.count, total: top.total } : null,
+    };
+    const nearest = view(ranked[0]), nearest24 = view(ranked.find((x) => x.st.is24));
+    const usual = top && !(nearest && nearest.mostUsed) && !(nearest24 && nearest24.mostUsed) ? view(ranked.find((x) => isTop(x.st))) : null;
+    return json({ nearest, nearest24, usual });
   }
   if (req.method === 'POST' && action === 'key') {
     if (!isMine) return deny();
