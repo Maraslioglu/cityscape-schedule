@@ -174,7 +174,10 @@
   <section id="view-account" class="hidden">
     <div class="weekbar"><h1>My account</h1></div>
     <div class="acct-grid">
-      <div class="card pad" id="acct-info"></div>
+      <div class="acct-left">
+        <div class="card pad" id="acct-info"></div>
+        <div class="card pad acct-admin hidden" id="acct-admin"><h3>Admin</h3><div class="acct-links"><button class="btn" id="acct-users">Users</button><button class="btn" id="acct-settings">Settings</button></div></div>
+      </div>
       <form class="card pad" id="pw-form">
         <h3>Change password</h3>
         <label for="pw-cur">Current password</label><input id="pw-cur" type="password" autocomplete="current-password" required>

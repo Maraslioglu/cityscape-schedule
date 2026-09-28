@@ -802,6 +802,10 @@
       <dt>Buildings</dt><dd>${b}</dd>
       <dt>Can use</dt><dd>${perms || '—'}</dd></dl>`;
     $('pw-form').classList.toggle('hidden', !!me.isOwner);
+    // On phones Users and Settings live here rather than in the tab bar.
+    $('acct-users').classList.toggle('hidden', !navAllowed('users'));
+    $('acct-settings').classList.toggle('hidden', !navAllowed('settings'));
+    $('acct-admin').classList.toggle('hidden', !navAllowed('users') && !navAllowed('settings'));
   }
   $('pw-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -988,6 +992,8 @@
   });
 
   $('me-btn').onclick = () => setView('account');
+  $('acct-users').onclick = () => setView('users');
+  $('acct-settings').onclick = () => setView('settings');
   $('me-btn2').onclick = () => setView('account');
   (async () => {
     const q0 = new URLSearchParams(location.search);

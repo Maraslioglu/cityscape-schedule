@@ -1203,3 +1203,10 @@ td.unit .u { font-weight: 600; }
   #mt-new { flex: 1 1 100%; order: 10; }
   .mt-facts { grid-template-columns: 1fr 1fr; }
 }
+
+/* Phones: the tab bar keeps the everyday sections; Users and Settings are on the account page (tap your initials). */
+.acct-left { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.acct-links { display: flex; gap: 8px; flex-wrap: wrap; }
+.acct-links .btn { margin-top: 0; }
+@media (min-width: 761px) { .acct-admin { display: none; } }
+@media (max-width: 760px) { .snav button[data-group="admin"] { display: none !important; } }
