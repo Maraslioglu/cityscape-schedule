@@ -127,7 +127,7 @@
       return `<button class="${cls}" role="tab" aria-selected="${d.date === selected}" data-date="${d.date}">
         <span class="dtop"><span class="dn">${WD_SHORT.format(D(d.date))}</span>${d.date === data.today ? '<span class="dtoday">Today</span>' : d.hasNew ? '<i class="newdot" title="New booking"></i>' : ''}</span>
         <span class="dd">${D(d.date).getUTCDate()}</span>
-        <span class="dc">${d.cleans}<span class="lbl"> out</span><span class="sep"> · </span>${d.arrivals}<span class="lbl"> in</span></span>
+        <span class="dc"><b class="o">${d.cleans}</b><span class="lbl"> out</span><span class="sep"> · </span><b class="i">${d.arrivals}</b><span class="lbl"> in</span></span>
       </button>`;
     }).join('');
   }
@@ -208,7 +208,7 @@
     const { dates, days, board, today } = data;
     const head = `<colgroup><col class="first">${dates.map(() => '<col>').join('')}</colgroup>
       <thead><tr><th class="first-col"></th>${days.map((d) => `<th class="${d.date === today ? 'today' : ''}"><button data-date="${d.date}" title="Open ${esc(longDate(d.date))}">
-        <div class="dn">${WD_SHORT.format(D(d.date))}</div><div class="dd">${D(d.date).getUTCDate()}</div><div class="dc">${d.cleans} out · ${d.arrivals} in</div></button></th>`).join('')}</tr></thead>`;
+        <div class="dn">${WD_SHORT.format(D(d.date))}</div><div class="dd">${D(d.date).getUTCDate()}</div><div class="dc"><b class="o">${d.cleans}</b> out · <b class="i">${d.arrivals}</b> in</div></button></th>`).join('')}</tr></thead>`;
     const body = board.map((b) => `
       <tr class="b-row"><td colspan="${dates.length + 1}"><div class="b-name">${esc(b.name)}<span>${esc(b.postcode)}</span></div></td></tr>
       ${b.units.map((u) => `<tr>

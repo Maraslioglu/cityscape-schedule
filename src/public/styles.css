@@ -14,7 +14,7 @@
   --accent-ink: #ffffff;
   --accent-soft: #e4efe9;
   --accent-tint: #eef4f0;
-  --mark: #1c6b52;
+  --mark: #06402a;
   --stay: #e4efe9;
   --out: #b3503c;
   --out-soft: #f8eae5;
@@ -761,7 +761,7 @@ main > section:not(#week-area) > .weekbar { margin-top: 0; }
   body { padding-left: 248px; }
   .side { width: 248px; background: var(--surface-2); padding: 26px 14px 18px; }
   .side-brand { gap: 10px; padding: 0 10px 22px; }
-  .side-brand .cs-mark { width: 27px; height: 25px; color: var(--accent); }
+  .side-brand .cs-mark { width: 27px; height: 25px; color: var(--mark); }
   .side-brand .name { font-size: 21px; font-weight: 400; letter-spacing: -.015em; }
   .side .tag { font-family: var(--font-head); font-weight: 500; font-size: 9px; letter-spacing: .2em; padding: 4px 7px; }
   .nlbl { font-family: var(--font-head); font-size: 10.5px; font-weight: 500; letter-spacing: .16em; color: var(--ink-3); padding: 18px 12px 8px; }
@@ -975,6 +975,17 @@ td.unit .u { font-weight: 600; }
 .tc-step { color: var(--prog); }
 .edit-note { color: var(--prog); }
 .kn-table tr.changed td { background: var(--prog-soft); }
+/* account button on phones: one green circle with the initials */
+.btn.me { width: 40px; height: 40px; padding: 0; gap: 0; border: 0; border-radius: 50%; background: var(--accent-strong); }
+.btn.me:hover { border: 0; background: var(--accent); }
+.btn.me .avatar { width: 100%; height: 100%; background: none; font-size: 13px; }
+.btn.me[aria-selected="true"] { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
+/* check-outs red, check-ins green on the day tiles and the week view */
+.dbtn .dc b.o, table.board thead .dc b.o { color: var(--out); font-weight: 600; }
+.dbtn .dc b.i, table.board thead .dc b.i { color: var(--in); font-weight: 600; }
+.dbtn[aria-selected="true"] .dc b.o { color: #f4a893; }
+.dbtn[aria-selected="true"] .dc b.i { color: #7ee0a8; }
+
 /* "Cleaning FL-2 · 5:14" bar: the site's dark green, beside the sidebar rather than over it */
 .active-bar { background: var(--accent-strong); color: #fff; box-shadow: 0 -10px 30px -12px rgba(18, 63, 48, .5); }
 .active-bar .btn.primary { background: #fff; border-color: #fff; color: var(--accent-strong); box-shadow: none; }
@@ -983,7 +994,7 @@ td.unit .u { font-weight: 600; }
 /* phones */
 @media (max-width: 760px) {
   .top { background: color-mix(in srgb, var(--bg) 92%, transparent); border-bottom: 0; backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px); }
-  .brand .cs-mark { color: var(--accent); }
+  .brand .cs-mark { color: var(--mark); }
   .brand .name { font-weight: 400; font-size: 19px; }
   .page-head { margin: 14px 0 16px; padding-right: 0; gap: 6px; }
   .page-title { font-size: 28px; }
