@@ -15,6 +15,7 @@ const files = {
   'styles.css': ['text/css; charset=utf-8', css],
   'app.js': ['text/javascript; charset=utf-8', js],
   'favicon.svg': ['image/svg+xml', pub('favicon.svg')],
+  'sw.js': ['text/javascript; charset=utf-8', pub('sw.js')],
   'manifest.webmanifest': ['application/manifest+json', pub('manifest.webmanifest')],
 };
 // Images are stored as base64 text and decoded by the Worker when served (b64: true).
