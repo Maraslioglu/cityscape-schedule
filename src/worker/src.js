@@ -273,12 +273,15 @@ async function usersApi(req, env, ctx, me, id) {
   return json({ error: 'Not supported' }, 405);
 }
 
-// What each person may see: their buildings, and fields they have permission for.
+// What each person may see: their buildings, and fields they have permission for. Building names are compared
+// loosely ("Old Gloucester Street 25" = "25 Old Gloucester Street"), so tidying a name never locks anyone out.
+const bkey = (b) => tidyStreet(b).toLowerCase().replace(/[^a-z0-9]/g, '');
 function allowBuildingFor(u) {
   if (!u || u.buildings === 'all' || u.buildings == null) return null;
-  const set = new Set(u.buildings);
-  return (b) => set.has(b);
+  const set = new Set(u.buildings.map(bkey));
+  return (b) => set.has(bkey(b));
 }
+const coversBuilding = (u, b) => !u || u.buildings === 'all' || u.buildings == null || (Array.isArray(u.buildings) && u.buildings.some((x) => bkey(x) === bkey(b)));
 function shapeWeek(data, u) {
   if (!can(u, 'view_board')) data.board = [];
   if (!can(u, 'view_guests')) {
@@ -409,35 +412,104 @@ async function getSnapshot(env, ctx) {
 
 // ---------------------------------------------------------------- building the week
 const FLAT_PART = /^(flat|apt\.?|apartment|unit|fl-?|room|studio|\d+(st|nd|rd|th)\s+floor|ground floor|basement)\b[^,]*$/i;
-const cleanStreet = (s) => (s || '').split(',').map((x) => x.trim()).filter((x) => x && !FLAT_PART.test(x))[0] || '';
+// Guesty sometimes has the number after the street ("Old Gloucester Street 25"): put it first, like the rest.
+function tidyStreet(s) {
+  const t = String(s || '').trim().replace(/\s+/g, ' ');
+  const m = /^([^\d,]*[a-z][^\d,]*?) (\d+[a-z]?)$/i.exec(t);
+  return m ? `${m[2]} ${m[1]}` : t;
+}
+const cleanStreet = (s) => tidyStreet((s || '').split(',').map((x) => x.trim()).filter((x) => x && !FLAT_PART.test(x))[0] || '');
 const natural = new Intl.Collator('en', { numeric: true, sensitivity: 'base' }).compare;
 const streetKey = (n) => n.replace(/^\d+[a-z]?\s+/i, '');
 const byBuilding = (a, b) => natural(streetKey(a), streetKey(b)) || natural(a, b);
 const typeOrder = (t) => (t === 'Studio' ? 0 : Number.isFinite(parseInt(t, 10)) ? parseInt(t, 10) : 99);
 
 const coord = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
-function listingMap(raw, cfg, allow) {
+// A flat's details can be changed in the app (Properties › Edit) on top of Guesty: { listingId: { label, building,
+// address, postcode, unitType, checkInTime, checkOutTime, keyMode, hidden, at, by } }. Kept in memory for a few seconds.
+const EDITABLE = ['label', 'building', 'address', 'postcode', 'unitType', 'checkInTime', 'checkOutTime', 'keyMode'];
+let propOv = { at: 0, map: {}, ver: '' };
+async function loadPropOverrides(env, fresh) {
+  if (!fresh && Date.now() - propOv.at < MEM_TTL) return propOv.map;
+  const map = (env.STORE && (await env.STORE.get('propertyOverrides', 'json'))) || {};
+  propOv = { at: Date.now(), map, ver: Object.keys(map).length ? fnv(JSON.stringify(map)) : '' };
+  return map;
+}
+// What the page compares to know the schedule changed: Guesty's bookings plus any details edited in the app.
+const dataVersion = (snap) => snap.hash + (propOv.ver ? '.' + propOv.ver : '');
+function listingMap(raw, cfg, allow, { all = false } = {}) {
   const map = new Map();
   for (const l of raw) {
-    if (l.active === false || cfg.hidden.includes(l._id) || cfg.hidden.includes(l.nickname)) continue;
+    if (l.active === false) continue;
+    const o = propOv.map[l._id] || {};
+    const hiddenByEnv = cfg.hidden.includes(l._id) || cfg.hidden.includes(l.nickname);
+    const hidden = o.hidden === true || (hiddenByEnv && o.hidden !== false);
+    if (hidden && !all) continue;
     const ov = (m) => m[l._id] || (l.nickname && m[l.nickname]);
     const b = l.bedrooms;
-    const unitType = ov(cfg.typeOverrides) || (b === 0 ? 'Studio' : typeof b === 'number' && b > 0 ? `${b} Bedroom` : 'Unknown');
     // Guesty tags decide how the key is returned after a cleaning.
     const tags = (Array.isArray(l.tags) ? l.tags : []).map((t) => String(t).trim().toUpperCase().replace(/[\s_-]+/g, ''));
-    const keyMode = tags.includes('KEYNEST') ? 'keynest' : tags.includes('LOCKBOX') ? 'lockbox' : null;
     const a = l.address || {};
-    const pc = a.zipcode || ((a.full || '').match(/[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}/i) || [''])[0].toUpperCase();
     const n = l.nickname || l.title || 'Unit';
-    map.set(l._id, {
-      id: l._id, name: n, label: n.includes(',') ? n.split(',')[0].trim() : n,
+    const guesty = {
+      label: n.includes(',') ? n.split(',')[0].trim() : n,
       building: ov(cfg.buildingOverrides) || cleanStreet(a.street) || cleanStreet(a.full) || n,
-      postcode: pc, address: a.full || '', lat: coord(a.lat), lng: coord(a.lng), unitType, keyMode,
+      address: a.full || '',
+      postcode: a.zipcode || ((a.full || '').match(/[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}/i) || [''])[0].toUpperCase(),
+      unitType: ov(cfg.typeOverrides) || (b === 0 ? 'Studio' : typeof b === 'number' && b > 0 ? `${b} Bedroom` : 'Unknown'),
+      keyMode: tags.includes('KEYNEST') ? 'keynest' : tags.includes('LOCKBOX') ? 'lockbox' : null,
       checkInTime: l.defaultCheckInTime || cfg.defaultIn, checkOutTime: l.defaultCheckOutTime || cfg.defaultOut,
+    };
+    const v = { ...guesty };
+    for (const k of EDITABLE) if (o[k] !== undefined && o[k] !== '') v[k] = o[k] === 'none' ? null : o[k];
+    if (v.building && o.building === undefined) v.building = tidyStreet(v.building);
+    if (allow && !allow(v.building)) continue;
+    const moved = Boolean(o.address || o.postcode); // Guesty's map position is for Guesty's address
+    map.set(l._id, {
+      id: l._id, name: o.label || o.building ? `${v.label}, ${v.building}` : n, ...v,
+      lat: moved ? null : coord(a.lat), lng: moved ? null : coord(a.lng),
+      hidden, hiddenByEnv, guesty, edited: EDITABLE.some((k) => o[k] !== undefined) || o.hidden !== undefined, editedAt: o.at || null, editedBy: o.by || null,
     });
-    if (allow && !allow(map.get(l._id).building)) map.delete(l._id);
   }
   return map;
+}
+
+const UNIT_TYPES = ['Studio', '1 Bedroom', '2 Bedroom', '3 Bedroom', '4 Bedroom', '5 Bedroom'];
+async function propertyEditApi(req, env, ctx, me, id) {
+  if (!isManager(me)) return json({ error: 'Only Admins and Users can edit properties.' }, 403);
+  const snap = await getSnapshot(env, ctx);
+  await loadPropOverrides(env, true);
+  const l = listingMap(snap.listings, config(env), null, { all: true }).get(id);
+  if (!l || !inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, l ? 403 : 404);
+  const body = await req.json().catch(() => ({}));
+  if (body.confirmed !== true) return json({ error: 'Review the changes and confirm them first.' }, 400);
+  const all = (await env.STORE.get('propertyOverrides', 'json')) || {};
+  let cur = { ...(all[id] || {}) };
+  if (body.reset === true) cur = {};
+  else {
+    const f = body.fields || {}, bad = (msg) => { throw userError(msg, 400); };
+    const text = (k, max, label) => { if (f[k] === undefined) return; const v = String(f[k] ?? '').trim().replace(/\s+/g, ' '); if (v.length > max) bad(`${label} is too long (${max} characters at most).`); cur[k] = v; };
+    text('label', 40, 'The flat’s name'); text('building', 80, 'The building'); text('address', 200, 'The address');
+    if (f.postcode !== undefined) {
+      const v = String(f.postcode || '').trim().toUpperCase().replace(/\s+/g, ' ');
+      if (v && !/^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/.test(v)) bad('That doesn’t look like a UK postcode.');
+      cur.postcode = v;
+    }
+    if (f.unitType !== undefined) { if (f.unitType && !UNIT_TYPES.includes(f.unitType)) bad('Pick the number of bedrooms from the list.'); cur.unitType = f.unitType || ''; }
+    for (const k of ['checkInTime', 'checkOutTime']) if (f[k] !== undefined) { const v = String(f[k] || ''); if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) bad('Times look like 15:00.'); cur[k] = v; }
+    if (f.keyMode !== undefined) { if (!['', 'keynest', 'lockbox', 'none'].includes(f.keyMode)) bad('Pick how the key is returned from the list.'); cur.keyMode = f.keyMode; }
+    if (f.hidden !== undefined) cur.hidden = f.hidden === true;
+    if (cur.building && !coversBuilding(me, cur.building)) return json({ error: 'You can only move flats into buildings you look after.' }, 403);
+    // Blank means "use Guesty's"; a value the same as Guesty's isn't a change either.
+    for (const k of EDITABLE) if (cur[k] === '' || cur[k] === (l.guesty[k] === null ? 'none' : l.guesty[k])) delete cur[k];
+    if (cur.hidden === (l.hiddenByEnv ? true : false)) delete cur.hidden;
+  }
+  delete cur.at; delete cur.by;
+  if (Object.keys(cur).length) all[id] = { ...cur, at: nowIso(), by: me.name }; else delete all[id];
+  await env.STORE.put('propertyOverrides', JSON.stringify(all));
+  await loadPropOverrides(env, true);
+  console.log(`[properties] ${me.name} ${body.reset ? 'reset' : 'edited'} ${l.label} (${Object.keys(cur).join(', ') || 'back to Guesty'})`);
+  return json({ ok: true });
 }
 
 function buildWeek(start, rawListings, stays, cfg, meta, allow) {
@@ -526,15 +598,15 @@ async function weekDataRaw(env, ctx, dateParam, fresh, allow, user) {
   const start = weekStartFor(dateParam, cfg.weekStartDay);
   const end = addDays(start, 6);
   let snap = fresh ? await refreshSnapshot(env, 'manual refresh') : await getSnapshot(env, ctx);
-  if (start >= snap.from && end <= snap.to) return buildWeek(start, snap.listings, snap.stays, cfg, { at: snap.at, version: snap.hash }, allow);
+  if (start >= snap.from && end <= snap.to) return buildWeek(start, snap.listings, snap.stays, cfg, { at: snap.at, version: dataVersion(snap) }, allow);
   // Outside the pre-loaded window (far past / far future): ask Guesty directly and cache at the edge.
   const cache = caches.default;
   const scope = allow ? fnv(JSON.stringify(user.buildings)) : 'all';
-  const key = new Request(`https://cache.local/week/${start}/${snap.hash}/${scope}`);
+  const key = new Request(`https://cache.local/week/${start}/${dataVersion(snap)}/${scope}`);
   const hit = !fresh && (await cache.match(key));
   if (hit) return hit.json();
   const stays = (await fetchStays(env, cfg, start, end)).map(slimStay);
-  const data = buildWeek(start, snap.listings, stays, cfg, { at: Date.now(), version: snap.hash }, allow);
+  const data = buildWeek(start, snap.listings, stays, cfg, { at: Date.now(), version: dataVersion(snap) }, allow);
   ctx.waitUntil(cache.put(key, new Response(JSON.stringify(data), { headers: { 'Cache-Control': 'max-age=600' } })));
   return data;
 }
@@ -542,18 +614,22 @@ async function weekDataRaw(env, ctx, dateParam, fresh, allow, user) {
 async function propertiesData(env, ctx, user) {
   const cfg = config(env);
   const snap = await getSnapshot(env, ctx);
-  const listings = listingMap(snap.listings, cfg, allowBuildingFor(user));
+  const manage = isManager(user);
+  const every = listingMap(snap.listings, cfg, allowBuildingFor(user), { all: manage });
+  const listings = new Map([...every].filter(([, l]) => !l.hidden));
   const codes = can(user, 'view_cleaning') ? ((await env.STORE.get('lockboxCodes', 'json')) || {}) : {};
   const groups = new Map();
-  for (const l of listings.values()) {
+  for (const l of every.values()) {
     if (!groups.has(l.building)) groups.set(l.building, { name: l.building, postcode: l.postcode, units: [] });
-    groups.get(l.building).units.push({ id: l.id, name: l.name, label: l.label, address: l.address, unitType: l.unitType, checkIn: fmtTime(l.checkInTime), checkOut: fmtTime(l.checkOutTime), keyMode: l.keyMode, lockbox: codes[l.id] || null });
+    groups.get(l.building).units.push({ id: l.id, name: l.name, label: l.label, address: l.address, unitType: l.unitType, checkIn: fmtTime(l.checkInTime), checkOut: fmtTime(l.checkOutTime), keyMode: l.keyMode, lockbox: codes[l.id] || null,
+      hidden: l.hidden, edited: l.edited,
+      ...(manage ? { postcode: l.postcode, checkInTime: l.checkInTime, checkOutTime: l.checkOutTime, building: l.building, guesty: l.guesty, hiddenByEnv: l.hiddenByEnv, editedAt: l.editedAt, editedBy: l.editedBy } : {}) });
   }
   const buildings = [...groups.values()].sort((a, b) => byBuilding(a.name, b.name));
   for (const b of buildings) b.units.sort((x, y) => natural(x.label, y.label));
   const counts = {};
   for (const l of listings.values()) counts[l.unitType] = (counts[l.unitType] || 0) + 1;
-  return { buildings, total: listings.size, counts, mock: cfg.mock, keynest: await keynestStatus(env, listings), canManage: isManager(user) };
+  return { buildings, total: listings.size, counts, mock: cfg.mock, keynest: await keynestStatus(env, listings), canManage: manage, unitTypes: UNIT_TYPES };
 }
 
 // ---------------------------------------------------------------- Guesty webhook (instant updates)
@@ -907,7 +983,7 @@ async function keynestAdminApi(req, env, ctx, me, parts) {
 // Stored as one list: { id, to, type, title, body, url, at, read }. Kept 60 days, newest 2000.
 async function recipients(env, roles, building, except) {
   const users = (await loadUsers(env)).filter((u) => u.active !== false && roles.includes(u.role)
-    && (u.buildings === 'all' || u.buildings == null || (Array.isArray(u.buildings) && u.buildings.includes(building))));
+    && coversBuilding(u, building));
   const ids = users.map((u) => u.id);
   if (roles.includes('admin')) ids.push('owner'); // the recovery login counts as an admin
   return [...new Set(ids)].filter((id) => id && id !== except);
@@ -1123,6 +1199,7 @@ async function pushApi(req, env, me, parts) {
 // ---------------------------------------------------------------- assigning cleanings
 // One cleaner per flat per day: { "date|listingId": { listingId, date, building, label, cleanerId, cleanerName, byId, byName, at } }.
 const dayLabel = (d) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(d + 'T00:00:00Z'));
+const ASSIGNABLE = ['cleaner', 'supervisor']; // Admins and Users run the operation; they aren't given cleanings
 async function assignmentsApi(req, env, ctx, me, url) {
   const all = (await env.STORE.get('assignments', 'json')) || {};
   if (req.method === 'GET' && url.pathname === '/api/assignees') {
@@ -1130,8 +1207,7 @@ async function assignmentsApi(req, env, ctx, me, url) {
     const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
     if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
-    const people = (await loadUsers(env)).filter((u) => u.active !== false && can(u, 'do_cleaning')
-      && (u.buildings === 'all' || u.buildings == null || (Array.isArray(u.buildings) && u.buildings.includes(l.building))));
+    const people = (await loadUsers(env)).filter((u) => u.active !== false && ASSIGNABLE.includes(u.role) && can(u, 'do_cleaning') && coversBuilding(u, l.building));
     return json({ people: people.map((u) => ({ id: u.id, name: u.name, role: u.role })).sort((a, b) => a.name.localeCompare(b.name)) });
   }
   if (req.method === 'GET') {
@@ -1152,7 +1228,8 @@ async function assignmentsApi(req, env, ctx, me, url) {
     if (body.cleanerId) {
       cleaner = (await loadUsers(env)).find((u) => u.id === String(body.cleanerId) && u.active !== false);
       if (!cleaner || !can(cleaner, 'do_cleaning')) return json({ error: 'That person can’t do cleanings.' }, 400);
-      if (Array.isArray(cleaner.buildings) && !cleaner.buildings.includes(l.building)) return json({ error: `${cleaner.name} doesn’t cover ${l.building}. Add the building to their account first.` }, 400);
+      if (!ASSIGNABLE.includes(cleaner.role)) return json({ error: 'Only cleaners and supervisors can be assigned a cleaning.' }, 400);
+      if (!coversBuilding(cleaner, l.building)) return json({ error: `${cleaner.name} doesn’t cover ${l.building}. Add the building to their account first.` }, 400);
     }
     if (before && cleaner && before.cleanerId === cleaner.id) return json({ assignment: before });
     if (cleaner) all[key] = { listingId: l.id, date, building: l.building, label: l.label, cleanerId: cleaner.id, cleanerName: cleaner.name, byId: me.id, byName: me.name, at: nowIso() };
@@ -1450,6 +1527,7 @@ async function handle(req, env, ctx) {
   const ip = req.headers.get('CF-Connecting-IP') || 'x';
 
   if (p === '/health') return json({ ok: true, mock: config(env).mock });
+  if (env.STORE) await loadPropOverrides(env);
 
   if (p.startsWith('/webhooks/keynest/') && req.method === 'POST') {
     if (!safeEqual(p.split('/')[3] || '', await webhookKeyFor(env, 'keynest'))) return new Response('unauthorised', { status: 401 });
@@ -1521,10 +1599,17 @@ async function handle(req, env, ctx) {
     return json(await weekData(env, ctx, url.searchParams.get('date'), fresh, me));
   }
   if (p === '/api/properties') return can(me, 'view_properties') ? json(await propertiesData(env, ctx, me)) : deny();
+  if (p.startsWith('/api/properties/') && req.method === 'PUT') return propertyEditApi(req, env, ctx, me, decodeURIComponent(p.split('/')[3] || ''));
+  if (p.startsWith('/api/lockbox/') && req.method === 'GET') {
+    // The flat's current lockbox code, for its panel: cleaners check it every time they arrive.
+    const l = await listingInfo(env, ctx, decodeURIComponent(p.split('/')[3] || ''));
+    if (!l || !inScope(me, l.building) || !can(me, 'view_cleaning')) return deny();
+    return json({ keyMode: l.keyMode, lockbox: l.keyMode === 'lockbox' ? ((await env.STORE.get('lockboxCodes', 'json')) || {})[l.id] || null : null });
+  }
   if (p === '/api/version') {
     const snap = await getSnapshot(env, ctx);
     const hook = config(env).mock ? 'preview' : (await env.STORE.get('webhook_url')) ? 'registered' : 'pending';
-    return json({ version: snap.hash, at: snap.at, webhook: hook });
+    return json({ version: dataVersion(snap), at: snap.at, webhook: hook });
   }
   if (p === '/api/cleanings' || p.startsWith('/api/cleanings/')) return cleaningsApi(req, env, ctx, me, p.split('/'), url);
   if (p === '/api/keynest' || p.startsWith('/api/keynest/')) return keynestAdminApi(req, env, ctx, me, p.split('/'));
