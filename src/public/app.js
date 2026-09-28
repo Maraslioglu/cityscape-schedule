@@ -16,14 +16,14 @@
   let view = store.get('cs_view') || 'day';
   let me = null;            // signed-in person and their permissions
   const can = (perm) => Boolean(me && me.perms && me.perms[perm]);
-  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null };
+  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null };
   // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
   const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
   const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
   // Sidebar: Schedule holds the Day and Week views; each other entry is one view.
-  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings' };
+  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum' };
   const navAllowed = (n) => (n === 'schedule' ? allowed('day') || allowed('board') : allowed(n));
-  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account' };
+  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account', forum: 'Forum' };
   let lastSched = store.get('cs_sched') || 'day';
   let selected = null;      // selected date in day view
   let version = null;       // bookings version from the server
@@ -339,6 +339,112 @@
 
   function fmtWhen(iso) { return new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
 
+  // ---------- Forum: bugs, ideas and questions from the team, with likes, dislikes and comments ----------
+  let forumCache = null, fKind = '', fSort = 'new', postId = null;
+  const KIND = { bug: 'Bug', idea: 'Idea', question: 'Question', other: 'Other' };
+  const THUMB = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10.5V20H4.5a1 1 0 0 1-1-1v-7.5a1 1 0 0 1 1-1H7zm0 0 3.6-6.3a1.9 1.9 0 0 1 3.5 1V9h4.7a2 2 0 0 1 2 2.3l-1.1 6.9A2.2 2.2 0 0 1 17.5 20H7"/></svg>';
+  const BUBBLE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5 6 15.8A7.5 7.5 0 1 1 9 18.6z"/></svg>';
+  const statusPill = (p) => (p.status === 'fixed' ? '<span class="fstat fixed">Fixed</span>' : p.status === 'closed' ? '<span class="fstat closed">Closed</span>' : '');
+  const votes = (p) => `<button class="vote up${p.myVote === 1 ? ' on' : ''}" data-vote="1" data-id="${esc(p.id)}" aria-pressed="${p.myVote === 1}" aria-label="Like (${p.likes})">${THUMB}<b>${p.likes}</b></button>
+    <button class="vote down${p.myVote === -1 ? ' on' : ''}" data-vote="-1" data-id="${esc(p.id)}" aria-pressed="${p.myVote === -1}" aria-label="Dislike (${p.dislikes})">${THUMB}<b>${p.dislikes}</b></button>`;
+  async function loadForum() {
+    store.set('cs_forum_seen', new Date().toISOString());
+    $('nd-forum').classList.add('hidden');
+    if (!forumCache) $('forum-list').innerHTML = '<div class="card"><div class="loading">Loading…</div></div>';
+    try { forumCache = await getJSON('/api/forum'); renderForum(); }
+    catch (e) { if (e.message !== 'signed out') $('forum-list').innerHTML = `<div class="banner error">${esc(e.message)}</div>`; }
+  }
+  function renderForum() {
+    if (!forumCache) return;
+    const score = (p) => p.likes - p.dislikes;
+    const list = forumCache.posts.filter((p) => !fKind || p.kind === fKind).sort((a, b) => (fSort === 'top' ? score(b) - score(a) || b.likes - a.likes : 0) || b.at.localeCompare(a.at));
+    $('forum-list').innerHTML = list.length ? list.map((p) => `<article class="card fpost">
+        <button class="fp-main" data-open="${esc(p.id)}">
+          <span class="fp-top"><span class="fk ${esc(p.kind)}">${esc(KIND[p.kind] || 'Other')}</span>${statusPill(p)}<span class="fp-by">${esc(p.authorName)} · ${esc(ago(p.at))}</span></span>
+          <span class="fp-title">${esc(p.title)}</span>
+          ${p.excerpt ? `<span class="fp-ex">${esc(p.excerpt)}${p.excerpt.length >= 240 ? '…' : ''}</span>` : ''}
+        </button>
+        <div class="fp-foot">${votes(p)}<button class="fp-c" data-open="${esc(p.id)}">${BUBBLE}<b>${p.comments}</b> comment${p.comments === 1 ? '' : 's'}</button></div>
+      </article>`).join('')
+      : `<div class="card empty"><b>${fKind ? `No ${esc(KIND[fKind].toLowerCase())}s yet` : 'Nothing posted yet'}</b>Be the first: tap New post.</div>`;
+  }
+  async function vote(id, value) {
+    const p = (forumCache && forumCache.posts.find((x) => x.id === id)) || null;
+    const v = p && p.myVote === value ? 0 : value; // tapping your vote again takes it back
+    try {
+      const r = await send('POST', `/api/forum/${encodeURIComponent(id)}/vote`, { value: v });
+      if (forumCache) forumCache.posts = forumCache.posts.map((x) => (x.id === id ? r.post : x));
+      renderForum();
+      if (postId === id) openPost(id);
+    } catch (e) { toast(e.message); }
+  }
+  document.querySelectorAll('[data-fkind]').forEach((b) => b.onclick = () => { fKind = b.dataset.fkind; document.querySelectorAll('[data-fkind]').forEach((x) => x.setAttribute('aria-selected', x === b)); renderForum(); });
+  document.querySelectorAll('[data-fsort]').forEach((b) => b.onclick = () => { fSort = b.dataset.fsort; document.querySelectorAll('[data-fsort]').forEach((x) => x.setAttribute('aria-selected', x === b)); renderForum(); });
+  $('forum-list').addEventListener('click', (e) => {
+    const v = e.target.closest('[data-vote]');
+    if (v) return vote(v.dataset.id, Number(v.dataset.vote));
+    const o = e.target.closest('[data-open]');
+    if (o) openPost(o.dataset.open);
+  });
+  $('f-new').onclick = () => newPost();
+  const openDrawer = (html) => { detailId = null; postId = null; $('detail').classList.remove('hidden'); document.body.classList.add('noscroll'); $('detail-body').innerHTML = html; };
+  const CLOSE_BTN = '<button class="btn sq" data-close-detail aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>';
+  function newPost() {
+    openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Forum</span><h2>New post</h2><div class="sh-sub">Everyone on the team can see it. Admins are told straight away.</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
+      <form class="pe-form" id="fp-form" autocomplete="off">
+        <div class="pe-f"><span class="pe-l">What is it?</span><div class="range fkinds" role="radiogroup" aria-label="What is it">${Object.entries(KIND).map(([k, w], i) => `<button type="button" role="radio" data-k="${k}" aria-checked="${i === 0}" aria-selected="${i === 0}">${w}</button>`).join('')}</div></div>
+        <div class="pe-f"><label for="fp-title">Title</label><input id="fp-title" maxlength="120" required placeholder="e.g. The video upload stops at 90%"></div>
+        <div class="pe-f"><label for="fp-body">Details</label><textarea id="fp-body" maxlength="4000" rows="7" placeholder="What happened? What did you expect? Which flat or page?"></textarea></div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="fp-go">Post</button></div>
+      </form>`);
+    let kind = 'bug';
+    $('fp-form').querySelectorAll('[data-k]').forEach((b) => b.onclick = () => { kind = b.dataset.k; $('fp-form').querySelectorAll('[data-k]').forEach((x) => { x.setAttribute('aria-checked', x === b); x.setAttribute('aria-selected', x === b); }); });
+    $('fp-title').focus();
+    $('fp-form').onsubmit = async (e) => {
+      e.preventDefault();
+      $('fp-go').disabled = true;
+      try {
+        const r = await send('POST', '/api/forum', { kind, title: $('fp-title').value, body: $('fp-body').value });
+        toast('Posted'); closeDetail(); await loadForum(); openPost(r.post.id);
+      } catch (err) { toast(err.message); $('fp-go').disabled = false; }
+    };
+  }
+  async function openPost(id) {
+    const keep = postId === id && $('fc-body') ? $('fc-body').value : '';
+    try {
+      const r = await getJSON(`/api/forum/${encodeURIComponent(id)}`);
+      const p = r.post, canDel = p.mine || r.canModerate;
+      openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">${esc(KIND[p.kind] || 'Post')}${p.status !== 'open' ? ` · ${esc(p.status)}` : ''}</span><h2 class="fp-h">${esc(p.title)}</h2>
+          <div class="sh-sub">${esc(p.authorName)} · ${esc(fmtWhen(p.at))}${p.statusBy && p.status !== 'open' ? ` · marked ${esc(p.status)} by ${esc(p.statusBy)}` : ''}</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
+        ${p.body ? `<div class="fp-body">${esc(p.body)}</div>` : ''}
+        <div class="fp-foot big">${votes(p)}${r.canModerate ? `<label class="fp-st"><span>Status</span><select id="fp-status">${['open', 'fixed', 'closed'].map((x) => `<option value="${x}" ${p.status === x ? 'selected' : ''}>${x[0].toUpperCase() + x.slice(1)}</option>`).join('')}</select></label>` : ''}</div>
+        <h3 class="sh-h3">Comments · ${p.comments.length}</h3>
+        <div class="fc-list">${p.comments.length ? p.comments.map((c) => `<div class="fc"><span class="avatar">${esc(initials(c.authorName))}</span><div class="fc-t"><div class="fc-h"><b>${esc(c.authorName)}</b><span>${esc(ago(c.at))}</span>${c.mine || r.canModerate ? `<button class="linkbtn inline fc-del" data-cdel="${esc(c.id)}">Delete</button>` : ''}</div><div class="fc-b">${esc(c.body)}</div></div></div>`).join('') : '<p class="muted">No comments yet.</p>'}</div>
+        <form class="fc-form" id="fc-form"><label for="fc-body" class="pe-l">Add a comment</label><textarea id="fc-body" rows="3" maxlength="2000" placeholder="Write a comment…">${esc(keep)}</textarea><div class="form-actions"><span class="spacer"></span><button type="submit" class="btn primary" id="fc-go">Comment</button></div></form>
+        ${canDel ? '<button class="linkbtn fp-del" id="fp-del">Delete this post</button>' : ''}`);
+      postId = id;
+      $('detail-body').querySelectorAll('[data-vote]').forEach((b) => b.onclick = () => vote(id, Number(b.dataset.vote)));
+      if ($('fp-status')) $('fp-status').onchange = async () => {
+        try { await send('PUT', `/api/forum/${encodeURIComponent(id)}/status`, { status: $('fp-status').value }); toast('Status updated'); forumCache = null; loadForum(); openPost(id); } catch (e) { toast(e.message); }
+      };
+      $('fc-form').onsubmit = async (e) => {
+        e.preventDefault();
+        if (!$('fc-body').value.trim()) return;
+        $('fc-go').disabled = true;
+        try { await send('POST', `/api/forum/${encodeURIComponent(id)}/comments`, { body: $('fc-body').value }); $('fc-body').value = ''; await openPost(id); loadForum(); }
+        catch (err) { toast(err.message); $('fc-go').disabled = false; }
+      };
+      $('detail-body').querySelectorAll('[data-cdel]').forEach((b) => b.onclick = async () => {
+        if (!confirm('Delete this comment?')) return;
+        try { await send('DELETE', `/api/forum/${encodeURIComponent(id)}/comments/${encodeURIComponent(b.dataset.cdel)}`); openPost(id); loadForum(); } catch (e) { toast(e.message); }
+      });
+      if ($('fp-del')) $('fp-del').onclick = async () => {
+        if (!confirm('Delete this post and its comments?')) return;
+        try { await send('DELETE', `/api/forum/${encodeURIComponent(id)}`); toast('Post deleted'); closeDetail(); loadForum(); } catch (e) { toast(e.message); }
+      };
+    } catch (e) { if (e.message !== 'signed out') toast(e.message); }
+  }
+
   // ---------- Settings › Integrations › KeyNest (Admin and User roles) ----------
   // Locked by default: "Edit links" unlocks the rows, and nothing is saved until the changes are reviewed and confirmed.
   let kn = null, knEdit = false, knDraft = {};
@@ -424,7 +530,7 @@
     return 1 + Math.round(((d - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
   };
   const weekNo = () => isoWeek(data.dates.find((x) => D(x).getUTCDay() === 1) || data.weekStart);
-  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account' };
+  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account', forum: 'Team' };
   function setPageHead() {
     const eb = $('page-eyebrow'), h = $('page-title');
     if ((view === 'day' || view === 'board') && data) {
@@ -457,6 +563,7 @@
     $('view-account').classList.toggle('hidden', v !== 'account');
     $('view-settings').classList.toggle('hidden', v !== 'settings');
     $('view-damage').classList.toggle('hidden', v !== 'damage');
+    $('view-forum').classList.toggle('hidden', v !== 'forum');
     $('foot').classList.toggle('hidden', !(v === 'day' || v === 'board'));
     if (v === 'board' && data && boardDirty) renderBoard();
     if (v === 'props') loadProps();
@@ -465,6 +572,7 @@
     if (v === 'account') renderAccount();
     if (v === 'settings') loadSettings();
     if (v === 'damage') loadDamageView();
+    if (v === 'forum') loadForum();
   }
 
   // ---------- who's signed in ----------
@@ -1590,7 +1698,7 @@
       wireDamageCards($('dt-dmg'), () => openDetail(id));
     } catch (e) { if (e.message !== 'signed out') $('detail-body').innerHTML = `<div class="sh-head"><h2>Cleaning</h2><button class="btn sq" data-close-detail aria-label="Close">✕</button></div><div class="banner error">${esc(e.message)}</div>`; }
   }
-  function closeDetail() { detailId = null; $('detail').classList.add('hidden'); if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll'); }
+  function closeDetail() { detailId = null; postId = null; $('detail').classList.add('hidden'); if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll'); }
   $('detail').addEventListener('click', (e) => { if (e.target.id === 'detail' || e.target.closest('[data-close-detail]')) closeDetail(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && detailId) closeDetail(); });
 
@@ -1619,6 +1727,12 @@
         openDamage = n;
       } catch (_) {}
     }
+    try {
+      const f = await getJSON('/api/forum');
+      forumCache = f;
+      const seen = store.get('cs_forum_seen') || '';
+      $('nd-forum').classList.toggle('hidden', view === 'forum' || !f.posts.some((p) => p.lastAt > seen && !(p.mine && p.comments === 0)));
+    } catch (_) {}
     if (allowed('props')) {
       try { const p = await getJSON('/api/properties'); knUnlinked = (p.keynest && p.keynest.unlinked) || []; $('nd-props').classList.toggle('hidden', !knUnlinked.length); } catch (_) {}
     }
@@ -1639,7 +1753,7 @@
     if (m < 24 * 60) return `${Math.round(m / 60)} h ago`;
     return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   };
-  const NICON = { cleaned: '✓', damage: '!', assigned: '→', unassigned: '×' };
+  const NICON = { cleaned: '✓', damage: '!', assigned: '→', unassigned: '×', forum: '“' };
   async function loadNotifs() {
     if (!me) return;
     try {
@@ -1685,6 +1799,7 @@
     let q; try { q = new URL(href, location.origin).searchParams; } catch (_) { return; }
     const v = q.get('view'), date = q.get('date'), flat = q.get('flat');
     const okDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '');
+    if (v === 'forum') { if (view !== 'forum') setView('forum'); if (q.get('post')) openPost(q.get('post')); return; }
     if (v === 'cleaning' && allowed('cleaning')) { if (okDate) cvDate = date; if (view === 'cleaning') loadCleaningView(); else setView('cleaning'); return; }
     if (v === 'day' && allowed('day')) {
       if (view !== 'day') setView('day');
