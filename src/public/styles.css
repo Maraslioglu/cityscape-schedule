@@ -560,6 +560,21 @@ button, .btn, .row.tap, .dbtn { touch-action: manipulation; }
 .kn-status.wait .kn-dot { background: #d99a00; animation: pulse 1.4s infinite; }
 .kn-status.ok .kn-dot { background: var(--in); }
 .kn-status.err .kn-dot { background: var(--out); }
+.kn-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.kn-body small { font-size: 12px; font-weight: 500; color: var(--ink-3); }
+.kn-body small:empty { display: none; }
+.kn-stores { display: grid; gap: 10px; margin: 0 0 10px; }
+.kn-stores:empty { display: none; }
+.kn-stores h4 { margin: 2px 0 0; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+.kn-store { display: grid; gap: 3px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 13.5px; }
+.kn-store-h { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
+.kn-store-h b { color: var(--ink-2); }
+.kn-store-name { font-size: 15px; font-weight: 700; color: var(--ink); }
+.kn-open { font-weight: 600; color: var(--ink-2); }
+.kn-open.on { color: var(--in); }
+.kn-open.off { color: var(--out); }
+.kn-maps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.kn-maps .btn { flex: 1 1 0; min-width: 0; padding: 0 8px; font-size: 13.5px; }
 @keyframes pulse { 50% { opacity: .35; } }
 .keystep .btn.wide { margin-bottom: 10px; }
 .kbadge { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
@@ -636,8 +651,6 @@ button, .btn, .row.tap, .dbtn { touch-action: manipulation; }
 .confirm-box p { margin: 6px 0 0; font-size: 13px; }
 .confirm-box .form-actions { margin-top: 12px; }
 .confirm-box .form-actions .btn { margin-top: 0; }
-.kn-hook { margin-top: 14px; font-size: 13px; }
-.kn-hook code { word-break: break-all; }
 
 /* Properties: KeyNest flats that aren't linked */
 .warn-banner { background: var(--out-soft); color: var(--ink); border: 1px solid color-mix(in srgb, var(--out) 25%, transparent); line-height: 1.7; }
@@ -728,6 +741,11 @@ button.metric:disabled { cursor: default; }
 .dt-tick { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 12px; background: var(--accent-soft); color: var(--accent); }
 .dt-checks li.no .dt-tick { background: var(--line-2); color: var(--ink-3); }
 .dt-code { font-size: 16px; letter-spacing: .08em; }
+.dt-moves { list-style: none; margin: 4px 0 0; padding: 0; }
+.dt-moves li { display: grid; grid-template-columns: 110px 90px 1fr; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line-2); font-size: 13.5px; }
+.dt-moves b { color: var(--ink); }
+.kn-hook { margin-top: 14px; font-size: 13px; }
+.kn-hook code { word-break: break-all; }
 @media (max-width: 600px) { .dt-grid { grid-template-columns: 120px 1fr; } }
 @media print { .side { display: none !important; } body { padding-left: 0; } }
 @media (max-width: 760px) {

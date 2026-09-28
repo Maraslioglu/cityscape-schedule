@@ -242,7 +242,7 @@
       $('props-sub').textContent = `${p.total} flats · ${counts}`;
       $('props').innerHTML = p.buildings.map((b) => `<div class="card pcard">
         <h3>${esc(b.name)}</h3><div class="pc">${esc(b.postcode)}</div>
-        ${b.units.map((u) => `<div class="prow" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span></div>${u.keyMode === 'lockbox' ? `<div class="pnote"><span class="kbadge">Lockbox</span><span>${u.lockbox ? `Code <b>${esc(u.lockbox.code)}</b> · set by ${esc(u.lockbox.by)}, ${esc(fmtWhen(u.lockbox.at))}` : 'No code recorded yet'}</span></div>` : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key handed in at KeyNest after each clean</span></div>' : ''}`).join('')}
+        ${b.units.map((u) => `<div class="prow" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span></div>${u.keyMode === 'lockbox' ? `<div class="pnote"><span class="kbadge">Lockbox</span><span>${u.lockbox ? `Code <b>${esc(u.lockbox.code)}</b> · set by ${esc(u.lockbox.by)}, ${esc(fmtWhen(u.lockbox.at))}` : 'No code recorded yet'}</span></div>` : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key must be back in KeyNest after each clean</span></div>' : ''}`).join('')}
       </div>`).join('');
       // KeyNest flats that aren't linked to a KeyNest key can't be completed by cleaners: say so at the top.
       const kn = p.keynest || { unlinked: [] };
@@ -285,7 +285,7 @@
         <td>${knEdit && live ? `<select data-kn="${esc(f.id)}">${opts(cur)}</select>` : cur ? `${esc(keyName(cur))}${f.how === 'auto' ? ' <span class="muted">· matched by name</span>' : ''}` : '<span class="warn">Not linked</span>'}</td></tr>`;
     }).join('');
     box.innerHTML = `<div class="set-head"><div><h3>KeyNest</h3>
-        <p class="muted">Flats tagged <b>KEYNEST</b> in Guesty are linked to their KeyNest key here. A cleaner can only complete a KeyNest flat once KeyNest shows its key handed back in.</p></div>
+        <p class="muted">Flats tagged <b>KEYNEST</b> in Guesty are linked to their KeyNest key here. A cleaner can only complete a KeyNest flat once KeyNest shows its key in the store (it doesn’t have to have moved, so spare keys are fine).</p></div>
         <span class="pill ${live ? 'ok' : 'off'}">${live ? 'Connected' : k.connected ? 'Error' : 'Not connected'}</span></div>
       ${!k.connected ? '<div class="banner">Not connected yet. Add <b>KEYNEST_API_KEY</b> in Railway (Variables) and the app connects automatically. Until then, KeyNest flats can’t be completed.</div>' : k.error ? `<div class="banner error">${esc(k.error)}</div>` : ''}
       ${k.flats.length ? `<table class="kn-table"><thead><tr><th>Flat</th><th>KeyNest key</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No flats have the KEYNEST tag in Guesty.</p>'}
@@ -293,7 +293,7 @@
         ? '<button class="btn" id="kn-edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>Edit links</button><span class="muted">Locked to prevent accidental changes.</span>'
         : `<span class="edit-note">Editing — changes aren’t saved until you confirm.</span><span class="spacer"></span><button class="btn" id="kn-cancel">Cancel</button><button class="btn primary" id="kn-review" ${changes.length ? '' : 'disabled'}>Review ${changes.length || ''} change${changes.length === 1 ? '' : 's'}</button>`}</div>
       <div id="kn-confirm"></div>
-      ${k.webhookUrl ? `<details class="muted kn-hook"><summary>Instant updates (optional)</summary>Ask KeyNest to send webhooks to: <code>${esc(k.webhookUrl)}</code></details>` : ''}`;
+      ${k.webhookUrl ? `<details class="muted kn-hook"><summary>Key movement record ${k.lastHook ? `· last message from KeyNest ${esc(fmtWhen(k.lastHook.at))}` : '· no messages from KeyNest yet'}</summary>To record when keys are collected and dropped off (shown in each cleaning’s details), add this webhook address in KeyNest: <code>${esc(k.webhookUrl)}</code></details>` : ''}`;
     const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
     on('kn-edit', () => { knEdit = true; knDraft = {}; renderKeynest(); });
     on('kn-cancel', () => { knEdit = false; knDraft = {}; renderKeynest(); });
@@ -608,6 +608,7 @@
   let holdMs = 3000;
   const ACTIVE = ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key'];
   const fmtClock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
+  const londonDay = (iso) => new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }); // YYYY-MM-DD
   const fmtDur = (ms) => {
     const s = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -966,7 +967,7 @@
   function keyNote(c) {
     if (!c.key) return '';
     if (c.key.mode === 'lockbox') return can('view_cleaning') ? ` · key in lockbox, new code <b>${esc(c.key.code)}</b>` : ' · key returned to lockbox';
-    return ' · key handed in at KeyNest';
+    return ' · key back in KeyNest';
   }
   let keyPoll = null;
   function keyStep(a) {
@@ -984,9 +985,10 @@
       </div>`;
     }
     return `<div class="evidence keystep">
-      <div class="ev-head"><b>Last step: hand the key in at KeyNest.</b> <span class="req">Required</span></div>
-      <p class="ev-note">Drop the key off at the KeyNest store. As soon as KeyNest records it, you can complete the cleaning.</p>
-      <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span id="kn-text">Checking KeyNest…</span></div>
+      <div class="ev-head"><b>Last step: the key must be in KeyNest.</b> <span class="req">Required</span></div>
+      <p class="ev-note">If you collected the key from KeyNest, hand it back in at the store. As soon as KeyNest shows it in the store, you can complete the cleaning.</p>
+      <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span class="kn-body"><span id="kn-text">Checking KeyNest…</span><small id="kn-when"></small></span></div>
+      <div class="kn-stores" id="kn-stores"></div>
       <button class="btn wide" id="kn-check">Check again</button>
       <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
     </div>`;
@@ -1018,17 +1020,43 @@
       done.onclick = () => finish({ code: c1.value, confirmCode: c2.value, keyReturned: back.checked });
       return;
     }
-    const box = $('kn-status'), text = $('kn-text');
+    const box = $('kn-status'), text = $('kn-text'), when = $('kn-when'), again = $('kn-check');
+    // While KeyNest shows the key out, suggest where to drop it off: nearest KeyNest to the flat and nearest 24-hour one.
+    let stores = null; // loaded once
+    const mapLinks = (st) => {
+      const ll = `${Number(st.lat)},${Number(st.lng)}`;
+      return `<div class="kn-maps"><a class="btn" target="_blank" rel="noopener" href="https://maps.apple.com/?daddr=${ll}&q=${encodeURIComponent(st.name)}">Apple Maps</a>`
+        + `<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${ll}">Google Maps</a>`
+        + `<a class="btn" target="_blank" rel="noopener" href="https://waze.com/ul?ll=${ll}&navigate=yes">Waze</a></div>`;
+    };
+    const storeCard = (title, st) => `<div class="kn-store"><div class="kn-store-h"><span>${esc(title)}</span><b>${esc(st.miles)} mi</b></div>
+      <div class="kn-store-name">${esc(st.name)}</div>${st.address ? `<div class="muted">${esc(st.address)}</div>` : ''}
+      ${st.today ? `<div class="kn-open ${st.openNow === true ? 'on' : st.openNow === false ? 'off' : ''}">${st.is24 ? '' : st.openNow === true ? 'Open now · ' : st.openNow === false ? 'Closed now · ' : ''}${esc(st.today)}</div>` : ''}${mapLinks(st)}</div>`;
+    const showStores = async (show) => {
+      const el = $('kn-stores');
+      if (!el) return;
+      if (!show) { el.innerHTML = ''; return; }
+      if (!stores) { try { stores = await getJSON(`/api/cleanings/${a.id}/key-stores`); } catch (e) { stores = { error: e.message }; } }
+      const n = stores.nearest, n24 = stores.nearest24;
+      el.innerHTML = stores.error ? `<p class="muted">${esc(stores.error)}</p>` : !n ? '' : `<h4>Where to drop the key off</h4>${
+        n24 && n24.id === n.id ? storeCard('Nearest KeyNest · open 24 hours', n) : storeCard('Nearest KeyNest to the flat', n) + (n24 ? storeCard('Nearest open 24 hours', n24) : '')}`;
+    };
+    let checking = false;
     const check = async () => {
       if (!$('kn-status')) { clearInterval(keyPoll); keyPoll = null; return; }
+      if (checking) return;
+      checking = true; again.disabled = true; again.textContent = 'Checking…';
       try {
         const r = await getJSON(`/api/cleanings/${a.id}/key-status`);
         box.className = 'kn-status ' + (r.ok ? 'ok' : r.error ? 'err' : 'wait');
-        text.textContent = r.error ? r.error : r.ok ? `Key handed in ✓ (${r.status})` : `Waiting for drop-off · KeyNest shows: ${r.status}`;
+        text.textContent = r.error ? r.error : r.ok ? `Key is in KeyNest ✓ (${r.status})` : `Waiting for the key · KeyNest shows: ${r.status}`;
         done.disabled = !r.ok;
+        showStores(!r.ok && !r.error);
       } catch (e) { box.className = 'kn-status err'; text.textContent = e.message; done.disabled = true; }
+      checking = false; again.disabled = false; again.textContent = 'Check again';
+      when.textContent = `Checked at ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Europe/London' })}`;
     };
-    $('kn-check').onclick = check;
+    again.onclick = check;
     done.onclick = () => finish({});
     check();
     keyPoll = setInterval(check, 20000);
@@ -1297,8 +1325,14 @@
       const checks = defs.map((d) => { const got = (c.checklist || []).find((x) => x.key === d.key); return `<li class="${got ? 'ok' : 'no'}"><span class="dt-tick" aria-hidden="true">${got ? '✓' : '–'}</span><span><b>${esc(d.title)}</b> ${esc(d.text)}</span><em>${got ? t(got.confirmedAt) : 'Not confirmed'}</em></li>`; }).join('');
       const key = !c.keyMode && !c.key ? '<p class="muted">No key step for this flat.</p>'
         : c.key && c.key.mode === 'lockbox' ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>`
-        : c.key && c.key.mode === 'keynest' ? `<p>Key handed in at KeyNest ✓ (${esc(c.key.status || 'in store')}) · confirmed ${t(c.key.confirmedAt)}</p>`
+        : c.key && c.key.mode === 'keynest' ? `<p>Key in KeyNest ✓ (${esc(c.key.status || 'in store')}) · checked ${t(c.key.confirmedAt)}</p>`
         : `<p class="warn">Key not returned yet (${esc(c.keyMode === 'keynest' ? 'KeyNest' : 'lockbox')}).</p>`;
+      // What KeyNest recorded for this flat's key around the cleaning (from its webhook): who collected it and when it came back.
+      const KN_EV = { COLLECTED: 'Collected', DROPPED: 'Dropped off', HANDOVER: 'Handed over' };
+      const moveWhen = (iso) => (londonDay(iso) === c.date ? '' : `${WD_SHORT.format(D(londonDay(iso)))} `) + fmtClock(iso);
+      const moves = !r.keyMoves ? '' : r.keyMoves.length
+        ? `<ul class="dt-moves">${r.keyMoves.map((m) => `<li><b>${esc(KN_EV[m.event] || m.event.charAt(0) + m.event.slice(1).toLowerCase())}</b><span>${esc(moveWhen(m.at))}</span><span class="muted">${esc([m.who, m.store].filter(Boolean).join(' · '))}</span></li>`).join('')}</ul>`
+        : '<p class="muted">KeyNest recorded no movements of this key around the cleaning (perhaps a spare key was used).</p>';
       const guesty = c.guesty === 'updated' ? 'Marked clean ✓' : c.guesty === 'failed' ? '<span class="warn">Couldn’t update Guesty</span>' : c.guesty === 'preview' ? 'Sample data (not sent)' : c.guesty === 'off' ? 'Turned off' : c.status === 'completed' ? 'Sending…' : '—';
       $('detail-body').innerHTML = `
         <div class="sh-head"><div><h2>${esc(c.label)} <span class="muted dt-bld">· ${esc(c.building)}</span></h2><div class="sh-sub">${esc(fmtDay(c.date))} · ${esc(c.cleanerName)}</div></div><button class="btn sq" data-close-detail aria-label="Close">✕</button></div>
@@ -1317,7 +1351,7 @@
         <h3 class="sh-h3">Checklist · ${(c.checklist || []).length}/${defs.length}</h3>
         <ul class="dt-checks">${checks}</ul>
         <h3 class="sh-h3">Key</h3>
-        ${key}
+        ${key}${moves}
         <h3 class="sh-h3">Videos &amp; photos</h3>
         ${(c.media || []).length ? mediaTiles(c.media) : '<p class="muted">None uploaded.</p>'}
         <h3 class="sh-h3">Damage reported during this clean</h3>

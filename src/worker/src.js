@@ -341,7 +341,7 @@ async function paginate(env, path, params) {
   }
   return out;
 }
-const LISTING_FIELDS = '_id nickname title bedrooms address.full address.street address.zipcode active defaultCheckInTime defaultCheckOutTime tags';
+const LISTING_FIELDS = '_id nickname title bedrooms address.full address.street address.zipcode address.lat address.lng active defaultCheckInTime defaultCheckOutTime tags';
 const STAY_FIELDS = '_id listingId status confirmationCode checkInDateLocalized checkOutDateLocalized plannedArrival plannedDeparture guestsCount nightsCount createdAt';
 
 async function fetchListings(env, cfg) {
@@ -415,6 +415,7 @@ const streetKey = (n) => n.replace(/^\d+[a-z]?\s+/i, '');
 const byBuilding = (a, b) => natural(streetKey(a), streetKey(b)) || natural(a, b);
 const typeOrder = (t) => (t === 'Studio' ? 0 : Number.isFinite(parseInt(t, 10)) ? parseInt(t, 10) : 99);
 
+const coord = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
 function listingMap(raw, cfg, allow) {
   const map = new Map();
   for (const l of raw) {
@@ -431,7 +432,7 @@ function listingMap(raw, cfg, allow) {
     map.set(l._id, {
       id: l._id, name: n, label: n.includes(',') ? n.split(',')[0].trim() : n,
       building: ov(cfg.buildingOverrides) || cleanStreet(a.street) || cleanStreet(a.full) || n,
-      postcode: pc, address: a.full || '', unitType, keyMode,
+      postcode: pc, address: a.full || '', lat: coord(a.lat), lng: coord(a.lng), unitType, keyMode,
       checkInTime: l.defaultCheckInTime || cfg.defaultIn, checkOutTime: l.defaultCheckOutTime || cfg.defaultOut,
     });
     if (allow && !allow(map.get(l._id).building)) map.delete(l._id);
@@ -657,9 +658,12 @@ async function markCleanInGuesty(env, listingId) {
 const KEYNEST_DEFAULT = 'https://api.keynest.com/api/v3';
 const KEYNEST_IN = /^(in store|in locker|in office)/i;
 let knCache = null; // { at, keys }
-async function keynestGet(env, path) {
+async function keynestGet(env, path, { base, body } = {}) {
   if (!env.KEYNEST_API_KEY) throw userError('KeyNest isn’t connected yet. An admin needs to add KEYNEST_API_KEY in Railway.', 400);
-  const r = await fetch((env.KEYNEST_API_URL || KEYNEST_DEFAULT) + path, { headers: { ApiKey: env.KEYNEST_API_KEY, Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+  const r = await fetch((base || env.KEYNEST_API_URL || KEYNEST_DEFAULT) + path, {
+    method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(8000),
+    headers: { ApiKey: env.KEYNEST_API_KEY, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+  });
   const text = await r.text();
   let j = null; try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
   if (!r.ok || !j || (j.Status && j.Status !== 'Success')) {
@@ -689,19 +693,129 @@ async function keynestLink(env, l) {
   const m = (await keynestKeys(env)).filter((k) => want.has(normName(k.name)));
   return m.length === 1 ? { keyId: m[0].id, how: 'auto' } : null;
 }
-// KeyNest times have no time zone; reading them as UTC can only make them look later (London is UTC or UTC+1),
-// so a drop-off is never missed. The key must be back in KeyNest and have moved since the cleaning started.
-const knTime = (s) => (!s ? 0 : Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(s) ? s : s + 'Z') || 0);
-async function keynestCheck(env, rec, keyId) {
+// The key only has to be back in KeyNest. It needn't have moved during the cleaning: cleaners sometimes use a spare
+// key and never touch the one in KeyNest.
+async function keynestCheck(env, keyId) {
   const j = await keynestGet(env, '/Keys/' + encodeURIComponent(keyId));
   const p = j.ResponsePacket || {};
   const k = knKey((p.KeyList && p.KeyList[0]) || p);
-  const drops = (await env.STORE.get('keynestDrops', 'json')) || {};
-  const moved = Math.max(knTime(k.lastMovement), Date.parse(drops[keyId] || '') || 0);
-  const since = Date.parse(rec.startedAt) - 5 * 60e3;
-  return { ok: KEYNEST_IN.test(k.status) && moved >= since, status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
+  return { ok: KEYNEST_IN.test(k.status), status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
 }
+
+// ---- KeyNest stores: a cleaner who still has the key sees the nearest KeyNest to the flat and the nearest one open
+// 24 hours, with directions. The store list (addresses, map positions, opening hours) is loaded twice a day.
+let knStores = null, knStoresFail = null; // { at, stores } / { at, err }
+function knStore(s) {
+  const num = (...v) => { for (const x of v) if (x !== null && x !== undefined && x !== '' && Number.isFinite(Number(x))) return Number(x); return NaN; };
+  // Opening times: DayOfWeek 0 = Monday … 6 = Sunday; minutes from midnight (1439.98 = until midnight).
+  const times = s.StoreOpeningTimingsDetails || s.OpeningTimingsDetails || s.OpeningTimes || s.OpeningHours || [];
+  const hours = (Array.isArray(times) ? times : []).map((t) => ({ day: num(t.DayOfWeek, t.dayOfWeek), from: Math.round(num(t.StartMinuteOfDay, t.startMinuteOfDay)), to: Math.round(num(t.EndMinuteOfDay, t.endMinuteOfDay)) }))
+    .filter((h) => h.day >= 0 && h.day <= 6 && h.from >= 0 && h.to > h.from);
+  const time = String(s.StoreTime || s.Storetime || '').trim();
+  const allDay = [0, 1, 2, 3, 4, 5, 6].every((d) => hours.some((h) => h.day === d && h.from <= 0 && h.to >= 1439));
+  return {
+    id: String(s.StoreId ?? s.Id ?? s.LocationCode ?? ''), name: String(s.StoreName || s.Name || '').trim(),
+    address: String(s.StoreStreetAddress || s.Address || s.StreetAddress || '').trim(),
+    lat: num(s.Latitude, s.latitude, s.Lat), lng: num(s.Longtiude, s.Longitude, s.longitude, s.Lng), // "Longtiude" is KeyNest's spelling
+    time, hours, is24: allDay || /open 24 hours|24\s*\/\s*7|\b24 ?hrs?\b/i.test(time),
+  };
+}
+async function keynestStores(env) {
+  if (knStores && Date.now() - knStores.at < 12 * 3600e3) return knStores.stores;
+  if (knStoresFail && Date.now() - knStoresFail.at < 5 * 60e3) throw knStoresFail.err;
+  const list = (j) => (Array.isArray(j) ? j : Object.values((j && j.ResponsePacket) || j || {}).find(Array.isArray) || []);
+  let raw = [];
+  try { raw = list(await keynestGet(env, '/KeyNests')); } catch (e) { console.log('[keynest] store list (v3) failed:', e.message); }
+  if (!raw.length) { // the older API's version of the same list
+    const v2 = (env.KEYNEST_API_URL || KEYNEST_DEFAULT).replace(/\/v3\/?$/, '/v2');
+    try { raw = list(await keynestGet(env, '/KeyStore/StoreListByCountry', { base: v2, body: { Country: 'United Kingdom' } })); } catch (e) { console.log('[keynest] store list (v2) failed:', e.message); }
+  }
+  const stores = raw.map(knStore).filter((x) => x.name && Number.isFinite(x.lat) && Number.isFinite(x.lng) && (x.lat || x.lng));
+  console.log('[keynest] stores:', stores.length, 'usable of', raw.length, '·', stores.filter((x) => x.is24).length, 'open 24 hours · fields:', Object.keys(raw[0] || {}).join(','));
+  if (!stores.length) { const err = userError('Couldn’t load the KeyNest store list. Try again in a minute.'); knStoresFail = { at: Date.now(), err }; throw err; }
+  knStores = { at: Date.now(), stores }; knStoresFail = null;
+  return stores;
+}
+// Where a flat is: its Guesty map position, or else its postcode's centre from postcodes.io (free, UK only).
+const postcodeGeo = new Map();
+async function flatLatLng(l) {
+  if (l.lat !== null && l.lng !== null && (l.lat || l.lng)) return { lat: l.lat, lng: l.lng };
+  const pc = String(l.postcode || '').replace(/\s+/g, '').toUpperCase();
+  if (!pc) return null;
+  if (postcodeGeo.has(pc)) return postcodeGeo.get(pc);
+  try {
+    const j = await (await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(pc)}`, { signal: AbortSignal.timeout(5000) })).json();
+    const g = j && j.result && Number.isFinite(j.result.latitude) ? { lat: j.result.latitude, lng: j.result.longitude } : null;
+    if (g) postcodeGeo.set(pc, g);
+    return g;
+  } catch (_) { return null; }
+}
+const milesBetween = (a, b) => {
+  const r = (d) => (d * Math.PI) / 180, dLat = r(b.lat - a.lat), dLng = r(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 3958.8 * 2 * Math.asin(Math.sqrt(h));
+};
+function londonNow() {
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+  const g = (k) => p.find((x) => x.type === k).value;
+  return { day: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(g('weekday')), min: Number(g('hour')) * 60 + Number(g('minute')) };
+}
+function storeToday(st, now) {
+  const hhmm = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  if (st.is24) return { today: 'Open 24 hours', openNow: true };
+  if (!st.hours.length) return { today: st.time, openNow: null };
+  const t = st.hours.filter((h) => h.day === now.day).sort((x, y) => x.from - y.from);
+  if (!t.length) return { today: 'Closed today', openNow: false };
+  return { today: 'Today ' + t.map((h) => `${hhmm(h.from)}–${h.to >= 1439 ? 'midnight' : hhmm(h.to)}`).join(', '), openNow: t.some((h) => h.from <= now.min && now.min < h.to) };
+}
+
+// KeyNest webhook: every key movement (COLLECTED, DROPPED, HANDOVER…) is kept as a record, shown in each cleaning's details.
+// It doesn't decide anything: completing only needs the key to be in the store.
 const webhookKeyFor = async (env, name) => (await hmac(await secretKey(env), name)).slice(0, 32);
+const KN_KEEP_DAYS = 120;
+const londonOffsetMs = (t) => {
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(t));
+  const g = (k) => Number(p.find((x) => x.type === k).value);
+  return Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute')) - Math.floor(t / 60e3) * 60e3;
+};
+// KeyNest times have no time zone ("2026-09-27T16:08:19.89" or "27/09/2026 16:08:19"). Read them as London time or
+// UTC, whichever is nearer to when the message arrived; if the time can't be read, use the arrival time.
+function knTime(s, received) {
+  s = String(s || '');
+  if (/[zZ]$|[+-]\d\d:?\d\d$/.test(s) && Date.parse(s)) return Date.parse(s);
+  const iso = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?/.exec(s), uk = /^(\d\d)\/(\d\d)\/(\d{4}) (\d\d):(\d\d)(?::(\d\d))?/.exec(s);
+  const utc = iso ? Date.UTC(+iso[1], iso[2] - 1, +iso[3], +iso[4], +iso[5], +(iso[6] || 0))
+    : uk ? Date.UTC(+uk[3], uk[2] - 1, +uk[1], +uk[4], +uk[5], +(uk[6] || 0)) : NaN;
+  if (!Number.isFinite(utc)) return received;
+  const london = utc - londonOffsetMs(utc);
+  return Math.abs(london - received) < Math.abs(utc - received) ? london : utc;
+}
+async function keynestRecord(env, b) {
+  const now = Date.now();
+  const event = String(b.EventName || '').toUpperCase().replace(/[^A-Z_]/g, '').slice(0, 30);
+  await env.STORE.put('keynestHook', JSON.stringify({ at: new Date(now).toISOString(), event: event || null })); // shown in Settings
+  if (!event || !b.KeyId) return;
+  const s = (v) => String(v ?? '').trim().slice(0, 120);
+  const holder = (st) => (/^In Use\s*\((.+)\)$/i.exec(s(st)) || [])[1] || '';
+  // Who: the person now holding the key; for a drop-off, the person who had it.
+  const who = event === 'DROPPED' ? holder(b.PreviousStatus) : s(b.CurrentUserName) || holder(b.CurrentStatus);
+  const move = { event, at: new Date(knTime(b.WhenHappened, now)).toISOString(), who, store: s(b.StoreName), status: s(b.CurrentStatus) };
+  const id = s(b.KeyId);
+  const moves = (await env.STORE.get('keynestMoves', 'json')) || {};
+  moves[id] = [...(moves[id] || []).filter((m) => now - Date.parse(m.at) < KN_KEEP_DAYS * 864e5), move]
+    .sort((x, y) => x.at.localeCompare(y.at)).slice(-100);
+  await env.STORE.put('keynestMoves', JSON.stringify(moves));
+  console.log('[keynest]', event.toLowerCase(), s(b.KeyName) || id);
+}
+// The KeyNest movements of this flat's key from 6 hours before the cleaning started to 3 hours after it finished.
+async function keyMovesFor(env, ctx, rec) {
+  if (rec.keyMode !== 'keynest') return null;
+  let keyId = rec.key && rec.key.keyId;
+  if (!keyId) { try { const l = await listingInfo(env, ctx, rec.listingId); keyId = l && (await keynestLink(env, l) || {}).keyId; } catch (_) { /* KeyNest down: no record */ } }
+  if (!keyId) return [];
+  const from = Date.parse(rec.startedAt) - 6 * 3600e3, to = Date.parse(rec.completedAt || rec.cancelledAt || nowIso()) + 3 * 3600e3;
+  return (((await env.STORE.get('keynestMoves', 'json')) || {})[keyId] || []).filter((m) => { const t = Date.parse(m.at); return t >= from && t <= to; });
+}
 
 // Admin and User roles run the operation: settings & integrations, assigning cleanings. Supervisors and cleaners don't.
 const isManager = (u) => Boolean(u && (u.role === 'admin' || u.role === 'user'));
@@ -729,7 +843,8 @@ async function keynestAdminApi(req, env, ctx, me, parts) {
     const base = (env.PUBLIC_URL || '').replace(/\/$/, '');
     const snap = await getSnapshot(env, ctx);
     const flats = [...listingMap(snap.listings, config(env), allowBuildingFor(me)).values()].filter((l) => l.keyMode === 'keynest');
-    const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null, keys: [], flats: [], error: null };
+    const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null,
+      lastHook: await env.STORE.get('keynestHook', 'json'), keys: [], flats: [], error: null };
     if (out.connected) { try { out.keys = await keynestKeys(env, true); } catch (e) { out.error = e.userMessage || e.message; } }
     for (const l of flats) {
       let link = null; try { link = await keynestLink(env, l); } catch (_) { /* shown via out.error */ }
@@ -1058,14 +1173,28 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     return finish();
   }
   if (req.method === 'GET' && action === 'key-status') {
-    // Live KeyNest status for the cleaner's "hand the key in" screen.
+    // Live KeyNest status for the cleaner's "key back in KeyNest" screen.
     if (!isMine && !isAdmin) return deny();
     if (rec.keyMode !== 'keynest') return json({ ok: false, status: null });
     if (!env.KEYNEST_API_KEY) return json({ ok: false, status: null, error: 'KeyNest isn’t connected yet. Ask an admin.' });
     const l = await listingInfo(env, ctx, rec.listingId);
     const link = l && await keynestLink(env, l);
     if (!link) return json({ ok: false, status: null, error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' });
-    return json(await keynestCheck(env, rec, link.keyId));
+    return json(await keynestCheck(env, link.keyId));
+  }
+  if (req.method === 'GET' && action === 'key-stores') {
+    // Where to drop the key off: the nearest KeyNest to the flat, and the nearest one open 24 hours.
+    if (!isMine && !isAdmin) return deny();
+    if (rec.keyMode !== 'keynest') return json({ nearest: null, nearest24: null });
+    const l = await listingInfo(env, ctx, rec.listingId);
+    const at = l && await flatLatLng(l);
+    if (!at) return json({ error: 'Couldn’t find this flat on the map, so there are no KeyNest stores to suggest.' });
+    let stores;
+    try { stores = await keynestStores(env); } catch (e) { return json({ error: e.userMessage || 'Couldn’t load the KeyNest stores. Try again in a minute.' }); }
+    const now = londonNow();
+    const ranked = stores.map((st) => ({ st, miles: milesBetween(at, st) })).sort((x, y) => x.miles - y.miles);
+    const view = (x) => x && { id: x.st.id, name: x.st.name, address: x.st.address, lat: x.st.lat, lng: x.st.lng, miles: Math.round(x.miles * 10) / 10, is24: x.st.is24, ...storeToday(x.st, now) };
+    return json({ nearest: view(ranked[0]), nearest24: view(ranked.find((x) => x.st.is24)) });
   }
   if (req.method === 'POST' && action === 'key') {
     if (!isMine) return deny();
@@ -1087,8 +1216,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
       const l = await listingInfo(env, ctx, rec.listingId);
       const link = l && await keynestLink(env, l);
       if (!link) return json({ error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' }, 400);
-      const chk = await keynestCheck(env, rec, link.keyId);
-      if (!chk.ok) return json({ error: `KeyNest doesn’t show the key handed in yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
+      const chk = await keynestCheck(env, link.keyId);
+      if (!chk.ok) return json({ error: `KeyNest doesn’t show the key in the store yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
       rec.key = { mode: 'keynest', keyId: link.keyId, status: chk.status, lastMovement: chk.lastMovement, confirmedAt: nowIso() };
       return finish();
     }
@@ -1105,7 +1234,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
   }
   if (req.method === 'GET') {
     if (!isMine && !(can(me, 'view_cleaning') && inScope(me, rec.building))) return deny();
-    return json({ cleaning: await withMedia(env, rec), checklist: CHECKLIST, holdMs: HOLD_MS });
+    return json({ cleaning: await withMedia(env, rec), keyMoves: await keyMovesFor(env, ctx, rec), checklist: CHECKLIST, holdMs: HOLD_MS });
   }
   return json({ error: 'Not supported' }, 405);
 }
@@ -1194,15 +1323,8 @@ async function handle(req, env, ctx) {
   if (p === '/health') return json({ ok: true, mock: config(env).mock });
 
   if (p.startsWith('/webhooks/keynest/') && req.method === 'POST') {
-    // KeyNest DROPPED events: remember when each key was last handed in (backs up the status check).
     if (!safeEqual(p.split('/')[3] || '', await webhookKeyFor(env, 'keynest'))) return new Response('unauthorised', { status: 401 });
-    const body = await req.json().catch(() => ({}));
-    if (String(body.EventName || '').toUpperCase() === 'DROPPED' && body.KeyId) {
-      const drops = (await env.STORE.get('keynestDrops', 'json')) || {};
-      drops[String(body.KeyId)] = new Date(knTime(body.WhenHappened) || Date.now()).toISOString();
-      await env.STORE.put('keynestDrops', JSON.stringify(drops));
-      console.log('[keynest] dropped', body.KeyName || body.KeyId);
-    }
+    await keynestRecord(env, await req.json().catch(() => ({})));
     return new Response('ok');
   }
 
