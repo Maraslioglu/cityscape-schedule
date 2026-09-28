@@ -249,7 +249,9 @@
       $('props-sub').textContent = `${p.total} flats · ${counts}`;
       $('props').innerHTML = p.buildings.map((b) => `<div class="card pcard">
         <h3>${esc(b.name)}</h3><div class="pc">${esc(b.postcode)}</div>
-        ${b.units.map((u) => `<div class="prow" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span></div>${u.keyMode === 'lockbox' ? `<div class="pnote"><span class="kbadge">Lockbox</span><span>${u.lockbox ? `Code <b>${esc(u.lockbox.code)}</b> · set by ${esc(u.lockbox.by)}, ${esc(fmtWhen(u.lockbox.at))}` : 'No code recorded yet'}</span></div>` : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key must be back in KeyNest after each clean</span></div>' : ''}`).join('')}
+        ${b.units.map((u) => `<div class="prow${u.hidden ? ' off' : ''}" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span>${p.canManage ? `<button class="btn pedit" data-edit="${esc(u.id)}" aria-label="Edit ${esc(u.label)}">Edit</button>` : ''}</div>
+          ${u.hidden || u.edited ? `<div class="ptags">${u.hidden ? '<span class="ptag off">Hidden from the schedule</span>' : ''}${u.edited ? `<span class="ptag" title="${u.editedBy ? `Changed by ${esc(u.editedBy)}${u.editedAt ? `, ${esc(fmtWhen(u.editedAt))}` : ''}` : ''}">Edited in the app</span>` : ''}</div>` : ''}
+          ${u.keyMode === 'lockbox' ? lockboxBlock(u.lockbox) : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key must be back in KeyNest after each clean</span></div>' : ''}`).join('')}
       </div>`).join('');
       // KeyNest flats that aren't linked to a KeyNest key can't be completed by cleaners: say so at the top.
       const kn = p.keynest || { unlinked: [] };
@@ -263,6 +265,76 @@
     } catch (e) {
       if (e.message !== 'signed out') $('props').innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
     }
+  }
+
+  // The lockbox code, big: cleaners check it every time they arrive.
+  const lockboxBlock = (lb) => (lb
+    ? `<div class="lbx"><span class="lbx-k">Lockbox code</span><b class="lbx-code">${esc(lb.code)}</b><span class="lbx-by">Set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}</span></div>`
+    : '<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code recorded yet</span></div>');
+  $('props').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-edit]');
+    if (!b || !props) return;
+    for (const g of props.buildings) { const u = g.units.find((x) => x.id === b.dataset.edit); if (u) return openPropEditor(u); }
+  });
+
+  // ---------- editing a flat's details (Admin and User): on top of Guesty, blank = use Guesty's ----------
+  const KEY_WORDS = { keynest: 'KeyNest', lockbox: 'Lockbox', none: 'No key step' };
+  function openPropEditor(u) {
+    detailId = null;
+    const g = u.guesty || {};
+    const own = (k) => (u[k] !== g[k] ? u[k] || '' : '');
+    const keyOwn = u.keyMode === g.keyMode ? '' : u.keyMode || 'none';
+    const bl = [...new Set(props.buildings.map((b) => b.name))];
+    const field = (id, label, input, guesty) => `<div class="pe-f"><label for="${id}">${label}</label>${input}<span class="pe-g">Guesty: ${esc(guesty || '—')}</span></div>`;
+    $('detail').classList.remove('hidden');
+    document.body.classList.add('noscroll');
+    $('detail-body').innerHTML = `
+      <div class="sh-head"><div class="sh-title"><span class="eyebrow">Edit property</span><h2>${esc(u.label)}</h2><div class="sh-sub">Leave a box empty to use Guesty’s details. Changes show for everyone straight away.</div></div>
+        <div class="sh-right"><button class="btn sq" data-close-detail aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div></div>
+      <form class="pe-form" id="pe-form" autocomplete="off">
+        ${field('pe-label', 'Flat name', `<input id="pe-label" maxlength="40" value="${esc(own('label'))}" placeholder="${esc(g.label)}">`, g.label)}
+        ${field('pe-building', 'Building (flats with the same building are grouped together)', `<input id="pe-building" maxlength="80" list="pe-bl" value="${esc(own('building'))}" placeholder="${esc(g.building)}"><datalist id="pe-bl">${bl.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>`, g.building)}
+        ${field('pe-address', 'Address', `<input id="pe-address" maxlength="200" value="${esc(own('address'))}" placeholder="${esc(g.address)}">`, g.address)}
+        <div class="pe-row">
+          ${field('pe-postcode', 'Postcode', `<input id="pe-postcode" maxlength="9" value="${esc(own('postcode'))}" placeholder="${esc(g.postcode)}">`, g.postcode)}
+          ${field('pe-type', 'Bedrooms', `<select id="pe-type"><option value="">Use Guesty’s (${esc(shortType(g.unitType))})</option>${(props.unitTypes || []).map((t) => `<option value="${esc(t)}" ${own('unitType') === t ? 'selected' : ''}>${esc(shortType(t))}</option>`).join('')}</select>`, shortType(g.unitType))}
+        </div>
+        <div class="pe-row">
+          ${field('pe-out', 'Check-out time', `<input id="pe-out" type="time" value="${esc(own('checkOutTime'))}">`, g.checkOutTime)}
+          ${field('pe-in', 'Check-in time', `<input id="pe-in" type="time" value="${esc(own('checkInTime'))}">`, g.checkInTime)}
+        </div>
+        ${field('pe-key', 'Key returned by', `<select id="pe-key"><option value="">Use Guesty’s tag (${esc(KEY_WORDS[g.keyMode || 'none'])})</option>${Object.entries(KEY_WORDS).map(([k, w]) => `<option value="${k}" ${keyOwn === k ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select>`, KEY_WORDS[g.keyMode || 'none'])}
+        <label class="pe-check"><input type="checkbox" id="pe-show" ${u.hidden ? '' : 'checked'}> Show this flat on the schedule</label>
+        <div id="pe-review"></div>
+        <div class="form-actions">${u.edited ? '<button type="button" class="btn" id="pe-reset">Reset to Guesty</button>' : ''}<span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="pe-go">Review changes</button></div>
+      </form>`;
+    const val = (id) => $(id).value.trim();
+    const fields = () => ({ label: val('pe-label'), building: val('pe-building'), address: val('pe-address'), postcode: val('pe-postcode').toUpperCase(),
+      unitType: $('pe-type').value, checkOutTime: $('pe-out').value, checkInTime: $('pe-in').value, keyMode: $('pe-key').value, hidden: !$('pe-show').checked });
+    const now = (f) => ({ label: f.label || g.label, building: f.building || g.building, address: f.address || g.address, postcode: f.postcode || g.postcode,
+      unitType: shortType(f.unitType || g.unitType), checkOutTime: f.checkOutTime || g.checkOutTime, checkInTime: f.checkInTime || g.checkInTime,
+      keyMode: KEY_WORDS[f.keyMode || g.keyMode || 'none'], shown: f.hidden ? 'Hidden' : 'Shown' });
+    const WORD = { label: 'Flat name', building: 'Building', address: 'Address', postcode: 'Postcode', unitType: 'Bedrooms', checkOutTime: 'Check-out time', checkInTime: 'Check-in time', keyMode: 'Key returned by', shown: 'On the schedule' };
+    const save = async (body, done) => {
+      try {
+        await send('PUT', `/api/properties/${encodeURIComponent(u.id)}`, { confirmed: true, ...body });
+        toast(done); closeDetail(); props = null; loadProps();
+        if (data) { weeks.clear(); showWeek(data.weekStart, { quiet: true }); }
+      } catch (e) { toast(e.message); }
+    };
+    $('pe-form').onsubmit = (e) => {
+      e.preventDefault();
+      const before = now({ ...Object.fromEntries(['label', 'building', 'address', 'postcode', 'unitType', 'checkOutTime', 'checkInTime'].map((k) => [k, own(k)])), keyMode: keyOwn, hidden: u.hidden });
+      const f = fields(), after = now(f);
+      const diff = Object.keys(WORD).filter((k) => before[k] !== after[k]);
+      if (!diff.length) { $('pe-review').innerHTML = '<p class="muted">Nothing has changed yet.</p>'; return; }
+      $('pe-review').innerHTML = `<div class="confirm-box"><b>Save these changes to ${esc(u.label)}?</b><ul>${diff.map((k) => `<li>${esc(WORD[k])}: ${esc(before[k] || '—')} → <b>${esc(after[k] || '—')}</b></li>`).join('')}</ul><p class="muted">Everyone sees the change on the schedule straight away. Guesty itself isn’t changed.</p>
+        <div class="form-actions"><button type="button" class="btn" id="pe-back">Back</button><button type="button" class="btn primary" id="pe-save">Save changes</button></div></div>`;
+      $('pe-go').disabled = true;
+      $('pe-back').onclick = () => { $('pe-review').innerHTML = ''; $('pe-go').disabled = false; };
+      $('pe-save').onclick = () => save({ fields: f }, `${u.label} updated`);
+    };
+    if ($('pe-reset')) $('pe-reset').onclick = () => confirm(`Use Guesty’s details for ${u.label} again? Your changes to this flat are removed.`) && save({ reset: true }, `${u.label} is back to Guesty’s details`);
   }
 
   function fmtWhen(iso) { return new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
@@ -346,12 +418,18 @@
   }
 
   // ---------- views ----------
+  const isoWeek = (s) => {
+    const d = D(s); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3); // that week's Thursday
+    const jan4 = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+    return 1 + Math.round(((d - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
+  };
+  const weekNo = () => isoWeek(data.dates.find((x) => D(x).getUTCDay() === 1) || data.weekStart);
   const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account' };
   function setPageHead() {
     const eb = $('page-eyebrow'), h = $('page-title');
     if ((view === 'day' || view === 'board') && data) {
       const when = data.dates.includes(data.today) ? 'This week' : data.weekStart > data.today ? 'Upcoming week' : 'Past week';
-      eb.textContent = `Schedule · ${when}`;
+      eb.textContent = `Schedule · Week ${weekNo()} · ${when}`;
       if (view === 'day') h.innerHTML = `${esc(WD_LONG.format(D(selected)))}, <span>${D(selected).getUTCDate()} ${esc(MON.format(D(selected)))}</span>`;
       else h.innerHTML = `The week, <span>${esc(shortDate(data.weekStart))} – ${esc(shortDate(data.weekEnd))}</span>`;
     } else {
@@ -954,6 +1032,7 @@
       <div class="sh-head"><div class="sh-title"><span class="eyebrow">${esc(u.building || '')}${u.postcode ? ` · ${esc(u.postcode)}` : ''}</span><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(shortType(u.unitType || ''))}</div></div>
         <div class="sh-right">${pill}<button class="btn sq" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div></div>
       ${times}
+      ${(du.keyMode || u.keyMode) === 'lockbox' && can('view_cleaning') ? '<div id="sh-lbx"></div>' : ''}
       ${assignBlock()}
       ${active ? milestones(active) : ''}
       ${body}
@@ -962,6 +1041,10 @@
       ${can('report_damage') ? '<button class="btn wide" id="report-damage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Report damage</button>' : ''}`;
 
     const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+    if ($('sh-lbx')) {
+      const box = $('sh-lbx'), id = sheetListing;
+      getJSON(`/api/lockbox/${encodeURIComponent(id)}`).then((r) => { if ($('sh-lbx') === box && sheetListing === id) box.innerHTML = lockboxBlock(r.lockbox); }).catch(() => {});
+    }
     wireAssign();
     on('begin-clean', async () => {
       try { await send('POST', '/api/cleanings/start', { listingId: sheetListing }); toast('Cleaning started'); await refreshCleanings(); }
