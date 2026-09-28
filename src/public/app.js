@@ -535,13 +535,43 @@
   };
   const durWords = (ms) => { const m = Math.round(ms / 60000); return m < 1 ? 'under 1 min' : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
   const myActive = () => cleanings.find((c) => c.cleanerId === me.id && ACTIVE.includes(c.status));
-  const forListing = (id, date) => cleanings.filter((c) => c.listingId === id && c.status !== 'cancelled' && (!date || c.date === date || ACTIVE.includes(c.status)));
+  // A cleaning counts towards the check-out it follows, not just the day it happened: e.g. a flat checked out
+  // Sunday and cleaned Monday morning shows as cleaned on Sunday. It belongs to the latest check-out at or
+  // before the time it started (up to 2 hours early, in case the guest left early), unless a new guest has
+  // arrived since. It also still shows on the day it happened, unless that day's own check-out is still to clean.
+  const londonHM = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(iso));
+  const minus2h = (hm) => { const [h, m] = hm.split(':').map(Number); const t = Math.max(0, h * 60 + m - 120); return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
+  const nextDay = (d) => { const x = D(d); x.setUTCDate(x.getUTCDate() + 1); return x.toISOString().slice(0, 10); };
+  // Cleanings are fetched up to the day after the week, so a Friday check-out cleaned on Saturday morning is found.
+  const cleaningRange = () => `from=${data.dates[0]}&to=${nextDay(data.dates[data.dates.length - 1])}`;
+  const unitOn = (listingId, date) => { const day = data.days.find((d) => d.date === date); return day && day.units.find((u) => u.listingId === listingId); };
+  function cleanFor(c) {
+    if (!data || !c.startedAt) return c.date;
+    // Left over from another week while the new one loads: it can't belong to a check-out on screen.
+    if (c.date < data.dates[0] || c.date > nextDay(data.dates[data.dates.length - 1])) return c.date;
+    const hm = londonHM(c.startedAt);
+    let best = null;
+    for (const d of data.dates) {
+      if (d > c.date) break;
+      const u = unitOn(c.listingId, d);
+      const o = u && u.checkOut;
+      if (o && (d < c.date || !o.timeRaw || hm >= minus2h(o.timeRaw))) best = d;
+      if (u && u.checkIn && d < c.date) best = null; // a new guest arrived since, so that check-out was cleaned already
+    }
+    return best || c.date;
+  }
+  function cleaningShowsOn(c, date) {
+    if (cleanFor(c) === date) return true;
+    const u = c.date === date && unitOn(c.listingId, date);
+    return c.date === date && !(u && u.checkOut);
+  }
+  const forListing = (id, date) => cleanings.filter((c) => c.listingId === id && c.status !== 'cancelled' && (!date || ACTIVE.includes(c.status) || cleaningShowsOn(c, date)));
   let cRange = '';
 
   async function refreshCleanings() {
     if (!me) return;
     try {
-      const range = data ? `from=${data.dates[0]}&to=${data.dates[data.dates.length - 1]}` : '';
+      const range = data ? cleaningRange() : '';
       const r = await getJSON('/api/cleanings?' + range);
       cRange = range;
       cleanings = r.cleanings; checklistDef = r.checklist; holdMs = r.holdMs;
@@ -553,7 +583,7 @@
 
   // Badges on Day view rows: "Cleaning · 12:04" (live) or "Cleaned · 49 min"
   function decorateDay() {
-    if (data && me && cRange !== `from=${data.dates[0]}&to=${data.dates[data.dates.length - 1]}`) { cRange = 'loading'; refreshCleanings(); }
+    if (data && me && cRange !== cleaningRange()) { cRange = 'loading'; refreshCleanings(); }
     document.querySelectorAll('[data-cbadge]').forEach((el) => {
       const list = forListing(el.dataset.cbadge, selected);
       const active = list.find((c) => ACTIVE.includes(c.status));
@@ -651,7 +681,7 @@
     }
 
     const history = done.map((c) => `<div class="hist">
-        <div class="hist-h"><b>✓ Cleaned by ${esc(c.cleanerName)}</b><span>${fmtClock(c.startedAt)}–${fmtClock(c.endedAt)} · ${durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt))}</span></div>
+        <div class="hist-h"><b>✓ Cleaned by ${esc(c.cleanerName)}</b><span>${c.date !== selected ? esc(`${WD_SHORT.format(D(c.date))} ${shortDate(c.date)}`) + ', ' : ''}${fmtClock(c.startedAt)}–${fmtClock(c.endedAt)} · ${durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt))}</span></div>
         <div class="hist-s">Checklist confirmed ${c.checklist.length}/${checklistDef.length || 5}${keyNote(c)}${c.guesty === 'updated' ? ' · marked clean in Guesty' : c.guesty === 'failed' ? ' · <span class="warn">Guesty not updated</span>' : ''}</div>
         ${(can('view_cleaning') || c.cleanerId === me.id) ? mediaTiles(c.media) : ''}
       </div>`).join('');
@@ -660,7 +690,7 @@
     $('sheet-body').innerHTML = `
       <div class="sh-head"><div><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(u.building || '')}${t ? ' · ' + esc(t) : ''}</div></div><button class="btn sq" data-close aria-label="Close">✕</button></div>
       ${body}
-      ${history ? `<h3 class="sh-h3">Cleaned ${selected === (data && data.today) ? 'today' : esc(longDate(selected))}</h3>${history}` : ''}
+      ${history ? `<h3 class="sh-h3">${done.some((c) => c.date !== selected) ? 'Cleaned' : `Cleaned ${selected === (data && data.today) ? 'today' : esc(longDate(selected))}`}</h3>${history}` : ''}
       <div id="sheet-damages"></div>
       ${can('report_damage') ? '<button class="btn wide" id="report-damage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Report damage</button>' : ''}`;
 
@@ -825,6 +855,7 @@
         if (navigator.vibrate) navigator.vibrate(40);
         toast('Cleaning complete ✓');
         await refreshCleanings();
+        if (sheetListing === a.listingId && sheetMode === 'main') closeSheet(); // not if they've since opened another flat
       } catch (e) { toast(e.message); done.disabled = false; if (a.keyMode === 'keynest') check(); }
     };
     if (a.keyMode === 'lockbox') {
@@ -888,8 +919,10 @@
         const r = await send('POST', `/api/cleanings/${a.id}/complete`, { videoIds: mineUp.filter((u) => u.kind === 'video').map((u) => u.id), photoIds: mineUp.filter((u) => u.kind === 'photo').map((u) => u.id) });
         for (const [k, u] of uploads) if (u.ownerId === a.id) uploads.delete(k);
         releaseWake();
-        toast(r.cleaning && r.cleaning.status === 'awaiting_key' ? 'Video saved ✓ Now return the key' : 'Cleaning complete ✓');
+        const finished = !(r.cleaning && r.cleaning.status === 'awaiting_key');
+        toast(finished ? 'Cleaning complete ✓' : 'Video saved ✓ Now return the key');
         await refreshCleanings();
+        if (finished && sheetListing === a.listingId && sheetMode === 'main') closeSheet();
       } catch (e) { toast(e.message); }
     };
     drawUploads(a);
