@@ -656,6 +656,8 @@
       : `<a class="mt photo" href="/media/${m.id}${m.hasOrig ? '/orig' : ''}" target="_blank" rel="noopener"><img loading="lazy" src="/media/${m.id}/thumb" onerror="this.src='/media/${m.id}'" alt="Photo"></a>`).join('')}</div>`;
   }
 
+  // A cleaner can back out of their own cleaning at any step until it's complete.
+  const CANCEL_MINE = '<button class="linkbtn" id="cancel-clean">Changed your mind? Cancel this cleaning</button>';
   let lastSheetSig = null;
   const sheetSig = () => JSON.stringify([sheetListing, selected, forListing(sheetListing, selected).map((c) =>
     [c.id, c.status, c.endedAt, c.guesty, c.checklist && c.checklist.length, c.key && c.key.mode, (c.media || []).map((m) => [m.id, m.status, m.hasOrig])])]);
@@ -680,11 +682,11 @@
         </div>`;
     } else if (active && mine && active.status === 'checklist') {
       body = `<div class="timer-card"><div class="tc-label">Cleaning ended at ${fmtClock(active.endedAt)} · ${durWords(Date.parse(active.endedAt) - Date.parse(active.startedAt))}</div>
-        <p>Go through the final checks to finish.</p><button class="btn big primary" id="open-checklist">Continue checklist</button></div>`;
+        <p>Go through the final checks to finish.</p><button class="btn big primary" id="open-checklist">Continue checklist</button>${CANCEL_MINE}</div>`;
     } else if (active && mine && active.status === 'awaiting_video') {
-      body = evidenceStep(active);
+      body = evidenceStep(active) + `<div class="cancel-row">${CANCEL_MINE}</div>`;
     } else if (active && mine && active.status === 'awaiting_key') {
-      body = keyStep(active);
+      body = keyStep(active) + `<div class="cancel-row">${CANCEL_MINE}</div>`;
     } else if (active) {
       body = `<div class="timer-card other"><div class="tc-label">${esc(active.cleanerName)} started at ${fmtClock(active.startedAt)}</div>
         <div class="tc-time" ${active.endedAt ? '' : `data-since="${esc(active.startedAt)}"`}>${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</div>
@@ -717,8 +719,14 @@
       try { await send('POST', `/api/cleanings/${active.id}/end`); await refreshCleanings(); openChecklist(); }
       catch (e) { toast(e.message); }
     });
-    on('cancel-clean', () => confirmInline('Cancel this cleaning? The timer will be discarded.', async () => {
-      try { await send('POST', `/api/cleanings/${active.id}/cancel`); toast('Cleaning cancelled'); await refreshCleanings(); } catch (e) { toast(e.message); }
+    on('cancel-clean', () => confirmInline(active.status === 'in_progress' ? 'Cancel this cleaning? The timer will be discarded.' : 'Cancel this cleaning? Nothing from it will be recorded.', async () => {
+      try {
+        await send('POST', `/api/cleanings/${active.id}/cancel`);
+        // Stop anything still running for it: video uploads and the KeyNest check.
+        for (const [k, x] of uploads) if (x.ownerId === active.id) { x.cancelled = true; uploads.delete(k); }
+        releaseWake(); clearInterval(keyPoll); keyPoll = null;
+        toast('Cleaning cancelled'); await refreshCleanings();
+      } catch (e) { toast(e.message); }
     }));
     on('open-checklist', openChecklist);
     on('report-damage', () => { sheetMode = 'damage'; renderSheet(); });
@@ -1005,6 +1013,7 @@
       }
       u.progress = received / u.file.size; draw();
       while (received < u.file.size) {
+        if (u.cancelled) throw new Error('Cancelled');
         const end = Math.min(u.file.size, received + CH);
         const r = await putChunk(u.id, received, u.file.slice(received, end), (loaded) => { u.progress = (received + loaded) / u.file.size; draw(); });
         if (r.ok) { received = r.received; if (r.info) u.info = r.info; fails = 0; u.waiting = false; u.progress = received / u.file.size; draw(); continue; }
