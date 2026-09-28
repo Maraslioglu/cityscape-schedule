@@ -922,6 +922,95 @@ async function notify(env, ctx, to, n) {
   await env.STORE.put('notifications', JSON.stringify(kept));
   ctx.waitUntil(pushTo(env, to, { title: n.title, body: n.body || '', url: n.url || '/', tag: n.tag || n.type }).catch((e) => console.log('[push] failed', e.message)));
 }
+// ---------------------------------------------------------------- team forum
+// Anyone signed in can post (bugs, ideas, questions), like or dislike a post and comment. Admins and Users are told
+// about new posts and can mark a post fixed or closed; people can delete their own posts and comments, Admins and
+// Users anything. Kept as one list of the newest 500 posts.
+const FORUM_KINDS = ['bug', 'idea', 'question', 'other'];
+const FORUM_STATUS = ['open', 'fixed', 'closed'];
+function forumSummary(p, me) {
+  const votes = Object.values(p.votes || {});
+  return {
+    id: p.id, kind: p.kind, title: p.title, excerpt: p.body.slice(0, 240), authorId: p.authorId, authorName: p.authorName, at: p.at,
+    status: p.status, statusBy: p.statusBy || null, likes: votes.filter((v) => v === 1).length, dislikes: votes.filter((v) => v === -1).length,
+    myVote: (p.votes || {})[me.id] || 0, comments: (p.comments || []).length, lastAt: p.lastAt || p.at, mine: p.authorId === me.id,
+  };
+}
+async function managerIds(env, except) {
+  const ids = (await loadUsers(env)).filter((u) => u.active !== false && isManager(u)).map((u) => u.id);
+  return [...new Set([...ids, 'owner'])].filter((id) => id !== except); // the recovery login counts as an admin
+}
+async function forumApi(req, env, ctx, me, parts) {
+  const [, , , id, sub, subId] = parts; // /api/forum/:id/:sub/:subId
+  const posts = (await env.STORE.get('forum', 'json')) || [];
+  const save = () => env.STORE.put('forum', JSON.stringify(posts.slice(-500)));
+  const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
+  const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await req.json().catch(() => ({}));
+  const mod = isManager(me);
+  const link = (pid) => `/?view=forum&post=${pid}`;
+  if (!id) {
+    if (req.method === 'GET') return json({ posts: posts.map((p) => forumSummary(p, me)).reverse(), canModerate: mod });
+    if (req.method !== 'POST') return json({ error: 'Not supported' }, 405);
+    const title = text(body.title, 120), details = text(body.body, 4000), kind = FORUM_KINDS.includes(body.kind) ? body.kind : 'other';
+    if (title.length < 3) return json({ error: 'Give your post a short title.' }, 400);
+    if (posts.filter((p) => p.authorId === me.id && Date.now() - Date.parse(p.at) < 864e5).length >= 20) return json({ error: 'That’s a lot of posts today. Try again tomorrow.' }, 429);
+    const p = { id: newId(), kind, title, body: details, authorId: me.id, authorName: me.name, at: nowIso(), status: 'open', votes: {}, comments: [] };
+    posts.push(p);
+    await save();
+    const what = { bug: 'reported a bug', idea: 'shared an idea', question: 'asked a question', other: 'posted on the forum' }[kind];
+    await notify(env, ctx, await managerIds(env, me.id), { type: 'forum', title: `${me.name} ${what}`, body: title, url: link(p.id), tag: `forum-${p.id}` });
+    return json({ post: forumSummary(p, me) });
+  }
+  const p = posts.find((x) => x.id === id);
+  if (!p) return json({ error: 'That post wasn’t found. It may have been deleted.' }, 404);
+  if (req.method === 'GET' && !sub) {
+    return json({ post: { ...forumSummary(p, me), body: p.body, statusAt: p.statusAt || null, comments: (p.comments || []).map((c) => ({ ...c, mine: c.authorId === me.id })) }, canModerate: mod });
+  }
+  if (req.method === 'POST' && sub === 'vote') {
+    const v = Number(body.value);
+    if (![1, -1, 0].includes(v)) return json({ error: 'Like or dislike.' }, 400);
+    p.votes = p.votes || {};
+    if (v) p.votes[me.id] = v; else delete p.votes[me.id];
+    await save();
+    return json({ post: forumSummary(p, me) });
+  }
+  if (req.method === 'POST' && sub === 'comments') {
+    const b = text(body.body, 2000);
+    if (!b) return json({ error: 'Write a comment first.' }, 400);
+    const c = { id: newId(), authorId: me.id, authorName: me.name, body: b, at: nowIso() };
+    p.comments = [...(p.comments || []), c].slice(-300);
+    p.lastAt = c.at;
+    await save();
+    // The post's author and everyone else in the conversation hear about it.
+    const to = [...new Set([p.authorId, ...p.comments.map((x) => x.authorId)])].filter((x) => x && x !== me.id);
+    await notify(env, ctx, to, { type: 'forum', title: `${me.name} commented on “${p.title.slice(0, 60)}”`, body: b.slice(0, 140), url: link(p.id), tag: `forum-${p.id}` });
+    return json({ comment: { ...c, mine: true } });
+  }
+  if (req.method === 'PUT' && sub === 'status') {
+    if (!mod) return json({ error: 'Only Admins and Users can change a post’s status.' }, 403);
+    if (!FORUM_STATUS.includes(body.status)) return json({ error: 'Pick open, fixed or closed.' }, 400);
+    p.status = body.status; p.statusBy = me.name; p.statusAt = nowIso();
+    await save();
+    if (p.authorId !== me.id && p.status !== 'open') await notify(env, ctx, [p.authorId], { type: 'forum', title: `${me.name} marked your post ${p.status}`, body: p.title, url: link(p.id), tag: `forum-${p.id}` });
+    return json({ post: forumSummary(p, me) });
+  }
+  if (req.method === 'DELETE' && !sub) {
+    if (p.authorId !== me.id && !mod) return json({ error: 'You can only delete your own posts.' }, 403);
+    posts.splice(posts.indexOf(p), 1);
+    await save();
+    return json({ ok: true });
+  }
+  if (req.method === 'DELETE' && sub === 'comments') {
+    const c = (p.comments || []).find((x) => x.id === subId);
+    if (!c) return json({ error: 'That comment wasn’t found.' }, 404);
+    if (c.authorId !== me.id && !mod) return json({ error: 'You can only delete your own comments.' }, 403);
+    p.comments = p.comments.filter((x) => x !== c);
+    await save();
+    return json({ ok: true });
+  }
+  return json({ error: 'Not supported' }, 405);
+}
+
 async function notificationsApi(req, env, me, parts) {
   const list = (await env.STORE.get('notifications', 'json')) || [];
   if (req.method === 'GET') {
@@ -1443,6 +1532,7 @@ async function handle(req, env, ctx) {
   if (p === '/api/notifications' || p.startsWith('/api/notifications/')) return notificationsApi(req, env, me, p.split('/'));
   if (p.startsWith('/api/push/')) return pushApi(req, env, me, p.split('/'));
   if (p === '/api/assignments' || p === '/api/assignees') return assignmentsApi(req, env, ctx, me, url);
+  if (p === '/api/forum' || p.startsWith('/api/forum/')) return forumApi(req, env, ctx, me, p.split('/'));
   // Internal checks used by server.mjs for uploads and playback (same-process only; not reachable from outside).
   if (p === '/api/internal/media-check' && req.headers.get('x-internal') === env.__INTERNAL_KEY) {
     const body = await req.json().catch(() => ({}));

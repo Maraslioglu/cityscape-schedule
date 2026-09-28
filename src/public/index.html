@@ -28,6 +28,8 @@
     <button data-nav="damage" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5M12 17.2v.3"/></svg><span class="nl">Damage reports</span><span class="ns">Damage</span><span class="nbadge hidden" id="nb-damage"></span></button>
     <div class="nlbl" data-group="portfolio">Portfolio</div>
     <button data-nav="props" data-group="portfolio"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20.5V6.5l7-3v17M11 8.5l9 3v9M2.5 20.5h19M7 9v.01M7 12.5v.01M7 16v.01M15 14v.01M15 17.5v.01"/></svg><span class="nl">Properties</span><span class="ndot hidden" id="nd-props" title="A KeyNest flat needs linking"></span></button>
+    <div class="nlbl" data-group="team">Team</div>
+    <button data-nav="forum" data-group="team"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 9.5a5.5 5.5 0 0 0-5.5-5.5H8a5.5 5.5 0 0 0-4.4 8.8L3 15.5l3.2-.9a5.5 5.5 0 0 0 1.8.4h1a5.5 5.5 0 0 0 5.5-5.5z"/><path d="M14.4 11H16a4.5 4.5 0 0 1 3.6 7.2l.6 2.3-2.7-.7a4.5 4.5 0 0 1-1.5.2h-1a4.5 4.5 0 0 1-3.8-2"/></svg><span class="nl">Forum</span><span class="ndot hidden" id="nd-forum" title="New posts"></span></button>
     <div class="nlbl" data-group="admin">Admin</div>
     <button data-nav="users" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20c.6-3.6 3.3-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 5.2a3.3 3.3 0 0 1 0 6.6M17.5 14.8c2.2.6 3.6 2.4 4 5.2"/></svg><span class="nl">Users</span></button>
     <button data-nav="settings" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span class="nl">Settings</span></button>
@@ -125,6 +127,18 @@
       <div class="range" role="tablist" aria-label="Which reports"><button role="tab" data-dmg-filter="open" aria-selected="true">Open</button><button role="tab" data-dmg-filter="resolved" aria-selected="false">Resolved</button><button role="tab" data-dmg-filter="all" aria-selected="false">All</button></div>
     </div>
     <div id="dmg-page"></div>
+  </section>
+
+  <!-- FORUM -->
+  <section id="view-forum" class="hidden">
+    <div class="weekbar"><h1>Forum</h1>
+      <div class="range" role="tablist" aria-label="Which posts"><button role="tab" data-fkind="" aria-selected="true">All</button><button role="tab" data-fkind="bug" aria-selected="false">Bugs</button><button role="tab" data-fkind="idea" aria-selected="false">Ideas</button><button role="tab" data-fkind="question" aria-selected="false">Questions</button></div>
+      <div class="range" role="tablist" aria-label="Order"><button role="tab" data-fsort="new" aria-selected="true">Newest</button><button role="tab" data-fsort="top" aria-selected="false">Top</button></div>
+      <span class="spacer"></span>
+      <button class="btn primary" id="f-new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>New post</button>
+    </div>
+    <p class="muted f-hint">Spotted a bug, have an idea or a question? Post it here for the team. Like or dislike posts and comment on them.</p>
+    <div id="forum-list"></div>
   </section>
 
   <!-- USERS VIEW (admins) -->
