@@ -986,7 +986,7 @@
     return `<div class="evidence keystep">
       <div class="ev-head"><b>Last step: hand the key in at KeyNest.</b> <span class="req">Required</span></div>
       <p class="ev-note">Drop the key off at the KeyNest store. As soon as KeyNest records it, you can complete the cleaning.</p>
-      <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span id="kn-text">Checking KeyNest…</span></div>
+      <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span class="kn-body"><span id="kn-text">Checking KeyNest…</span><small id="kn-when"></small></span></div>
       <button class="btn wide" id="kn-check">Check again</button>
       <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
     </div>`;
@@ -1018,17 +1018,26 @@
       done.onclick = () => finish({ code: c1.value, confirmCode: c2.value, keyReturned: back.checked });
       return;
     }
-    const box = $('kn-status'), text = $('kn-text');
+    const box = $('kn-status'), text = $('kn-text'), when = $('kn-when'), again = $('kn-check');
+    // KeyNest's own clock time, shown as KeyNest reports it (e.g. "Sun 27 Sep, 16:08").
+    const knWhen = (s) => { const m = /^(\d{4}-\d\d-\d\d)T(\d\d:\d\d)/.exec(s || ''); return m ? `${WD_SHORT.format(D(m[1]))} ${D(m[1]).getUTCDate()} ${MON_S.format(D(m[1]))}, ${m[2]}` : ''; };
+    let checking = false;
     const check = async () => {
       if (!$('kn-status')) { clearInterval(keyPoll); keyPoll = null; return; }
+      if (checking) return;
+      checking = true; again.disabled = true; again.textContent = 'Checking…';
       try {
         const r = await getJSON(`/api/cleanings/${a.id}/key-status`);
         box.className = 'kn-status ' + (r.ok ? 'ok' : r.error ? 'err' : 'wait');
-        text.textContent = r.error ? r.error : r.ok ? `Key handed in ✓ (${r.status})` : `Waiting for drop-off · KeyNest shows: ${r.status}`;
+        text.textContent = r.error ? r.error : r.ok ? `Key handed in ✓ (${r.status})`
+          : r.inStore ? `KeyNest shows the key ${r.status}, but its last drop-off${knWhen(r.lastMovement) ? ` (${knWhen(r.lastMovement)})` : ''} was before this cleaning started. Hand the key in at KeyNest, then check again.`
+          : `Waiting for drop-off · KeyNest shows: ${r.status}`;
         done.disabled = !r.ok;
       } catch (e) { box.className = 'kn-status err'; text.textContent = e.message; done.disabled = true; }
+      checking = false; again.disabled = false; again.textContent = 'Check again';
+      when.textContent = `Checked at ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Europe/London' })}`;
     };
-    $('kn-check').onclick = check;
+    again.onclick = check;
     done.onclick = () => finish({});
     check();
     keyPoll = setInterval(check, 20000);

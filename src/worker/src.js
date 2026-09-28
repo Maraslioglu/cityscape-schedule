@@ -699,7 +699,9 @@ async function keynestCheck(env, rec, keyId) {
   const drops = (await env.STORE.get('keynestDrops', 'json')) || {};
   const moved = Math.max(knTime(k.lastMovement), Date.parse(drops[keyId] || '') || 0);
   const since = Date.parse(rec.startedAt) - 5 * 60e3;
-  return { ok: KEYNEST_IN.test(k.status) && moved >= since, status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
+  const inStore = KEYNEST_IN.test(k.status);
+  // inStore but not ok: KeyNest's last drop-off is from before this cleaning (the key was never collected and handed back).
+  return { ok: inStore && moved >= since, inStore, status: k.status || 'Unknown', lastMovement: k.lastMovement, keyName: k.name };
 }
 const webhookKeyFor = async (env, name) => (await hmac(await secretKey(env), name)).slice(0, 32);
 
@@ -1088,7 +1090,9 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
       const link = l && await keynestLink(env, l);
       if (!link) return json({ error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' }, 400);
       const chk = await keynestCheck(env, rec, link.keyId);
-      if (!chk.ok) return json({ error: `KeyNest doesn’t show the key handed in yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
+      if (!chk.ok) return json({ error: chk.inStore
+        ? 'KeyNest hasn’t recorded a drop-off since this cleaning started. Hand the key in at the KeyNest store, then check again.'
+        : `KeyNest doesn’t show the key handed in yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
       rec.key = { mode: 'keynest', keyId: link.keyId, status: chk.status, lastMovement: chk.lastMovement, confirmedAt: nowIso() };
       return finish();
     }

@@ -560,6 +560,9 @@ button, .btn, .row.tap, .dbtn { touch-action: manipulation; }
 .kn-status.wait .kn-dot { background: #d99a00; animation: pulse 1.4s infinite; }
 .kn-status.ok .kn-dot { background: var(--in); }
 .kn-status.err .kn-dot { background: var(--out); }
+.kn-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.kn-body small { font-size: 12px; font-weight: 500; color: var(--ink-3); }
+.kn-body small:empty { display: none; }
 @keyframes pulse { 50% { opacity: .35; } }
 .keystep .btn.wide { margin-bottom: 10px; }
 .kbadge { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
