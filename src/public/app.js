@@ -269,7 +269,7 @@
 
   // The lockbox code, big: cleaners check it every time they arrive.
   const lockboxBlock = (lb) => (lb
-    ? `<div class="lbx"><span class="lbx-k">Lockbox code</span><b class="lbx-code">${esc(lb.code)}</b><span class="lbx-by">Set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}</span></div>`
+    ? `<div class="lbx" title="Set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}"><span class="lbx-k">Lockbox code</span><b class="lbx-code">${esc(lb.code)}</b><span class="lbx-by">set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}</span></div>`
     : '<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code recorded yet</span></div>');
   $('props').addEventListener('click', (e) => {
     const b = e.target.closest('[data-edit]');
