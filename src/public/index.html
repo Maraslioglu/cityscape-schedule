@@ -32,7 +32,9 @@
       <button role="tab" data-view="props" aria-selected="false"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg><span>Properties</span></button>
       <button role="tab" data-view="cleaning" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span>Cleaning</span></button>
       <button role="tab" data-view="users" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg><span>Users</span></button>
+      <button role="tab" data-view="settings" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
     </nav>
+    <button class="btn sq bell" id="bell" aria-label="Notifications" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg><span class="bell-n hidden" id="bell-n"></span></button>
     <button class="btn me" id="me-btn" data-view="account" title="My account"><span class="avatar" id="me-avatar"></span><span class="btn-label" id="me-name"></span></button>
   </div>
 </header>
@@ -85,6 +87,7 @@
   <!-- PROPERTIES VIEW -->
   <section id="view-props" class="hidden">
     <div class="weekbar"><h1>Properties</h1><span class="when" id="props-sub"></span></div>
+    <div id="props-banner"></div>
     <div class="pgrid" id="props"></div>
   </section>
 
@@ -113,6 +116,13 @@
     </div>
   </section>
 
+  <!-- SETTINGS (Admin and User roles) -->
+  <section id="view-settings" class="hidden">
+    <div class="weekbar"><h1>Settings</h1></div>
+    <h2 class="set-group">Integrations</h2>
+    <div class="card pad set-card" id="settings-keynest"><div class="loading">Loading…</div></div>
+  </section>
+
   <!-- MY ACCOUNT -->
   <section id="view-account" class="hidden">
     <div class="weekbar"><h1>My account</h1></div>
@@ -134,6 +144,7 @@
 </main>
 
 <div class="active-bar hidden" id="active-bar"></div>
+<div class="notif hidden" id="notif"></div>
 <div class="sheet hidden" id="sheet"><div class="sheet-card" id="sheet-body" role="dialog" aria-modal="true"></div></div>
 <div class="cl-overlay hidden" id="checklist"></div>
 

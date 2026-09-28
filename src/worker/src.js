@@ -552,7 +552,7 @@ async function propertiesData(env, ctx, user) {
   for (const b of buildings) b.units.sort((x, y) => natural(x.label, y.label));
   const counts = {};
   for (const l of listings.values()) counts[l.unitType] = (counts[l.unitType] || 0) + 1;
-  return { buildings, total: listings.size, counts, mock: cfg.mock };
+  return { buildings, total: listings.size, counts, mock: cfg.mock, keynest: await keynestStatus(env, listings), canManage: isManager(user) };
 }
 
 // ---------------------------------------------------------------- Guesty webhook (instant updates)
@@ -652,14 +652,14 @@ async function markCleanInGuesty(env, listingId) {
 
 // ---------------------------------------------------------------- KeyNest
 // Flats tagged KEYNEST in Guesty can only be completed once KeyNest reports the key back in a store.
-// Needs KEYNEST_API_KEY in Railway. Each flat is linked to a KeyNest key on the Properties page
+// Needs KEYNEST_API_KEY in Railway. Each flat is linked to a KeyNest key in Settings › Integrations › KeyNest
 // (or matched automatically when the KeyNest key name equals the flat's Guesty nickname).
 const KEYNEST_DEFAULT = 'https://api.keynest.com/api/v3';
 const KEYNEST_IN = /^(in store|in locker|in office)/i;
 let knCache = null; // { at, keys }
 async function keynestGet(env, path) {
   if (!env.KEYNEST_API_KEY) throw userError('KeyNest isn’t connected yet. An admin needs to add KEYNEST_API_KEY in Railway.', 400);
-  const r = await fetch((env.KEYNEST_API_URL || KEYNEST_DEFAULT) + path, { headers: { ApiKey: env.KEYNEST_API_KEY, Accept: 'application/json' } });
+  const r = await fetch((env.KEYNEST_API_URL || KEYNEST_DEFAULT) + path, { headers: { ApiKey: env.KEYNEST_API_KEY, Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
   const text = await r.text();
   let j = null; try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
   if (!r.ok || !j || (j.Status && j.Status !== 'Success')) {
@@ -669,9 +669,13 @@ async function keynestGet(env, path) {
   return j;
 }
 const knKey = (k) => ({ id: k.KeyId, name: k.KeyName || '', status: k.StatusType || k.CurrentStatus || '', lastMovement: k.LastMovement || null, postcode: k.PropertyPostcode || '', address: k.Address || '' });
+let knFail = null; // { at, err }: KeyNest just failed, so don't keep every page waiting on it for the next minute
 async function keynestKeys(env, fresh) {
   if (!fresh && knCache && Date.now() - knCache.at < 60e3) return knCache.keys;
-  const j = await keynestGet(env, '/Keys');
+  if (!fresh && knFail && Date.now() - knFail.at < 60e3) throw knFail.err;
+  let j;
+  try { j = await keynestGet(env, '/Keys'); } catch (e) { knFail = { at: Date.now(), err: e }; throw e; }
+  knFail = null;
   const keys = ((j.ResponsePacket && j.ResponsePacket.KeyList) || []).map(knKey);
   knCache = { at: Date.now(), keys };
   return keys;
@@ -699,13 +703,32 @@ async function keynestCheck(env, rec, keyId) {
 }
 const webhookKeyFor = async (env, name) => (await hmac(await secretKey(env), name)).slice(0, 32);
 
+// Admin and User roles run the operation: settings & integrations, assigning cleanings. Supervisors and cleaners don't.
+const isManager = (u) => Boolean(u && (u.role === 'admin' || u.role === 'user'));
+
+// Which KeyNest-tagged flats have no KeyNest key linked (so cleaners can't complete them). Shown on the Properties page.
+async function keynestStatus(env, listings) {
+  const flats = [...listings.values()].filter((l) => l.keyMode === 'keynest');
+  const out = { connected: Boolean(env.KEYNEST_API_KEY), flats: flats.length, unlinked: [] };
+  if (!flats.length) return out;
+  const links = (await env.STORE.get('keynestLinks', 'json')) || {};
+  let keys = null; // fetched once (cached), and a slow or failing KeyNest never holds up the page
+  if (out.connected && flats.some((l) => !links[l.id])) { try { keys = await keynestKeys(env); } catch (_) { keys = null; } }
+  for (const l of flats) {
+    const want = new Set([normName(l.name), normName(l.label + l.building)]);
+    const linked = links[l.id] || (out.connected && keys && keys.filter((k) => want.has(normName(k.name))).length === 1);
+    if (!linked) out.unlinked.push({ id: l.id, label: l.label, building: l.building });
+  }
+  return out;
+}
+
 async function keynestAdminApi(req, env, ctx, me, parts) {
-  if (!can(me, 'manage_users')) return json({ error: 'Only admins can set up KeyNest.' }, 403);
+  if (!isManager(me)) return json({ error: 'Only Admins and Users can change KeyNest settings.' }, 403);
   const links = (await env.STORE.get('keynestLinks', 'json')) || {};
   if (req.method === 'GET') {
     const base = (env.PUBLIC_URL || '').replace(/\/$/, '');
     const snap = await getSnapshot(env, ctx);
-    const flats = [...listingMap(snap.listings, config(env)).values()].filter((l) => l.keyMode === 'keynest');
+    const flats = [...listingMap(snap.listings, config(env), allowBuildingFor(me)).values()].filter((l) => l.keyMode === 'keynest');
     const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null, keys: [], flats: [], error: null };
     if (out.connected) { try { out.keys = await keynestKeys(env, true); } catch (e) { out.error = e.userMessage || e.message; } }
     for (const l of flats) {
@@ -714,13 +737,204 @@ async function keynestAdminApi(req, env, ctx, me, parts) {
     }
     return json(out);
   }
-  if (req.method === 'PUT' && parts[3] === 'link') {
+  // All edits are saved together, only after the person reviews and confirms them in Settings.
+  if (req.method === 'PUT' && parts[3] === 'links') {
     const body = await req.json().catch(() => ({}));
-    const listingId = String(body.listingId || '');
-    if (!listingId) return json({ error: 'Pick a flat.' }, 400);
-    if (body.keyId) links[listingId] = String(body.keyId).slice(0, 64); else delete links[listingId];
+    if (body.confirmed !== true) return json({ error: 'Review and confirm the changes first.' }, 400);
+    const changes = Array.isArray(body.changes) ? body.changes.slice(0, 200) : [];
+    if (!changes.length) return json({ error: 'Nothing to save.' }, 400);
+    const snap = await getSnapshot(env, ctx);
+    const mine = listingMap(snap.listings, config(env), allowBuildingFor(me));
+    for (const c of changes) {
+      const listingId = String((c && c.listingId) || '');
+      const l = mine.get(listingId);
+      if (!l || l.keyMode !== 'keynest') return json({ error: 'One of those flats isn’t a KeyNest flat in your buildings.' }, 400);
+      if (c.keyId) links[listingId] = String(c.keyId).slice(0, 64); else delete links[listingId];
+    }
     await env.STORE.put('keynestLinks', JSON.stringify(links));
+    console.log(`[keynest] ${me.name} saved ${changes.length} link change(s)`);
     return json({ ok: true });
+  }
+  return json({ error: 'Not supported' }, 405);
+}
+
+// ---------------------------------------------------------------- notifications (in-app bell + phone push)
+// Stored as one list: { id, to, type, title, body, url, at, read }. Kept 60 days, newest 2000.
+async function recipients(env, roles, building, except) {
+  const users = (await loadUsers(env)).filter((u) => u.active !== false && roles.includes(u.role)
+    && (u.buildings === 'all' || u.buildings == null || (Array.isArray(u.buildings) && u.buildings.includes(building))));
+  const ids = users.map((u) => u.id);
+  if (roles.includes('admin')) ids.push('owner'); // the recovery login counts as an admin
+  return [...new Set(ids)].filter((id) => id && id !== except);
+}
+async function notify(env, ctx, to, n) {
+  if (!to.length) return;
+  const at = nowIso();
+  const list = (await env.STORE.get('notifications', 'json')) || [];
+  const cutoff = Date.now() - 60 * 864e5;
+  const items = to.map((id) => ({ id: newId(), to: id, type: n.type, title: n.title, body: n.body || '', url: n.url || '/', at, read: false }));
+  const kept = list.filter((x) => Date.parse(x.at) > cutoff).concat(items).slice(-2000);
+  await env.STORE.put('notifications', JSON.stringify(kept));
+  ctx.waitUntil(pushTo(env, to, { title: n.title, body: n.body || '', url: n.url || '/', tag: n.tag || n.type }).catch((e) => console.log('[push] failed', e.message)));
+}
+async function notificationsApi(req, env, me, parts) {
+  const list = (await env.STORE.get('notifications', 'json')) || [];
+  if (req.method === 'GET') {
+    const mine = list.filter((x) => x.to === me.id);
+    return json({ items: mine.slice(-50).reverse(), unread: mine.filter((x) => !x.read).length });
+  }
+  if (req.method === 'POST' && parts[3] === 'read') {
+    const body = await req.json().catch(() => ({}));
+    const ids = body.all ? null : new Set((body.ids || []).map(String));
+    let n = 0;
+    for (const x of list) if (x.to === me.id && !x.read && (!ids || ids.has(x.id))) { x.read = true; n++; }
+    if (n) await env.STORE.put('notifications', JSON.stringify(list));
+    return json({ ok: true, marked: n });
+  }
+  return json({ error: 'Not supported' }, 405);
+}
+
+// Web Push (RFC 8291 payload encryption + RFC 8292 VAPID), with the WebCrypto built into Node and Workers.
+const b64u = (buf) => b64(buf).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64u = (s) => { s = String(s).replace(/-/g, '+').replace(/_/g, '/'); return unb64(s + '='.repeat((4 - (s.length % 4)) % 4)); };
+const cat = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
+async function hkdf(salt, ikm, info, len) {
+  const k = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, k, len * 8));
+}
+async function vapidKeys(env) {
+  let v = await env.STORE.get('vapidKeys', 'json');
+  if (!v) {
+    const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    v = { publicKey: b64u(await crypto.subtle.exportKey('raw', kp.publicKey)), privateJwk: await crypto.subtle.exportKey('jwk', kp.privateKey) };
+    await env.STORE.put('vapidKeys', JSON.stringify(v));
+  }
+  return v;
+}
+// Encrypts one push message for a subscription (aes128gcm). `test` fixes the random parts for known-answer tests.
+async function encryptPush(sub, payload, test) {
+  const enc = new TextEncoder();
+  const uaPublic = unb64u(sub.keys.p256dh), authSecret = unb64u(sub.keys.auth);
+  const as = test ? test.asKeys : await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPublic = new Uint8Array(await crypto.subtle.exportKey('raw', as.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, as.privateKey, 256));
+  const ikm = await hkdf(authSecret, ecdh, cat(enc.encode('WebPush: info\0'), uaPublic, asPublic), 32);
+  const salt = test ? test.salt : crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, enc.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode('Content-Encoding: nonce\0'), 12);
+  const key = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const data = typeof payload === 'string' ? enc.encode(payload) : payload;
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, cat(data, new Uint8Array([2]))));
+  const rs = new Uint8Array([0, 0, 16, 0]); // record size 4096
+  return cat(salt, rs, new Uint8Array([asPublic.length]), asPublic, ct);
+}
+async function vapidAuth(env, endpoint) {
+  const v = await vapidKeys(env);
+  const enc = new TextEncoder();
+  const aud = new URL(endpoint).origin;
+  const sub = (env.PUBLIC_URL || 'https://schedule.yourcityscape.com').replace(/\/$/, '');
+  const head = b64u(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const claims = b64u(enc.encode(JSON.stringify({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub })));
+  const key = await crypto.subtle.importKey('jwk', v.privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, enc.encode(`${head}.${claims}`));
+  return `vapid t=${head}.${claims}.${b64u(sig)}, k=${v.publicKey}`;
+}
+// Only the browsers' own push services are ever contacted (Chrome/Android, Apple, Firefox, Edge/Windows).
+const PUSH_HOSTS = /^(fcm\.googleapis\.com|android\.googleapis\.com|([a-z0-9-]+\.)*push\.apple\.com|([a-z0-9-]+\.)*push\.services\.mozilla\.com|([a-z0-9-]+\.)*notify\.windows\.com)$/i;
+const pushEndpointOk = (u) => { try { const x = new URL(u); return x.protocol === 'https:' && PUSH_HOSTS.test(x.hostname); } catch (_) { return false; } };
+async function pushTo(env, userIds, msg) {
+  const subs = (await env.STORE.get('pushSubs', 'json')) || {};
+  const body = JSON.stringify(msg).slice(0, 3000);
+  const targets = userIds.flatMap((id) => (subs[id] || []).filter((s) => pushEndpointOk(s.endpoint)));
+  const dead = new Set();
+  await Promise.allSettled(targets.map(async (s) => {
+    try {
+      const r = await fetch(s.endpoint, { method: 'POST', body: await encryptPush(s, body), redirect: 'manual', signal: AbortSignal.timeout(10000), headers: {
+        Authorization: await vapidAuth(env, s.endpoint), 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: 'high' } });
+      if (r.status === 404 || r.status === 410) dead.add(s.endpoint); // phone unsubscribed
+      else if (!r.ok) console.log('[push]', r.status, (await r.text().catch(() => '')).slice(0, 200));
+    } catch (e) { console.log('[push] send failed', e.message); }
+  }));
+  if (!dead.size) return;
+  const now = (await env.STORE.get('pushSubs', 'json')) || {}; // re-read: someone may have (un)subscribed meanwhile
+  for (const id of Object.keys(now)) now[id] = now[id].filter((x) => !dead.has(x.endpoint));
+  await env.STORE.put('pushSubs', JSON.stringify(now));
+}
+async function pushApi(req, env, me, parts) {
+  if (req.method === 'GET' && parts[3] === 'key') return json({ publicKey: (await vapidKeys(env)).publicKey });
+  const body = await req.json().catch(() => ({}));
+  const subs = (await env.STORE.get('pushSubs', 'json')) || {};
+  const s = body.subscription || {};
+  if (req.method === 'POST' && parts[3] === 'subscribe') {
+    if (!pushEndpointOk(String(s.endpoint || '')) || !s.keys || !s.keys.p256dh || !s.keys.auth) return json({ error: 'That subscription isn’t valid.' }, 400);
+    const entry = { endpoint: String(s.endpoint).slice(0, 1000), keys: { p256dh: String(s.keys.p256dh).slice(0, 200), auth: String(s.keys.auth).slice(0, 100) }, at: nowIso(), ua: String(req.headers.get('user-agent') || '').slice(0, 160) };
+    for (const id of Object.keys(subs)) subs[id] = subs[id].filter((x) => x.endpoint !== entry.endpoint); // a phone belongs to whoever signed in last
+    subs[me.id] = (subs[me.id] || []).concat(entry).slice(-10);
+    await env.STORE.put('pushSubs', JSON.stringify(subs));
+    return json({ ok: true });
+  }
+  if (req.method === 'POST' && parts[3] === 'unsubscribe') {
+    subs[me.id] = (subs[me.id] || []).filter((x) => x.endpoint !== s.endpoint && x.endpoint !== body.endpoint);
+    await env.STORE.put('pushSubs', JSON.stringify(subs));
+    return json({ ok: true });
+  }
+  if (req.method === 'POST' && parts[3] === 'test') {
+    await pushTo(env, [me.id], { title: 'Phone notifications are on', body: 'You’ll get alerts from Cityscape Schedule here.', url: '/', tag: 'test' });
+    return json({ ok: true });
+  }
+  return json({ error: 'Not supported' }, 405);
+}
+
+// ---------------------------------------------------------------- assigning cleanings
+// One cleaner per flat per day: { "date|listingId": { listingId, date, building, label, cleanerId, cleanerName, byId, byName, at } }.
+const dayLabel = (d) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(d + 'T00:00:00Z'));
+async function assignmentsApi(req, env, ctx, me, url) {
+  const all = (await env.STORE.get('assignments', 'json')) || {};
+  if (req.method === 'GET' && url.pathname === '/api/assignees') {
+    if (!isManager(me)) return json({ error: 'Only Admins and Users can assign cleanings.' }, 403);
+    const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
+    if (!l) return json({ error: 'That property wasn’t found.' }, 404);
+    if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
+    const people = (await loadUsers(env)).filter((u) => u.active !== false && can(u, 'do_cleaning')
+      && (u.buildings === 'all' || u.buildings == null || (Array.isArray(u.buildings) && u.buildings.includes(l.building))));
+    return json({ people: people.map((u) => ({ id: u.id, name: u.name, role: u.role })).sort((a, b) => a.name.localeCompare(b.name)) });
+  }
+  if (req.method === 'GET') {
+    const from = url.searchParams.get('from') || '', to = url.searchParams.get('to') || '9999';
+    return json({ assignments: Object.values(all).filter((a) => a.date >= from && a.date <= to && inScope(me, a.building)) });
+  }
+  if (req.method === 'PUT') {
+    if (!isManager(me)) return json({ error: 'Only Admins and Users can assign cleanings.' }, 403);
+    const body = await req.json().catch(() => ({}));
+    const date = String(body.date || '');
+    const realDay = /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(date + 'T00:00:00Z')) && new Date(date + 'T00:00:00Z').toISOString().slice(0, 10) === date;
+    if (!realDay) return json({ error: 'Pick a day.' }, 400);
+    const l = await listingInfo(env, ctx, String(body.listingId || ''));
+    if (!l) return json({ error: 'That property wasn’t found.' }, 404);
+    if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
+    const key = `${date}|${l.id}`, before = all[key] || null;
+    let cleaner = null;
+    if (body.cleanerId) {
+      cleaner = (await loadUsers(env)).find((u) => u.id === String(body.cleanerId) && u.active !== false);
+      if (!cleaner || !can(cleaner, 'do_cleaning')) return json({ error: 'That person can’t do cleanings.' }, 400);
+      if (Array.isArray(cleaner.buildings) && !cleaner.buildings.includes(l.building)) return json({ error: `${cleaner.name} doesn’t cover ${l.building}. Add the building to their account first.` }, 400);
+    }
+    if (before && cleaner && before.cleanerId === cleaner.id) return json({ assignment: before });
+    if (cleaner) all[key] = { listingId: l.id, date, building: l.building, label: l.label, cleanerId: cleaner.id, cleanerName: cleaner.name, byId: me.id, byName: me.name, at: nowIso() };
+    else delete all[key];
+    for (const k of Object.keys(all)) if (all[k].date < londonDate(Date.now() - 90 * 864e5)) delete all[k]; // keep 90 days
+    await env.STORE.put('assignments', JSON.stringify(all));
+    const where = `${dayLabel(date)} · ${l.building}`;
+    const link = `/?view=day&date=${date}&flat=${encodeURIComponent(l.id)}`;
+    if (cleaner) {
+      await notify(env, ctx, [cleaner.id].filter((id) => id !== me.id), { type: 'assigned', title: `You’re cleaning ${l.label}`, body: `${where} · assigned by ${me.name}`, url: link, tag: `assign-${key}` });
+      await notify(env, ctx, (await recipients(env, ['supervisor'], l.building, me.id)).filter((id) => id !== cleaner.id), { type: 'assigned', title: `${cleaner.name} assigned to ${l.label}`, body: `${where} · by ${me.name}`, url: link, tag: `assign-${key}` });
+    }
+    if (before && (!cleaner || before.cleanerId !== cleaner.id) && before.cleanerId !== me.id) {
+      await notify(env, ctx, [before.cleanerId], { type: 'unassigned', title: `${l.label} is no longer yours`, body: `${where} · changed by ${me.name}`, url: link, tag: `assign-${key}` });
+    }
+    return json({ assignment: all[key] || null });
   }
   return json({ error: 'Not supported' }, 405);
 }
@@ -810,6 +1024,10 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     rec.completedAt = nowIso();
     rec.status = 'completed';
     await saveList(env, 'cleanings', list);
+    const mins = Math.max(1, Math.round((Date.parse(rec.endedAt || rec.completedAt) - Date.parse(rec.startedAt)) / 60000));
+    await notify(env, ctx, await recipients(env, ['admin', 'user'], rec.building, rec.cleanerId), {
+      type: 'cleaned', title: `${rec.label} cleaned`, body: `${rec.cleanerName} · ${rec.building} · ${mins} min`,
+      url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch((e) => console.log('[notify] failed', e.message));
     ctx.waitUntil((async () => {
       const g = await markCleanInGuesty(env, rec.listingId);
       const l2 = await loadList(env, 'cleanings');
@@ -846,7 +1064,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     if (!env.KEYNEST_API_KEY) return json({ ok: false, status: null, error: 'KeyNest isn’t connected yet. Ask an admin.' });
     const l = await listingInfo(env, ctx, rec.listingId);
     const link = l && await keynestLink(env, l);
-    if (!link) return json({ ok: false, status: null, error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it on the Properties page.' });
+    if (!link) return json({ ok: false, status: null, error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' });
     return json(await keynestCheck(env, rec, link.keyId));
   }
   if (req.method === 'POST' && action === 'key') {
@@ -868,7 +1086,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
       if (!env.KEYNEST_API_KEY) return json({ error: 'KeyNest isn’t connected yet. Ask an admin.' }, 400);
       const l = await listingInfo(env, ctx, rec.listingId);
       const link = l && await keynestLink(env, l);
-      if (!link) return json({ error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it on the Properties page.' }, 400);
+      if (!link) return json({ error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' }, 400);
       const chk = await keynestCheck(env, rec, link.keyId);
       if (!chk.ok) return json({ error: `KeyNest doesn’t show the key handed in yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
       rec.key = { mode: 'keynest', keyId: link.keyId, status: chk.status, lastMovement: chk.lastMovement, confirmedAt: nowIso() };
@@ -928,6 +1146,9 @@ async function damagesApi(req, env, ctx, me, parts, url) {
     };
     list.push(rec);
     await saveList(env, 'damages', list);
+    await notify(env, ctx, await recipients(env, ['admin', 'user'], rec.building, me.id), {
+      type: 'damage', title: `Damage reported · ${rec.label}`, body: `${rec.location ? rec.location + ': ' : ''}${description.slice(0, 120)} — ${me.name}`,
+      url: `/?view=day&date=${rec.date}&flat=${encodeURIComponent(rec.listingId)}`, tag: `damage-${rec.id}` }).catch((e) => console.log('[notify] failed', e.message));
     return json({ damage: await withMedia(env, rec) });
   }
   const rec = list.find((d) => d.id === id);
@@ -1000,6 +1221,7 @@ async function handle(req, env, ctx) {
   if (p === '/login' && req.method === 'GET') return asset(req, 'login.html');
   if (['/styles.css', '/favicon.svg', '/favicon.png', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'].includes(p)) return asset(req, p.slice(1));
   if (p === '/favicon.ico') return asset(req, 'favicon.png');
+  if (p === '/sw.js') { const r = asset(req, 'sw.js'); r.headers.set('Service-Worker-Allowed', '/'); r.headers.set('Cache-Control', 'no-cache'); return r; }
 
   if (p === '/login' && req.method === 'POST') {
     const form = await req.formData().catch(() => null);
@@ -1056,6 +1278,9 @@ async function handle(req, env, ctx) {
   if (p === '/api/cleanings' || p.startsWith('/api/cleanings/')) return cleaningsApi(req, env, ctx, me, p.split('/'), url);
   if (p === '/api/keynest' || p.startsWith('/api/keynest/')) return keynestAdminApi(req, env, ctx, me, p.split('/'));
   if (p === '/api/damages' || p.startsWith('/api/damages/')) return damagesApi(req, env, ctx, me, p.split('/'), url);
+  if (p === '/api/notifications' || p.startsWith('/api/notifications/')) return notificationsApi(req, env, me, p.split('/'));
+  if (p.startsWith('/api/push/')) return pushApi(req, env, me, p.split('/'));
+  if (p === '/api/assignments' || p === '/api/assignees') return assignmentsApi(req, env, ctx, me, url);
   // Internal checks used by server.mjs for uploads and playback (same-process only; not reachable from outside).
   if (p === '/api/internal/media-check' && req.headers.get('x-internal') === env.__INTERNAL_KEY) {
     const body = await req.json().catch(() => ({}));

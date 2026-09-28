@@ -16,8 +16,10 @@
   let view = store.get('cs_view') || 'day';
   let me = null;            // signed-in person and their permissions
   const can = (perm) => Boolean(me && me.perms && me.perms[perm]);
-  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', users: 'manage_users', account: null };
-  const allowed = (v) => v in VIEW_PERM && (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === 'cleaning' && can('manage_damage')));
+  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', users: 'manage_users', settings: null, account: null };
+  // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
+  const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
+  const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === 'cleaning' && can('manage_damage'))));
   let selected = null;      // selected date in day view
   let version = null;       // bookings version from the server
   let boardDirty = true;    // board is rebuilt only when it's actually shown
@@ -165,7 +167,7 @@
             <span class="t">${esc(shortType(u.unitType))}</span>
             ${guests ? `<span class="g">· ${guests}</span>` : ''}
             ${isNew ? '<span class="new">New</span>' : ''}
-            <span class="cbadge" data-cbadge="${esc(u.listingId)}"></span>
+            <span class="cbadge" data-cbadge="${esc(u.listingId)}"></span><span data-achip="${esc(u.listingId)}"></span>
             <span class="times">${chip('out', u.checkOut)}${u.checkOut && u.checkIn ? '<span class="arrow">→</span>' : ''}${chip('in', u.checkIn)}</span>
           </div>`;
         }).join('')}
@@ -239,31 +241,73 @@
         <h3>${esc(b.name)}</h3><div class="pc">${esc(b.postcode)}</div>
         ${b.units.map((u) => `<div class="prow" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span></div>${u.keyMode === 'lockbox' ? `<div class="pnote"><span class="kbadge">Lockbox</span><span>${u.lockbox ? `Code <b>${esc(u.lockbox.code)}</b> · set by ${esc(u.lockbox.by)}, ${esc(fmtWhen(u.lockbox.at))}` : 'No code recorded yet'}</span></div>` : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key handed in at KeyNest after each clean</span></div>' : ''}`).join('')}
       </div>`).join('');
-      if (can('manage_users')) loadKeynestPanel();
+      // KeyNest flats that aren't linked to a KeyNest key can't be completed by cleaners: say so at the top.
+      const kn = p.keynest || { unlinked: [] };
+      const many = kn.unlinked.length > 1;
+      const fix = p.canManage ? `<button class="linkbtn inline" id="kn-fix">${kn.connected ? `Link ${many ? 'them' : 'it'}` : 'Set it up'} in Settings › Integrations › KeyNest</button>` : `Ask an Admin to ${kn.connected ? `link ${many ? 'them' : 'it'}` : 'connect KeyNest'}.`;
+      $('props-banner').innerHTML = !kn.unlinked.length ? '' : `<div class="banner warn-banner"><b>${kn.connected ? `${kn.unlinked.length} KeyNest flat${kn.unlinked.length > 1 ? 's aren’t' : ' isn’t'} linked to a KeyNest key` : 'KeyNest isn’t connected yet'}.</b>
+        Cleaners can’t complete ${many ? 'these flats' : 'this flat'} until ${kn.connected ? (many ? 'they’re linked' : 'it’s linked') : 'KeyNest is connected'}:
+        ${kn.unlinked.map((f) => `<span class="flat-chip">${esc(f.label)} <span>· ${esc(f.building)}</span></span>`).join(' ')} ${fix}</div>`;
+      if ($('kn-fix')) $('kn-fix').onclick = () => { setView('settings'); setTimeout(() => { const el = $('settings-keynest'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300); };
     } catch (e) {
       if (e.message !== 'signed out') $('props').innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
     }
   }
 
   function fmtWhen(iso) { return new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
-  // Admins: link flats tagged KEYNEST in Guesty to their KeyNest key.
-  async function loadKeynestPanel() {
-    let box = $('kn-panel');
-    if (!box) { box = document.createElement('div'); box.id = 'kn-panel'; box.className = 'card kn-panel'; $('props').before(box); }
+
+  // ---------- Settings › Integrations › KeyNest (Admin and User roles) ----------
+  // Locked by default: "Edit links" unlocks the rows, and nothing is saved until the changes are reviewed and confirmed.
+  let kn = null, knEdit = false, knDraft = {};
+  async function loadSettings() {
+    const box = $('settings-keynest');
     try {
-      const k = await getJSON('/api/keynest');
-      if (!k.flats.length && k.connected) { box.remove(); return; }
-      const opts = (sel) => `<option value="">Not linked</option>${k.keys.map((x) => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name || x.id)}${x.status ? ' · ' + esc(x.status) : ''}</option>`).join('')}`;
-      box.innerHTML = `<h3>KeyNest</h3>
-        ${!k.connected ? '<p class="banner">Not connected yet. Add <b>KEYNEST_API_KEY</b> in Railway (Variables) and the app will connect automatically. Until then, KeyNest flats can’t be completed.</p>' : k.error ? `<p class="banner error">${esc(k.error)}</p>` : '<p class="muted">Connected ✓ Link each KeyNest flat to its key. Cleaners can only complete once KeyNest shows the key handed in.</p>'}
-        ${k.flats.length ? k.flats.map((f) => `<div class="kn-row"><span class="u">${esc(f.label)} <span class="muted">· ${esc(f.building)}</span></span>
-          ${k.connected && !k.error ? `<select data-kn="${esc(f.id)}">${opts(f.keyId)}</select>${f.how === 'auto' ? '<span class="muted">matched by name</span>' : ''}` : `<span class="muted">${f.keyId ? 'Linked' : 'Not linked'}</span>`}</div>`).join('') : '<p class="muted">No flats have the KEYNEST tag in Guesty.</p>'}
-        ${k.webhookUrl ? `<details class="muted"><summary>Instant updates (optional)</summary>Ask KeyNest to send webhooks to: <code>${esc(k.webhookUrl)}</code></details>` : ''}`;
-      box.querySelectorAll('select[data-kn]').forEach((s) => { s.onchange = async () => {
-        try { await send('PUT', '/api/keynest/link', { listingId: s.dataset.kn, keyId: s.value || null }); toast(s.value ? 'Key linked ✓' : 'Link removed'); }
-        catch (e) { toast(e.message); }
-      }; });
-    } catch (e) { if (e.message !== 'signed out') box.innerHTML = `<p class="banner error">${esc(e.message)}</p>`; }
+      kn = await getJSON('/api/keynest');
+      knEdit = false; knDraft = {};
+      renderKeynest();
+    } catch (e) { if (e.message !== 'signed out') box.innerHTML = `<h3>KeyNest</h3><div class="banner error">${esc(e.message)}</div>`; }
+  }
+  const keyName = (id) => { const k = kn && kn.keys.find((x) => x.id === id); return k ? (k.name || k.id) : id ? `Key ${id}` : 'Not linked'; };
+  function renderKeynest() {
+    const box = $('settings-keynest');
+    const k = kn;
+    const live = k.connected && !k.error;
+    const changes = Object.entries(knDraft).filter(([id, keyId]) => (k.flats.find((f) => f.id === id) || {}).keyId !== keyId);
+    const opts = (sel) => `<option value="">Not linked</option>${k.keys.map((x) => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name || x.id)}${x.status ? ' · ' + esc(x.status) : ''}</option>`).join('')}`;
+    const rows = k.flats.map((f) => {
+      const cur = f.id in knDraft ? knDraft[f.id] : f.keyId;
+      const changed = f.id in knDraft && knDraft[f.id] !== f.keyId;
+      return `<tr class="${changed ? 'changed' : ''}"><td><b>${esc(f.label)}</b><span class="muted"> · ${esc(f.building)}</span></td>
+        <td>${knEdit && live ? `<select data-kn="${esc(f.id)}">${opts(cur)}</select>` : cur ? `${esc(keyName(cur))}${f.how === 'auto' ? ' <span class="muted">· matched by name</span>' : ''}` : '<span class="warn">Not linked</span>'}</td></tr>`;
+    }).join('');
+    box.innerHTML = `<div class="set-head"><div><h3>KeyNest</h3>
+        <p class="muted">Flats tagged <b>KEYNEST</b> in Guesty are linked to their KeyNest key here. A cleaner can only complete a KeyNest flat once KeyNest shows its key handed back in.</p></div>
+        <span class="pill ${live ? 'ok' : 'off'}">${live ? 'Connected' : k.connected ? 'Error' : 'Not connected'}</span></div>
+      ${!k.connected ? '<div class="banner">Not connected yet. Add <b>KEYNEST_API_KEY</b> in Railway (Variables) and the app connects automatically. Until then, KeyNest flats can’t be completed.</div>' : k.error ? `<div class="banner error">${esc(k.error)}</div>` : ''}
+      ${k.flats.length ? `<table class="kn-table"><thead><tr><th>Flat</th><th>KeyNest key</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No flats have the KEYNEST tag in Guesty.</p>'}
+      <div class="set-actions" id="kn-actions">${!live || !k.flats.length ? '' : !knEdit
+        ? '<button class="btn" id="kn-edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>Edit links</button><span class="muted">Locked to prevent accidental changes.</span>'
+        : `<span class="edit-note">Editing — changes aren’t saved until you confirm.</span><span class="spacer"></span><button class="btn" id="kn-cancel">Cancel</button><button class="btn primary" id="kn-review" ${changes.length ? '' : 'disabled'}>Review ${changes.length || ''} change${changes.length === 1 ? '' : 's'}</button>`}</div>
+      <div id="kn-confirm"></div>
+      ${k.webhookUrl ? `<details class="muted kn-hook"><summary>Instant updates (optional)</summary>Ask KeyNest to send webhooks to: <code>${esc(k.webhookUrl)}</code></details>` : ''}`;
+    const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+    on('kn-edit', () => { knEdit = true; knDraft = {}; renderKeynest(); });
+    on('kn-cancel', () => { knEdit = false; knDraft = {}; renderKeynest(); });
+    box.querySelectorAll('select[data-kn]').forEach((s) => { s.onchange = () => { knDraft[s.dataset.kn] = s.value || null; renderKeynest(); }; });
+    on('kn-review', () => {
+      $('kn-confirm').innerHTML = `<div class="confirm-box"><b>Save ${changes.length} KeyNest change${changes.length === 1 ? '' : 's'}?</b>
+        <ul>${changes.map(([id, keyId]) => { const f = k.flats.find((x) => x.id === id); return `<li><b>${esc(f.label)}</b> <span class="muted">· ${esc(f.building)}</span>: ${esc(keyName(f.keyId))} → <b>${esc(keyName(keyId))}</b></li>`; }).join('')}</ul>
+        <p class="muted">Cleaners use these links to finish KeyNest flats. A wrong link means the wrong key is checked.</p>
+        <div class="form-actions"><button class="btn primary" id="kn-save">Yes, save changes</button><button class="btn" id="kn-back">Go back</button></div></div>`;
+      $('kn-back').onclick = () => { $('kn-confirm').innerHTML = ''; };
+      $('kn-save').onclick = async () => {
+        $('kn-save').disabled = true;
+        try {
+          await send('PUT', '/api/keynest/links', { confirmed: true, changes: changes.map(([listingId, keyId]) => ({ listingId, keyId })) });
+          toast('KeyNest links saved ✓'); props = null; await loadSettings();
+        } catch (e) { toast(e.message); $('kn-save').disabled = false; }
+      };
+    });
   }
 
   // ---------- text for WhatsApp ----------
@@ -304,6 +348,7 @@
     $('view-users').classList.toggle('hidden', v !== 'users');
     $('view-cleaning').classList.toggle('hidden', v !== 'cleaning');
     $('view-account').classList.toggle('hidden', v !== 'account');
+    $('view-settings').classList.toggle('hidden', v !== 'settings');
     $('foot').classList.toggle('hidden', !(v === 'day' || v === 'board'));
     $('copy-label').textContent = v === 'board' ? 'Copy week' : 'Copy day';
     if (v === 'board' && data && boardDirty) renderBoard();
@@ -311,6 +356,7 @@
     if (v === 'users') loadUsers();
     if (v === 'cleaning') loadCleaningView();
     if (v === 'account') renderAccount();
+    if (v === 'settings') loadSettings();
   }
 
   // ---------- who's signed in ----------
@@ -506,14 +552,18 @@
 
   $('me-btn').onclick = () => setView('account');
   (async () => {
+    const q0 = new URLSearchParams(location.search);
+    const deep = q0.get('view') ? location.href : null; // opened from a notification: ?view=…&date=…&flat=…
     try { const r = await getJSON('/api/me'); me = r.user; window.__permsList = r.perms; }
     catch (_) { return; }
     applyPermissions();
-    setView(view);
+    setView(deep && allowed(q0.get('view')) ? q0.get('view') : view);
     if (can('view_day') || can('view_board')) {
-      const w = new URLSearchParams(location.search).get('week');
-      showWeek(/^\d{4}-\d{2}-\d{2}$/.test(w || '') ? w : '').then(() => checkVersion());
-    }
+      const w = q0.get('week') || (deep && q0.get('date'));
+      showWeek(/^\d{4}-\d{2}-\d{2}$/.test(w || '') ? w : '').then(() => { checkVersion(); if (deep) openLink(deep); });
+    } else if (deep) openLink(deep);
+    loadNotifs();
+    initPush();
   })();
   setInterval(checkVersion, 15000);
   setInterval(() => { if (!document.hidden && me) refreshCleanings(); }, 15000);
@@ -572,9 +622,10 @@
     if (!me) return;
     try {
       const range = data ? cleaningRange() : '';
-      const r = await getJSON('/api/cleanings?' + range);
+      const [r, a] = await Promise.all([getJSON('/api/cleanings?' + range), getJSON('/api/assignments?' + range).catch(() => null)]);
       cRange = range;
       cleanings = r.cleanings; checklistDef = r.checklist; holdMs = r.holdMs;
+      if (a) assignments = Object.fromEntries(a.assignments.map((x) => [`${x.date}|${x.listingId}`, x]));
       decorateDay();
       renderActiveBar();
       // Only redraw the open panel if something in it changed: redrawing wipes what's being typed (lockbox code,
@@ -594,7 +645,14 @@
       else if (done) el.innerHTML = `<span class="cb done">✓ Cleaned · ${durWords(Date.parse(done.endedAt) - Date.parse(done.startedAt))}</span>`;
       else el.innerHTML = '';
     });
+    // Who's assigned to each flat that day.
+    document.querySelectorAll('[data-achip]').forEach((el) => {
+      const a = assignments[`${selected}|${el.dataset.achip}`];
+      el.innerHTML = a ? `<span class="achip${a.cleanerId === me.id ? ' mine' : ''}" title="Assigned to ${esc(a.cleanerName)}">${PERSON_ICON}${a.cleanerId === me.id ? 'You' : esc(a.cleanerName.split(' ')[0])}</span>` : '';
+    });
   }
+  let assignments = {}; // "date|listingId" → { cleanerId, cleanerName, … }
+  const PERSON_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>';
   // One clock for every running timer on the page.
   setInterval(() => {
     document.querySelectorAll('[data-since]').forEach((el) => {
@@ -659,8 +717,43 @@
   // A cleaner can back out of their own cleaning at any step until it's complete.
   const CANCEL_MINE = '<button class="linkbtn" id="cancel-clean">Changed your mind? Cancel this cleaning</button>';
   let lastSheetSig = null;
-  const sheetSig = () => JSON.stringify([sheetListing, selected, forListing(sheetListing, selected).map((c) =>
+  const typingStep = () => { const a = me && myActive(); return Boolean(a && a.listingId === sheetListing && (a.status === 'awaiting_video' || a.status === 'awaiting_key')); };
+  const sheetSig = () => JSON.stringify([sheetListing, selected, typingStep() ? null : (assignments[`${selected}|${sheetListing}`] || {}).cleanerId || null, forListing(sheetListing, selected).map((c) =>
     [c.id, c.status, c.endedAt, c.guesty, c.checklist && c.checklist.length, c.key && c.key.mode, (c.media || []).map((m) => [m.id, m.status, m.hasOrig])])]);
+
+  // ---- assigning a cleaner to this flat on the selected day (Admin/User); everyone else just sees who it is ----
+  const assignees = new Map(); // listingId → [{ id, name, role }]
+  function assignBlock() {
+    const a = assignments[`${selected}|${sheetListing}`];
+    const day = selected === (data && data.today) ? 'today' : esc(longDate(selected));
+    if (!isManager()) return a ? `<div class="assign-row ro">${PERSON_ICON}<span>${a.cleanerId === me.id ? '<b>Assigned to you</b>' : `Assigned to <b>${esc(a.cleanerName)}</b>`} ${day}</span></div>` : '';
+    return `<div class="assign-row">${PERSON_ICON}<label for="as-sel">Cleaner ${day}</label>
+      <select id="as-sel" data-cur="${esc(a ? a.cleanerId : '')}"><option value="">${a ? esc(a.cleanerName) : 'Not assigned'}</option></select></div>`;
+  }
+  async function wireAssign() {
+    const sel = $('as-sel');
+    if (!sel) return;
+    const listingId = sheetListing, date = selected;
+    let cur = sel.dataset.cur;
+    try {
+      if (!assignees.has(listingId)) assignees.set(listingId, (await getJSON('/api/assignees?listingId=' + encodeURIComponent(listingId))).people);
+    } catch (e) { return; }
+    if ($('as-sel') !== sel) return; // panel was redrawn meanwhile
+    const people = assignees.get(listingId);
+    sel.innerHTML = `<option value="">Not assigned</option>${people.map((p) => `<option value="${esc(p.id)}" ${p.id === cur ? 'selected' : ''}>${esc(p.name)}${p.role !== 'cleaner' ? ` (${esc(p.role)})` : ''}</option>`).join('')}`;
+    sel.onchange = async () => {
+      sel.disabled = true;
+      try {
+        const r = await send('PUT', '/api/assignments', { listingId, date, cleanerId: sel.value || null });
+        const k = `${date}|${listingId}`;
+        if (r.assignment) assignments[k] = r.assignment; else delete assignments[k];
+        cur = sel.value; lastSheetSig = sheetSig();
+        toast(r.assignment ? `Assigned to ${r.assignment.cleanerName} — they’ve been notified` : 'Assignment removed');
+        decorateDay();
+      } catch (e) { toast(e.message); sel.value = cur; }
+      sel.disabled = false;
+    };
+  }
   async function renderSheet() {
     const u = unitFor(sheetListing);
     if (!u) return;
@@ -705,12 +798,14 @@
     const t = [u.checkOut && `Out ${u.checkOut.time}`, u.checkIn && `In ${u.checkIn.time}`].filter(Boolean).join(' · ');
     $('sheet-body').innerHTML = `
       <div class="sh-head"><div><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(u.building || '')}${t ? ' · ' + esc(t) : ''}</div></div><button class="btn sq" data-close aria-label="Close">✕</button></div>
+      ${assignBlock()}
       ${body}
       ${history ? `<h3 class="sh-h3">${done.some((c) => c.date !== selected) ? 'Cleaned' : `Cleaned ${selected === (data && data.today) ? 'today' : esc(longDate(selected))}`}</h3>${history}` : ''}
       <div id="sheet-damages"></div>
       ${can('report_damage') ? '<button class="btn wide" id="report-damage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Report damage</button>' : ''}`;
 
     const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+    wireAssign();
     on('begin-clean', async () => {
       try { await send('POST', '/api/cleanings/start', { listingId: sheetListing }); toast('Cleaning started'); await refreshCleanings(); }
       catch (e) { toast(e.message); refreshCleanings(); }
@@ -1151,5 +1246,130 @@
   $('cv-date').onchange = (e) => { cvDate = e.target.value; loadCleaningView(); };
   $('cv-prev').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
   $('cv-next').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
+
+  // =====================================================================
+  // Notifications: bell with unread count + list, and phone notifications (Web Push)
+  // =====================================================================
+  let notifs = { items: [], unread: 0 };
+  const ago = (iso) => {
+    const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m} min ago`;
+    if (m < 24 * 60) return `${Math.round(m / 60)} h ago`;
+    return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+  const NICON = { cleaned: '✓', damage: '!', assigned: '→', unassigned: '×' };
+  async function loadNotifs() {
+    if (!me) return;
+    try {
+      notifs = await getJSON('/api/notifications');
+      const n = $('bell-n');
+      n.textContent = notifs.unread > 9 ? '9+' : String(notifs.unread);
+      n.classList.toggle('hidden', !notifs.unread);
+      $('bell').setAttribute('aria-label', notifs.unread ? `Notifications, ${notifs.unread} unread` : 'Notifications');
+      try { if (navigator.setAppBadge) notifs.unread ? navigator.setAppBadge(notifs.unread) : navigator.clearAppBadge(); } catch (_) {}
+      if (!$('notif').classList.contains('hidden')) renderNotifs();
+    } catch (_) { /* try again next tick */ }
+  }
+  function renderNotifs() {
+    const p = pushState();
+    $('notif').innerHTML = `<div class="notif-card" role="dialog" aria-label="Notifications">
+      <div class="notif-head"><h3>Notifications</h3>${notifs.unread ? '<button class="linkbtn inline" id="nf-all">Mark all as read</button>' : ''}<button class="btn sq" id="nf-close" aria-label="Close">✕</button></div>
+      <div class="notif-push ${p.state}">${p.html}</div>
+      <div class="notif-list">${notifs.items.length ? notifs.items.map((x) => `<button class="nitem ${x.read ? '' : 'unread'} t-${esc(x.type)}" data-nid="${esc(x.id)}" data-url="${esc(x.url)}">
+          <span class="nico">${NICON[x.type] || '•'}</span><span class="ntext"><b>${esc(x.title)}</b><span>${esc(x.body)}</span><em>${esc(ago(x.at))}</em></span></button>`).join('')
+        : '<div class="empty"><b>No notifications yet</b>You’ll see completed cleanings, damage reports and assignments here.</div>'}</div></div>`;
+    const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+    on('nf-close', closeNotifs);
+    on('nf-all', async () => { try { await send('POST', '/api/notifications/read', { all: true }); } catch (_) {} loadNotifs(); });
+    on('np-on', enablePush);
+    on('np-off', disablePush);
+    on('np-test', async () => { try { await send('POST', '/api/push/test'); toast('Test sent — check your phone'); } catch (e) { toast(e.message); } });
+    $('notif').querySelectorAll('[data-nid]').forEach((b) => b.onclick = async () => {
+      closeNotifs();
+      send('POST', '/api/notifications/read', { ids: [b.dataset.nid] }).then(loadNotifs).catch(() => {});
+      openLink(b.dataset.url);
+    });
+  }
+  function openNotifs() { $('notif').classList.remove('hidden'); renderNotifs(); loadNotifs(); }
+  function closeNotifs() { $('notif').classList.add('hidden'); }
+  $('bell').onclick = () => ($('notif').classList.contains('hidden') ? openNotifs() : closeNotifs());
+  $('notif').addEventListener('click', (e) => { if (e.target.id === 'notif') closeNotifs(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNotifs(); });
+  setInterval(() => { if (!document.hidden) loadNotifs(); }, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifs(); });
+
+  // Opens the place a notification points to: ?view=day&date=…&flat=… or ?view=cleaning&date=…
+  async function openLink(href) {
+    let q; try { q = new URL(href, location.origin).searchParams; } catch (_) { return; }
+    const v = q.get('view'), date = q.get('date'), flat = q.get('flat');
+    const okDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '');
+    if (v === 'cleaning' && allowed('cleaning')) { if (okDate) cvDate = date; if (view === 'cleaning') loadCleaningView(); else setView('cleaning'); return; }
+    if (v === 'day' && allowed('day')) {
+      if (view !== 'day') setView('day');
+      if (okDate && (!data || !data.dates.includes(date))) await showWeek(date);
+      if (okDate && data && data.dates.includes(date)) { selected = date; renderStrip(); renderDay(); }
+      if (flat) { if (unitFor(flat)) openSheet(flat); else toast('That flat isn’t on the schedule for this day any more'); }
+    }
+  }
+
+  // ---- phone notifications ----
+  const b64uToBytes = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); s += '='.repeat((4 - (s.length % 4)) % 4); return Uint8Array.from(atob(s), (c) => c.charCodeAt(0)); };
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  let pushOn = false;
+  function pushState() {
+    const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+    if (!supported && isIOS && !standalone) return { state: 'setup', html: `<b>Phone notifications</b><span>On iPhone, first add this app to your Home Screen: tap <b>Share</b> › <b>Add to Home Screen</b>, then open it from there and turn notifications on.</span>` };
+    if (!supported) return { state: 'off', html: '<b>Phone notifications</b><span>This browser can’t show notifications.</span>' };
+    if (Notification.permission === 'denied') return { state: 'off', html: '<b>Phone notifications are blocked</b><span>Allow notifications for this app in your phone’s Settings, then come back here.</span>' };
+    if (pushOn) return { state: 'on', html: '<b>Phone notifications are on</b><span>You’ll get alerts even when the app is closed.</span><span class="np-btns"><button class="linkbtn inline" id="np-test">Send a test</button><button class="linkbtn inline" id="np-off">Turn off</button></span>' };
+    return { state: 'offer', html: '<b>Get alerts on this phone</b><span>Even when the app is closed.</span><button class="btn primary" id="np-on">Turn on</button>' };
+  }
+  async function initPush() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    try {
+      const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'open') { openLink(e.data.url); loadNotifs(); } });
+      const sub = await reg.pushManager.getSubscription();
+      pushOn = Boolean(sub) && Notification.permission === 'granted';
+      // Tell the server this phone belongs to whoever is signed in now (a shared phone may change hands).
+      if (pushOn) await send('POST', '/api/push/subscribe', { subscription: sub.toJSON() });
+    } catch (_) { /* notifications stay off */ }
+  }
+  async function enablePush() {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { toast('Notifications weren’t allowed'); renderNotifs(); return; }
+      const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      await navigator.serviceWorker.ready;
+      const { publicKey } = await getJSON('/api/push/key');
+      const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(publicKey) });
+      await send('POST', '/api/push/subscribe', { subscription: sub.toJSON() });
+      pushOn = true; renderNotifs();
+      send('POST', '/api/push/test').catch(() => {});
+      toast('Phone notifications on ✓');
+    } catch (e) { toast('Couldn’t turn on notifications: ' + (e.message || 'unknown error')); }
+  }
+  // Signing out: this phone stops getting the person's notifications (it may be a shared or borrowed phone).
+  document.addEventListener('click', async (e) => {
+    const a = e.target.closest('a[href="/logout"]');
+    if (!a || !('serviceWorker' in navigator)) return;
+    e.preventDefault();
+    try {
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      const sub = reg && await reg.pushManager.getSubscription();
+      if (sub) { await send('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe().catch(() => {}); }
+    } catch (_) {}
+    location.href = '/logout';
+  });
+  async function disablePush() {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      const sub = reg && await reg.pushManager.getSubscription();
+      if (sub) { await send('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
+    } catch (_) {}
+    pushOn = false; renderNotifs(); toast('Phone notifications off');
+  }
 
 })();
