@@ -85,7 +85,8 @@ function asset(req, name) {
     'Cache-Control': versioned ? 'public, max-age=31536000, immutable' : a.type.startsWith('text/html') ? 'no-cache' : 'public, max-age=3600',
   };
   if (req.headers.get('If-None-Match') === etag) return new Response(null, { status: 304, headers });
-  return new Response(a.body, { headers });
+  if (a.b64 && !a.bytes) a.bytes = Uint8Array.from(atob(a.body), (c) => c.charCodeAt(0)); // images: decoded once
+  return new Response(a.b64 ? a.bytes : a.body, { headers });
 }
 
 // ---------------------------------------------------------------- users, roles & permissions
@@ -997,7 +998,8 @@ async function handle(req, env, ctx) {
   }
 
   if (p === '/login' && req.method === 'GET') return asset(req, 'login.html');
-  if (p === '/styles.css' || p === '/favicon.svg' || p === '/manifest.webmanifest') return asset(req, p.slice(1));
+  if (['/styles.css', '/favicon.svg', '/favicon.png', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'].includes(p)) return asset(req, p.slice(1));
+  if (p === '/favicon.ico') return asset(req, 'favicon.png');
 
   if (p === '/login' && req.method === 'POST') {
     const form = await req.formData().catch(() => null);
