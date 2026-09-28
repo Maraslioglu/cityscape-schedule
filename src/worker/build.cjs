@@ -17,8 +17,11 @@ const files = {
   'favicon.svg': ['image/svg+xml', pub('favicon.svg')],
   'manifest.webmanifest': ['application/manifest+json', pub('manifest.webmanifest')],
 };
-const assets = 'const ASSETS = {\n' + Object.entries(files).map(([name, [type, body]]) =>
-  `  ${JSON.stringify(name)}: { type: ${JSON.stringify(type)}, hash: ${JSON.stringify(fnv(body))}, body: ${JSON.stringify(body)} },`).join('\n') + '\n};';
+// Images are stored as base64 text and decoded by the Worker when served (b64: true).
+const bin = (f) => fs.readFileSync(path.join(root, 'public', f)).toString('base64');
+for (const f of ['favicon.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png']) files[f] = ['image/png', bin(f), true];
+const assets = 'const ASSETS = {\n' + Object.entries(files).map(([name, [type, body, b64]]) =>
+  `  ${JSON.stringify(name)}: { type: ${JSON.stringify(type)}, hash: ${JSON.stringify(fnv(body))}, body: ${JSON.stringify(body)}${b64 ? ', b64: true' : ''} },`).join('\n') + '\n};';
 
 let src = fs.readFileSync(path.join(__dirname, 'src.js'), 'utf8');
 src = src.replace('/* __ASSETS__ */', assets).replace('/* __MOCK__ */', fs.readFileSync(path.join(__dirname, 'mock.js'), 'utf8'));
