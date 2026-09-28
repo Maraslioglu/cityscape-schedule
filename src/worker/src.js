@@ -468,7 +468,8 @@ function listingMap(raw, cfg, allow, { all = false } = {}) {
     map.set(l._id, {
       id: l._id, name: o.label || o.building ? `${v.label}, ${v.building}` : n, ...v,
       lat: moved ? null : coord(a.lat), lng: moved ? null : coord(a.lng),
-      hidden, hiddenByEnv, guesty, edited: EDITABLE.some((k) => o[k] !== undefined) || o.hidden !== undefined, editedAt: o.at || null, editedBy: o.by || null,
+      hidden, hiddenByEnv, guesty, lockboxNoCode: o.lockboxNoCode === true, // lockbox flats where cleaners don't set a new code
+      edited: EDITABLE.some((k) => o[k] !== undefined) || o.hidden !== undefined || o.lockboxNoCode !== undefined, editedAt: o.at || null, editedBy: o.by || null,
     });
   }
   return map;
@@ -499,10 +500,12 @@ async function propertyEditApi(req, env, ctx, me, id) {
     for (const k of ['checkInTime', 'checkOutTime']) if (f[k] !== undefined) { const v = String(f[k] || ''); if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) bad('Times look like 15:00.'); cur[k] = v; }
     if (f.keyMode !== undefined) { if (!['', 'keynest', 'lockbox', 'none'].includes(f.keyMode)) bad('Pick how the key is returned from the list.'); cur.keyMode = f.keyMode; }
     if (f.hidden !== undefined) cur.hidden = f.hidden === true;
+    if (f.lockboxNoCode !== undefined) cur.lockboxNoCode = f.lockboxNoCode === true;
     if (cur.building && !coversBuilding(me, cur.building)) return json({ error: 'You can only move flats into buildings you look after.' }, 403);
     // Blank means "use Guesty's"; a value the same as Guesty's isn't a change either.
     for (const k of EDITABLE) if (cur[k] === '' || cur[k] === (l.guesty[k] === null ? 'none' : l.guesty[k])) delete cur[k];
     if (cur.hidden === (l.hiddenByEnv ? true : false)) delete cur.hidden;
+    if (!cur.lockboxNoCode) delete cur.lockboxNoCode;
   }
   delete cur.at; delete cur.by;
   if (Object.keys(cur).length) all[id] = { ...cur, at: nowIso(), by: me.name }; else delete all[id];
@@ -622,7 +625,7 @@ async function propertiesData(env, ctx, user) {
   for (const l of every.values()) {
     if (!groups.has(l.building)) groups.set(l.building, { name: l.building, postcode: l.postcode, units: [] });
     groups.get(l.building).units.push({ id: l.id, name: l.name, label: l.label, address: l.address, unitType: l.unitType, checkIn: fmtTime(l.checkInTime), checkOut: fmtTime(l.checkOutTime), keyMode: l.keyMode, lockbox: codes[l.id] || null,
-      hidden: l.hidden, edited: l.edited,
+      hidden: l.hidden, edited: l.edited, lockboxNoCode: l.keyMode === 'lockbox' && l.lockboxNoCode,
       ...(manage ? { postcode: l.postcode, checkInTime: l.checkInTime, checkOutTime: l.checkOutTime, building: l.building, guesty: l.guesty, hiddenByEnv: l.hiddenByEnv, editedAt: l.editedAt, editedBy: l.editedBy } : {}) });
   }
   const buildings = [...groups.values()].sort((a, b) => byBuilding(a.name, b.name));
@@ -1266,7 +1269,11 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
       return inScope(me, c.building);
     }).filter((c) => (!from || c.date >= from) && (!to || c.date <= to));
     const out = [];
-    for (const c of [...new Set([...visible, ...mine])]) out.push(await withMedia(env, c));
+    for (const c of [...new Set([...visible, ...mine])]) {
+      const x = await withMedia(env, c);
+      if (c.keyMode === 'lockbox' && c.status !== 'completed' && c.status !== 'cancelled') { const l = await listingInfo(env, ctx, c.listingId); x.keyNoCode = Boolean(l && l.lockboxNoCode); }
+      out.push(x);
+    }
     out.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
     return json({ cleanings: out, checklist: CHECKLIST, holdMs: HOLD_MS });
   }
@@ -1407,6 +1414,12 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     if (rec.status !== 'awaiting_key') return json({ error: rec.status === 'completed' ? 'This cleaning is already complete.' : 'Upload the video first.' }, 400);
     const body = await req.json().catch(() => ({}));
     if (rec.keyMode === 'lockbox') {
+      const lb = await listingInfo(env, ctx, rec.listingId);
+      if (lb && lb.lockboxNoCode) { // this flat's lockbox keeps its code: just confirm the key is back
+        if (body.keyReturned !== true) return json({ error: 'Confirm the key is back in the lockbox.' }, 400);
+        rec.key = { mode: 'lockbox', code: null, noCode: true, returnedAt: nowIso() };
+        return finish();
+      }
       const code = String(body.code || '').trim();
       if (!/^\d{4}$/.test(code)) return json({ error: 'Enter the new lockbox code: exactly 4 numbers.' }, 400);
       if (body.confirmCode !== undefined && String(body.confirmCode).trim() !== code) return json({ error: 'The two codes don’t match. Check the lockbox and enter it again.' }, 400);
@@ -1783,7 +1796,7 @@ async function handle(req, env, ctx) {
     // The flat's current lockbox code, for its panel: cleaners check it every time they arrive.
     const l = await listingInfo(env, ctx, decodeURIComponent(p.split('/')[3] || ''));
     if (!l || !inScope(me, l.building) || !can(me, 'view_cleaning')) return deny();
-    return json({ keyMode: l.keyMode, lockbox: l.keyMode === 'lockbox' ? ((await env.STORE.get('lockboxCodes', 'json')) || {})[l.id] || null : null });
+    return json({ keyMode: l.keyMode, noCode: l.keyMode === 'lockbox' && l.lockboxNoCode, lockbox: l.keyMode === 'lockbox' ? ((await env.STORE.get('lockboxCodes', 'json')) || {})[l.id] || null : null });
   }
   if (p === '/api/version') {
     const snap = await getSnapshot(env, ctx);
