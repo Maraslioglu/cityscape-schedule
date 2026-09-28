@@ -19,29 +19,36 @@
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+<aside class="side" aria-label="Menu">
+  <div class="side-brand"><svg class="cs-mark" viewBox="18.5 20 64.1 60" aria-hidden="true"><path fill="currentColor" d="M18.5 41.3 39.3 20H61v21.3H39.3V80H18.5zM61 41.3h21.6v14.5L61 80z"/></svg><b class="name">Cityscape</b><span class="tag">SCHEDULE</span></div>
+  <nav class="snav" aria-label="Sections">
+    <div class="nlbl" data-group="day">Day to day</div>
+    <button data-nav="schedule" data-group="day"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg><span class="nl">Schedule</span></button>
+    <button data-nav="cleaning" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="nl">Cleaning log</span><span class="ns">Cleaning</span></button>
+    <button data-nav="damage" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span class="nl">Damage reports</span><span class="ns">Damage</span><span class="nbadge hidden" id="nb-damage"></span></button>
+    <div class="nlbl" data-group="portfolio">Portfolio</div>
+    <button data-nav="props" data-group="portfolio"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg><span class="nl">Properties</span><span class="ndot hidden" id="nd-props" title="A KeyNest flat needs linking"></span></button>
+    <div class="nlbl" data-group="admin">Admin</div>
+    <button data-nav="users" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M1 21a8 8 0 0 1 16 0M17 4a4 4 0 0 1 0 8M23 21a8 8 0 0 0-5-7.4"/></svg><span class="nl">Users</span></button>
+    <button data-nav="settings" data-group="admin" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg><span class="nl">Settings</span></button>
+  </nav>
+  <button class="side-me" id="me-btn" title="My account"><span class="avatar" id="me-avatar"></span><span class="side-who"><b id="me-name"></b><span id="me-role"></span></span></button>
+</aside>
 <header class="top">
   <div class="wrap">
-    <div class="brand">
-      <svg class="cs-mark" viewBox="18.5 20 64.1 60" aria-hidden="true"><path fill="currentColor" d="M18.5 41.3 39.3 20H61v21.3H39.3V80H18.5zM61 41.3h21.6v14.5L61 80z"/></svg>
-      <b class="name">Cityscape</b><span class="tag">SCHEDULE</span>
-    </div>
+    <div class="brand"><svg class="cs-mark" viewBox="18.5 20 64.1 60" aria-hidden="true"><path fill="currentColor" d="M18.5 41.3 39.3 20H61v21.3H39.3V80H18.5zM61 41.3h21.6v14.5L61 80z"/></svg><b class="name">Cityscape</b></div>
+    <h1 class="page-title" id="page-title"></h1>
+    <span class="spacer"></span>
     <span class="live" id="live" title="Connecting…"><i></i><span class="lbl">Connecting</span></span>
-    <nav class="seg" role="tablist" aria-label="View">
-      <button role="tab" data-view="day" aria-selected="true"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg><span>Day</span></button>
-      <button role="tab" data-view="board" aria-selected="false"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg><span>Board</span></button>
-      <button role="tab" data-view="props" aria-selected="false"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg><span>Properties</span></button>
-      <button role="tab" data-view="cleaning" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span>Cleaning</span></button>
-      <button role="tab" data-view="users" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg><span>Users</span></button>
-      <button role="tab" data-view="settings" aria-selected="false" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
-    </nav>
     <button class="btn sq bell" id="bell" aria-label="Notifications" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg><span class="bell-n hidden" id="bell-n"></span></button>
-    <button class="btn me" id="me-btn" data-view="account" title="My account"><span class="avatar" id="me-avatar"></span><span class="btn-label" id="me-name"></span></button>
+    <button class="btn me" id="me-btn2" title="My account"><span class="avatar" id="me-avatar2"></span></button>
   </div>
 </header>
 
 <main class="wrap">
   <section id="week-area">
     <div class="weekbar">
+      <div class="range no-print" role="tablist" aria-label="Day or week"><button role="tab" data-range="day" aria-selected="true">Day</button><button role="tab" data-range="board" aria-selected="false">Week</button></div>
       <button class="btn sq no-print" id="prev" aria-label="Previous week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>
       <h1 id="week-title">Loading…</h1>
       <button class="btn sq no-print" id="next" aria-label="Next week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button>
@@ -49,9 +56,10 @@
       <span id="newpill"></span>
       <span class="spacer"></span>
       <button class="btn no-print" id="this">This week</button>
-      <button class="btn act no-print" id="refresh" title="Pull the latest from Guesty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/></svg><span class="btn-label">Refresh</span></button>
-      <button class="btn act no-print" id="copy" title="Copy as text for WhatsApp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><span class="btn-label" id="copy-label">Copy day</span></button>
-      <button class="btn act no-print" id="print" title="Print or save as PDF"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg><span class="btn-label">Print</span></button>
+      <div class="copy-wrap no-print">
+        <button class="btn act" id="copy" aria-haspopup="menu" aria-expanded="false" title="Copy as text for WhatsApp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><span class="btn-label">Copy for WhatsApp</span><svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="menu hidden" id="copy-menu" role="menu"><button role="menuitem" data-copy="day" id="copy-day">Copy this day</button><button role="menuitem" data-copy="week">Copy this week</button></div>
+      </div>
     </div>
 
     <div id="banners"></div>
@@ -91,18 +99,24 @@
     <div class="pgrid" id="props"></div>
   </section>
 
-  <!-- CLEANING VIEW (admins, supervisors) -->
+  <!-- CLEANING LOG -->
   <section id="view-cleaning" class="hidden">
-    <div class="weekbar"><h1>Cleaning</h1>
+    <div class="weekbar"><h1>Cleaning log</h1>
       <button class="btn sq" id="cv-prev" aria-label="Previous day"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>
       <input type="date" id="cv-date" class="cv-date" aria-label="Day">
       <button class="btn sq" id="cv-next" aria-label="Next day"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button>
     </div>
     <div class="summary cv-summary" id="cv-summary"></div>
-    <div class="cv-grid">
-      <div><h3 class="sh-h3">Cleanings</h3><div id="cv-list"></div></div>
-      <div><h3 class="sh-h3">Damage reports</h3><div id="cv-damages"></div></div>
+    <p class="muted cv-hint">Tap a cleaning to see everything: times, checklist, key, videos and photos.</p>
+    <div id="cv-list"></div>
+  </section>
+
+  <!-- DAMAGE REPORTS -->
+  <section id="view-damage" class="hidden">
+    <div class="weekbar"><h1>Damage reports</h1>
+      <div class="range" role="tablist" aria-label="Which reports"><button role="tab" data-dmg-filter="open" aria-selected="true">Open</button><button role="tab" data-dmg-filter="resolved" aria-selected="false">Resolved</button><button role="tab" data-dmg-filter="all" aria-selected="false">All</button></div>
     </div>
+    <div id="dmg-page"></div>
   </section>
 
   <!-- USERS VIEW (admins) -->
@@ -145,6 +159,7 @@
 
 <div class="active-bar hidden" id="active-bar"></div>
 <div class="notif hidden" id="notif"></div>
+<div class="sheet hidden" id="detail"><div class="sheet-card detail-card" id="detail-body" role="dialog" aria-modal="true" aria-label="Cleaning details"></div></div>
 <div class="sheet hidden" id="sheet"><div class="sheet-card" id="sheet-body" role="dialog" aria-modal="true"></div></div>
 <div class="cl-overlay hidden" id="checklist"></div>
 

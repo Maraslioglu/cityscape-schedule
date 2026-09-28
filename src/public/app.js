@@ -16,10 +16,15 @@
   let view = store.get('cs_view') || 'day';
   let me = null;            // signed-in person and their permissions
   const can = (perm) => Boolean(me && me.perms && me.perms[perm]);
-  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', users: 'manage_users', settings: null, account: null };
+  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null };
   // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
   const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
-  const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || (v === 'cleaning' && can('manage_damage'))));
+  const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
+  // Sidebar: Schedule holds the Day and Week views; each other entry is one view.
+  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings' };
+  const navAllowed = (n) => (n === 'schedule' ? allowed('day') || allowed('board') : allowed(n));
+  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account' };
+  let lastSched = store.get('cs_sched') || 'day';
   let selected = null;      // selected date in day view
   let version = null;       // bookings version from the server
   let boardDirty = true;    // board is rebuilt only when it's actually shown
@@ -67,7 +72,6 @@
     const cached = !fresh && date && weeks.get(date);
     if (cached) apply(cached);                        // instant from memory
     else document.body.classList.add('is-loading');   // keep old week visible, just dimmed
-    $('refresh').disabled = true;
     try {
       const w = await fetchWeek(date, fresh);
       if (my === navToken) apply(w); // ignore answers for weeks the user has already moved past
@@ -77,7 +81,6 @@
       if (e.message !== 'signed out') $('banners').innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
     } finally {
       document.body.classList.remove('is-loading');
-      $('refresh').disabled = false;
     }
   }
 
@@ -248,6 +251,7 @@
       $('props-banner').innerHTML = !kn.unlinked.length ? '' : `<div class="banner warn-banner"><b>${kn.connected ? `${kn.unlinked.length} KeyNest flat${kn.unlinked.length > 1 ? 's aren’t' : ' isn’t'} linked to a KeyNest key` : 'KeyNest isn’t connected yet'}.</b>
         Cleaners can’t complete ${many ? 'these flats' : 'this flat'} until ${kn.connected ? (many ? 'they’re linked' : 'it’s linked') : 'KeyNest is connected'}:
         ${kn.unlinked.map((f) => `<span class="flat-chip">${esc(f.label)} <span>· ${esc(f.building)}</span></span>`).join(' ')} ${fix}</div>`;
+      $('nd-props').classList.toggle('hidden', !kn.unlinked.length);
       if ($('kn-fix')) $('kn-fix').onclick = () => { setView('settings'); setTimeout(() => { const el = $('settings-keynest'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300); };
     } catch (e) {
       if (e.message !== 'signed out') $('props').innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
@@ -304,7 +308,7 @@
         $('kn-save').disabled = true;
         try {
           await send('PUT', '/api/keynest/links', { confirmed: true, changes: changes.map(([listingId, keyId]) => ({ listingId, keyId })) });
-          toast('KeyNest links saved ✓'); props = null; await loadSettings();
+          toast('KeyNest links saved ✓'); props = null; await loadSettings(); refreshBadges();
         } catch (e) { toast(e.message); $('kn-save').disabled = false; }
       };
     });
@@ -339,8 +343,13 @@
     if (!allowed(v)) v = ['day', 'board', 'props', 'account'].find(allowed);
     view = v;
     store.set('cs_view', v);
-    document.querySelectorAll('.seg button').forEach((b) => b.setAttribute('aria-selected', b.dataset.view === v));
-    $('me-btn').setAttribute('aria-selected', v === 'account');
+    if (v === 'day' || v === 'board') { lastSched = v; store.set('cs_sched', v); }
+    document.querySelectorAll('.snav [data-nav]').forEach((b) => { if (b.dataset.nav === NAV_OF[v]) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    document.querySelectorAll('.range [data-range]').forEach((b) => b.setAttribute('aria-selected', b.dataset.range === v));
+    $('me-btn').setAttribute('aria-current', v === 'account' ? 'page' : 'false');
+    $('me-btn2').setAttribute('aria-selected', v === 'account');
+    $('page-title').textContent = TITLES[v] || '';
+    closeCopyMenu();
     $('week-area').classList.toggle('hidden', !(v === 'day' || v === 'board'));
     $('view-day').classList.toggle('hidden', v !== 'day');
     $('view-board').classList.toggle('hidden', v !== 'board');
@@ -349,27 +358,31 @@
     $('view-cleaning').classList.toggle('hidden', v !== 'cleaning');
     $('view-account').classList.toggle('hidden', v !== 'account');
     $('view-settings').classList.toggle('hidden', v !== 'settings');
+    $('view-damage').classList.toggle('hidden', v !== 'damage');
     $('foot').classList.toggle('hidden', !(v === 'day' || v === 'board'));
-    $('copy-label').textContent = v === 'board' ? 'Copy week' : 'Copy day';
     if (v === 'board' && data && boardDirty) renderBoard();
     if (v === 'props') loadProps();
     if (v === 'users') loadUsers();
     if (v === 'cleaning') loadCleaningView();
     if (v === 'account') renderAccount();
     if (v === 'settings') loadSettings();
+    if (v === 'damage') loadDamageView();
   }
 
   // ---------- who's signed in ----------
   const initials = (n) => (n || '?').split(/\s+/).filter((w) => /^[a-z]/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   function applyPermissions() {
-    document.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('hidden', !allowed(b.dataset.view)));
-    $('copy').classList.toggle('hidden', !can('copy_print'));
-    $('print').classList.toggle('hidden', !can('copy_print'));
-    $('refresh').classList.toggle('hidden', !can('refresh'));
+    document.querySelectorAll('.snav [data-nav]').forEach((b) => b.classList.toggle('hidden', !navAllowed(b.dataset.nav)));
+    document.querySelectorAll('.snav .nlbl').forEach((l) => l.classList.toggle('hidden', !document.querySelector(`.snav [data-nav][data-group="${l.dataset.group}"]:not(.hidden)`)));
+    document.querySelector('.range [data-range="day"]').classList.toggle('hidden', !allowed('day'));
+    document.querySelector('.range [data-range="board"]').classList.toggle('hidden', !allowed('board'));
+    document.querySelector('.copy-wrap').classList.toggle('hidden', !can('copy_print'));
     document.querySelector('.metric.linen').classList.toggle('hidden', !can('view_linen'));
     document.querySelector('.summary').classList.toggle('no-linen', !can('view_linen'));
     $('me-avatar').textContent = initials(me.name);
-    $('me-name').textContent = me.name.split(' ')[0];
+    $('me-avatar2').textContent = initials(me.name);
+    $('me-name').textContent = me.name;
+    $('me-role').textContent = `${(me.role || '').replace(/^./, (c) => c.toUpperCase())} · ${me.buildings === 'all' ? 'All buildings' : (me.buildings || []).length === 1 ? me.buildings[0] : `${(me.buildings || []).length} buildings`}`;
   }
   function renderAccount() {
     const b = me.buildings === 'all' ? 'All buildings' : (me.buildings.length ? me.buildings.map(esc).join(', ') : 'None assigned yet');
@@ -532,18 +545,32 @@
   }
 
   // ---------- wiring ----------
-  document.querySelectorAll('.seg button').forEach((b) => b.onclick = () => setView(b.dataset.view));
+  document.querySelectorAll('.snav [data-nav]').forEach((b) => b.onclick = () => {
+    const n = b.dataset.nav;
+    setView(n === 'schedule' ? (allowed(lastSched) ? lastSched : allowed('day') ? 'day' : 'board') : n);
+  });
+  document.querySelectorAll('.range [data-range]').forEach((b) => b.onclick = () => setView(b.dataset.range));
   $('prev').onclick = () => data && showWeek(data.prevWeek);
   $('next').onclick = () => data && showWeek(data.nextWeek);
   $('this').onclick = () => showWeek('');
-  $('refresh').onclick = () => { weeks.clear(); showWeek(data ? data.weekStart : '', { fresh: true }); };
-  $('print').onclick = () => window.print();
-  $('copy').onclick = async () => {
-    if (!data) return;
-    const text = view === 'board' ? weekText() : dayText(data.days.find((d) => d.date === selected)).join('\n');
-    try { await navigator.clipboard.writeText(text); toast('Copied — paste into WhatsApp'); }
-    catch (_) { toast('This browser blocked copying'); }
+  // Copy for WhatsApp: the selected day or the whole week
+  function closeCopyMenu() { $('copy-menu').classList.add('hidden'); $('copy').setAttribute('aria-expanded', 'false'); }
+  $('copy').onclick = (e) => {
+    e.stopPropagation();
+    const open = $('copy-menu').classList.contains('hidden');
+    if (open && data) $('copy-day').textContent = `Copy ${selected === data.today ? 'today' : WD_LONG.format(D(selected))}`;
+    $('copy-menu').classList.toggle('hidden', !open);
+    $('copy').setAttribute('aria-expanded', String(open));
   };
+  $('copy-menu').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-copy]');
+    if (!b || !data) return;
+    closeCopyMenu();
+    const text = b.dataset.copy === 'week' ? weekText() : dayText(data.days.find((d) => d.date === selected)).join('\n');
+    try { await navigator.clipboard.writeText(text); toast(b.dataset.copy === 'week' ? 'Week copied — paste into WhatsApp' : 'Day copied — paste into WhatsApp'); }
+    catch (_) { toast('This browser blocked copying'); }
+  });
+  document.addEventListener('click', (e) => { if (!e.target.closest('.copy-wrap')) closeCopyMenu(); });
   document.addEventListener('keydown', (e) => {
     if (e.target.closest('input, textarea, select') || e.metaKey || e.ctrlKey || !data || !(view === 'day' || view === 'board')) return;
     if (e.key === 'ArrowLeft') showWeek(data.prevWeek);
@@ -551,6 +578,7 @@
   });
 
   $('me-btn').onclick = () => setView('account');
+  $('me-btn2').onclick = () => setView('account');
   (async () => {
     const q0 = new URLSearchParams(location.search);
     const deep = q0.get('view') ? location.href : null; // opened from a notification: ?view=…&date=…&flat=…
@@ -564,7 +592,9 @@
     } else if (deep) openLink(deep);
     loadNotifs();
     initPush();
+    refreshBadges();
   })();
+  setInterval(() => { if (!document.hidden) refreshBadges(); }, 60000);
   setInterval(checkVersion, 15000);
   setInterval(() => { if (!document.hidden && me) refreshCleanings(); }, 15000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
@@ -1182,7 +1212,7 @@
       try {
         await send('POST', '/api/damages', { listingId, description: $('dmg-what').value, location: $('dmg-where').value, mediaIds: keys.map((k) => uploads.get(k)).filter((x) => x.done).map((x) => x.id), cleaningId: a && a.listingId === listingId ? a.id : null });
         keys.forEach((k) => uploads.delete(k));
-        toast('Damage reported — thank you');
+        toast('Damage reported — thank you'); refreshBadges();
         sheetMode = 'main'; renderSheet();
       } catch (err) { $('dmg-msg').className = 'form-msg err'; $('dmg-msg').textContent = err.message; }
     };
@@ -1208,40 +1238,124 @@
   }
   function wireDamageCards(root, after) {
     root.querySelectorAll('[data-dmg]').forEach((b) => b.onclick = async () => {
-      try { await send('PUT', '/api/damages/' + b.dataset.dmg, { status: b.dataset.to }); toast(b.dataset.to === 'resolved' ? 'Marked resolved' : 'Reopened'); after(); } catch (e) { toast(e.message); }
+      try { await send('PUT', '/api/damages/' + b.dataset.dmg, { status: b.dataset.to }); toast(b.dataset.to === 'resolved' ? 'Marked resolved' : 'Reopened'); after(); refreshBadges(); } catch (e) { toast(e.message); }
     });
   }
 
   // ---------------- Cleaning tab (admins, supervisors, users) ----------------
   let cvDate = null;
+  const STEP = { in_progress: 'Cleaning', checklist: 'Final checks', awaiting_video: 'Uploading video', awaiting_key: 'Returning key' };
   async function loadCleaningView() {
     cvDate = cvDate || (data && data.today) || new Date().toISOString().slice(0, 10);
     $('cv-date').value = cvDate;
     try {
-      const [c, d] = await Promise.all([getJSON('/api/cleanings?date=' + cvDate), getJSON('/api/damages')]);
+      const [c, d] = await Promise.all([getJSON('/api/cleanings?date=' + cvDate), getJSON('/api/damages?status=open').catch(() => ({ damages: [] }))]);
+      checklistDef = c.checklist || checklistDef;
       const cls = c.cleanings.filter((x) => x.status !== 'cancelled' && x.date === cvDate);
       const active = cls.filter((x) => ACTIVE.includes(x.status));
       const done = cls.filter((x) => x.status === 'completed');
       const totalMin = done.reduce((s, x) => s + (Date.parse(x.endedAt) - Date.parse(x.startedAt)), 0);
+      const openDmg = d.damages.length;
       $('cv-summary').innerHTML = `<div class="metric"><div class="k">In progress</div><div class="v">${active.length}</div></div>
         <div class="metric"><div class="k">Completed</div><div class="v">${done.length}</div></div>
         <div class="metric"><div class="k">Average time</div><div class="v">${done.length ? durWords(totalMin / done.length) : '–'}</div></div>
-        <div class="metric"><div class="k">Open damage</div><div class="v">${d.damages.filter((x) => x.status === 'open').length}</div></div>`;
-      $('cv-list').innerHTML = cls.length ? cls.map((x) => `<div class="card cv-item">
+        <button class="metric metric-link" id="cv-dmg" ${allowed('damage') ? '' : 'disabled'}><div class="k">Open damage</div><div class="v">${openDmg}</div></button>`;
+      if ($('cv-dmg')) $('cv-dmg').onclick = () => setView('damage');
+      // One line per cleaning; tap it to see everything (checklist, key, videos and photos, damage).
+      $('cv-list').innerHTML = cls.length ? cls.map((x) => `<button class="card cv-item cv-open" data-cid="${esc(x.id)}">
           <div class="hist-h"><b>${esc(x.label)} <span class="muted">· ${esc(x.building)}</span></b>
-            <span class="${ACTIVE.includes(x.status) ? 'cb running' : 'cb done'}">${ACTIVE.includes(x.status) ? `<i></i>${x.status === 'in_progress' ? 'Cleaning' : x.status === 'checklist' ? 'Final checks' : x.status === 'awaiting_key' ? 'Returning key' : 'Uploading video'}` : '✓ Completed'}</span></div>
+            <span class="${ACTIVE.includes(x.status) ? 'cb running' : 'cb done'}">${ACTIVE.includes(x.status) ? `<i></i>${STEP[x.status]}` : '✓ Completed'}</span></div>
           <div class="cv-meta"><span>${esc(x.cleanerName)}</span><span>Start ${fmtClock(x.startedAt)}</span><span>End ${x.endedAt ? fmtClock(x.endedAt) : '—'}</span>
             <span>Time <b ${x.endedAt ? '' : `data-since="${esc(x.startedAt)}"`}>${fmtDur((x.endedAt ? Date.parse(x.endedAt) : Date.now()) - Date.parse(x.startedAt))}</b></span>
             ${x.status === 'completed' ? `<span>Checks ${x.checklist.length}/${c.checklist.length}</span>` : ''}
+            ${(x.media || []).length ? `<span>${x.media.filter((m) => m.kind === 'video').length} video${x.media.filter((m) => m.kind === 'video').length === 1 ? '' : 's'}${x.media.some((m) => m.kind === 'photo') ? ` · ${x.media.filter((m) => m.kind === 'photo').length} photos` : ''}</span>` : ''}
             ${x.key && x.key.mode === 'lockbox' ? `<span>Lockbox code <b>${esc(x.key.code)}</b></span>` : x.key && x.key.mode === 'keynest' ? '<span>Key at KeyNest ✓</span>' : ''}
             ${x.guesty === 'updated' ? '<span>Guesty ✓</span>' : x.guesty === 'failed' ? '<span class="warn">Guesty not updated</span>' : ''}</div>
-          ${mediaTiles(x.media)}
-        </div>`).join('') : '<div class="card empty"><b>No cleanings recorded</b>Nothing was started on this day.</div>';
-      const open = d.damages.filter((x) => x.status === 'open'), resolved = d.damages.filter((x) => x.status === 'resolved').slice(0, 10);
-      $('cv-damages').innerHTML = (open.length ? open.map(damageCard).join('') : '<div class="card empty"><b>No open damage reports</b></div>') +
-        (resolved.length ? `<h3 class="sh-h3">Recently resolved</h3>${resolved.map(damageCard).join('')}` : '');
-      wireDamageCards($('cv-damages'), loadCleaningView);
+          <span class="cv-more">View details</span>
+        </button>`).join('') : '<div class="card empty"><b>No cleanings recorded</b>Nothing was started on this day.</div>';
+      $('cv-list').querySelectorAll('[data-cid]').forEach((b) => b.onclick = () => openDetail(b.dataset.cid));
     } catch (e) { if (e.message !== 'signed out') $('cv-list').innerHTML = `<div class="banner error">${esc(e.message)}</div>`; }
+  }
+
+  // ---------- one cleaning, in full ----------
+  let detailId = null;
+  const fmtDay = (d) => (d ? `${WD_LONG.format(D(d))} ${D(d).getUTCDate()} ${MON.format(D(d))}` : '');
+  async function openDetail(id) {
+    detailId = id;
+    $('detail').classList.remove('hidden');
+    document.body.classList.add('noscroll');
+    $('detail-body').innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      const r = await getJSON('/api/cleanings/' + encodeURIComponent(id));
+      const c = r.cleaning, defs = r.checklist || checklistDef;
+      let dmg = [];
+      try { dmg = (await getJSON('/api/damages?listingId=' + encodeURIComponent(c.listingId))).damages.filter((d) => d.cleaningId === c.id); } catch (_) {}
+      if (detailId !== id) return;
+      const t = (iso) => (iso ? fmtClock(iso) : '—');
+      const took = c.endedAt ? durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt)) : `${fmtDur(Date.now() - Date.parse(c.startedAt))} so far`;
+      const state = c.status === 'completed' ? '<span class="pill ok">Completed</span>' : c.status === 'cancelled' ? '<span class="pill off">Cancelled</span>' : `<span class="pill">${esc(STEP[c.status] || c.status)}</span>`;
+      const checks = defs.map((d) => { const got = (c.checklist || []).find((x) => x.key === d.key); return `<li class="${got ? 'ok' : 'no'}"><span class="dt-tick" aria-hidden="true">${got ? '✓' : '–'}</span><span><b>${esc(d.title)}</b> ${esc(d.text)}</span><em>${got ? t(got.confirmedAt) : 'Not confirmed'}</em></li>`; }).join('');
+      const key = !c.keyMode && !c.key ? '<p class="muted">No key step for this flat.</p>'
+        : c.key && c.key.mode === 'lockbox' ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>`
+        : c.key && c.key.mode === 'keynest' ? `<p>Key handed in at KeyNest ✓ (${esc(c.key.status || 'in store')}) · confirmed ${t(c.key.confirmedAt)}</p>`
+        : `<p class="warn">Key not returned yet (${esc(c.keyMode === 'keynest' ? 'KeyNest' : 'lockbox')}).</p>`;
+      const guesty = c.guesty === 'updated' ? 'Marked clean ✓' : c.guesty === 'failed' ? '<span class="warn">Couldn’t update Guesty</span>' : c.guesty === 'preview' ? 'Sample data (not sent)' : c.guesty === 'off' ? 'Turned off' : c.status === 'completed' ? 'Sending…' : '—';
+      $('detail-body').innerHTML = `
+        <div class="sh-head"><div><h2>${esc(c.label)} <span class="muted dt-bld">· ${esc(c.building)}</span></h2><div class="sh-sub">${esc(fmtDay(c.date))} · ${esc(c.cleanerName)}</div></div><button class="btn sq" data-close-detail aria-label="Close">✕</button></div>
+        <div class="dt-state">${state}</div>
+        <dl class="dt-grid">
+          <dt>Cleaner</dt><dd>${esc(c.cleanerName)}</dd>
+          <dt>Started</dt><dd>${t(c.startedAt)}</dd>
+          <dt>Ended</dt><dd>${t(c.endedAt)}</dd>
+          <dt>Time taken</dt><dd>${esc(took)}</dd>
+          <dt>Checks confirmed</dt><dd>${c.checksConfirmedAt ? `${t(c.checksConfirmedAt)} · held ${Math.round((c.checksHeldMs || 0) / 1000)} s` : '—'}</dd>
+          <dt>Video uploaded</dt><dd>${t(c.videoAt)}</dd>
+          <dt>Completed</dt><dd>${t(c.completedAt)}</dd>
+          <dt>Guesty</dt><dd>${guesty}</dd>
+          ${c.status === 'cancelled' ? `<dt>Cancelled</dt><dd>${t(c.cancelledAt)}${c.cancelledBy ? ' by ' + esc(c.cancelledBy) : ''}</dd>` : ''}
+        </dl>
+        <h3 class="sh-h3">Checklist · ${(c.checklist || []).length}/${defs.length}</h3>
+        <ul class="dt-checks">${checks}</ul>
+        <h3 class="sh-h3">Key</h3>
+        ${key}
+        <h3 class="sh-h3">Videos &amp; photos</h3>
+        ${(c.media || []).length ? mediaTiles(c.media) : '<p class="muted">None uploaded.</p>'}
+        <h3 class="sh-h3">Damage reported during this clean</h3>
+        <div id="dt-dmg">${dmg.length ? dmg.map(damageCard).join('') : '<p class="muted">None.</p>'}</div>`;
+      wireDamageCards($('dt-dmg'), () => openDetail(id));
+    } catch (e) { if (e.message !== 'signed out') $('detail-body').innerHTML = `<div class="sh-head"><h2>Cleaning</h2><button class="btn sq" data-close-detail aria-label="Close">✕</button></div><div class="banner error">${esc(e.message)}</div>`; }
+  }
+  function closeDetail() { detailId = null; $('detail').classList.add('hidden'); if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll'); }
+  $('detail').addEventListener('click', (e) => { if (e.target.id === 'detail' || e.target.closest('[data-close-detail]')) closeDetail(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && detailId) closeDetail(); });
+
+  // ---------- Damage reports (their own page) ----------
+  let dmgFilter = 'open';
+  async function loadDamageView() {
+    const box = $('dmg-page');
+    document.querySelectorAll('[data-dmg-filter]').forEach((b) => b.setAttribute('aria-selected', b.dataset.dmgFilter === dmgFilter));
+    try {
+      const d = await getJSON('/api/damages' + (dmgFilter === 'all' ? '' : '?status=' + dmgFilter));
+      box.innerHTML = d.damages.length ? d.damages.map(damageCard).join('')
+        : `<div class="card empty"><b>${dmgFilter === 'open' ? 'No open damage reports' : dmgFilter === 'resolved' ? 'Nothing resolved yet' : 'No damage reports'}</b>${dmgFilter === 'open' ? 'Everything reported has been dealt with.' : ''}</div>`;
+      wireDamageCards(box, () => { loadDamageView(); refreshBadges(); });
+    } catch (e) { if (e.message !== 'signed out') box.innerHTML = `<div class="banner error">${esc(e.message)}</div>`; }
+  }
+  document.querySelectorAll('[data-dmg-filter]').forEach((b) => b.onclick = () => { dmgFilter = b.dataset.dmgFilter; loadDamageView(); });
+
+  // Sidebar badges: open damage reports, and a dot on Properties while a KeyNest flat isn't linked.
+  async function refreshBadges() {
+    if (!me) return;
+    if (allowed('damage')) {
+      try {
+        const n = (await getJSON('/api/damages?status=open')).damages.length;
+        $('nb-damage').textContent = n > 9 ? '9+' : String(n);
+        $('nb-damage').classList.toggle('hidden', !n);
+      } catch (_) {}
+    }
+    if (allowed('props')) {
+      try { const p = await getJSON('/api/properties'); $('nd-props').classList.toggle('hidden', !(p.keynest && p.keynest.unlinked.length)); } catch (_) {}
+    }
   }
   $('cv-date').onchange = (e) => { cvDate = e.target.value; loadCleaningView(); };
   $('cv-prev').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
