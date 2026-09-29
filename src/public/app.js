@@ -118,8 +118,9 @@
   }
 
   function renderFoot() {
-    const at = new Date(data.generatedAt);
-    $('foot').textContent = `Bookings last checked with Guesty at ${at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} · ${data.statuses.join(' + ')} bookings only`;
+    const at = new Date(data.generatedAt), iso = at.toISOString();
+    const day = londonDay(iso) === londonDay(new Date().toISOString()) ? '' : ` on ${at.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'Europe/London' })}`;
+    $('foot').textContent = `Bookings last checked with Guesty at ${fmtClock(iso)}${day} · ${data.statuses.join(' + ')} bookings only`;
   }
 
   function renderStrip() {
@@ -197,7 +198,7 @@
     const linenBits = can('view_linen') ? Object.entries(day.linen).map(([t, n]) => `${esc(shortType(t))} <b>${n}</b>`).join(' · ') : '';
     $('daypanel').innerHTML = `
       ${linenBits ? `<div class="dlinen">Linen for this day: ${linenBits}</div>` : ''}
-      ${day.units.length ? '' : '<div class="card empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
+      ${day.units.length ? '' : data.cleansOnly ? '<div class="card empty"><b>Nothing to clean</b>No check-outs on this day.</div>' : '<div class="card empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
       ${section('turn', 'Same-day turnovers', 'Guests leave and arrive the same day', turn)}
       ${section('out', 'Check-outs', 'Clean once the guest leaves', outs)}
       ${section('in', 'Arrivals', 'Make sure the flat is ready', ins)}`;
@@ -666,7 +667,22 @@
   // ---------- Settings › Integrations › KeyNest (Admin and User roles) ----------
   // Locked by default: "Edit links" unlocks the rows, and nothing is saved until the changes are reviewed and confirmed.
   let kn = null, knEdit = false, knDraft = {};
+  // Backups (Admins): the app keeps a copy of its data every day for 14 days; any of them, or the live data, can be downloaded.
+  async function loadBackups() {
+    const box = $('settings-backups'), admin = me && me.role === 'admin';
+    $('set-data-h').classList.toggle('hidden', !admin); box.classList.toggle('hidden', !admin);
+    if (!admin) return;
+    try {
+      const r = await getJSON('/api/admin/backups');
+      const kb = (n) => (n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
+      box.innerHTML = `<div class="set-head"><div><h3>Backups</h3>
+          <p class="muted">The app saves a copy of all its data every day and keeps the last 14. Download one to keep your own copy somewhere safe (it holds everything, including sign-in details, so treat it like a password). Videos and photos aren’t included.</p></div></div>
+        <div class="set-actions"><a class="btn primary" href="/api/admin/backups/now" download>Download today’s data</a><span class="muted">${r.backups.length} daily cop${r.backups.length === 1 ? 'y' : 'ies'} kept</span></div>
+        ${r.backups.length ? `<table class="kn-table"><thead><tr><th>Day</th><th>Size</th><th></th></tr></thead><tbody>${r.backups.map((b) => `<tr><td>${esc(new Date(b.day + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))}</td><td>${esc(kb(b.size))}</td><td style="text-align:right"><a href="/api/admin/backups/${encodeURIComponent(b.name)}" download>Download</a></td></tr>`).join('')}</tbody></table>` : ''}`;
+    } catch (e) { if (e.message !== 'signed out') box.innerHTML = `<h3>Backups</h3><div class="banner error">${esc(e.message)}</div>`; }
+  }
   async function loadSettings() {
+    loadBackups();
     const box = $('settings-keynest');
     try {
       kn = await getJSON('/api/keynest');
@@ -1139,6 +1155,7 @@
     const turns = s.cleans.filter((u) => u.checkIn).length;
     $('m-clean').textContent = s.cleans.length;
     $('m-clean-s').textContent = s.cleans.length ? `${turns} same-day · ${s.cleans.length - turns} check-out${s.cleans.length - turns === 1 ? '' : 's'}` : 'Nothing to clean';
+    $('m-in').previousElementSibling.textContent = data.cleansOnly ? 'Same-day arrivals' : 'Arrivals';
     $('m-in').textContent = s.arrivals.length;
     $('m-in-s').textContent = firstIn ? `First guests from ${s.arrivals.find((u) => u.checkIn.timeRaw === firstIn).checkIn.time}` : 'No arrivals';
     if (isManager()) {
@@ -1192,7 +1209,7 @@
     cards.push(`<div class="card rcard"><div class="rc-h"><h3>Needs attention</h3></div>${att.join('') || '<p class="muted rnone">Nothing right now.</p>'}</div>`);
     const t = data.totals;
     cards.push(`<div class="card rcard"><div class="rc-h"><h3>This week</h3></div>
-      <div class="wk"><div><b>${t.checkOuts}</b><span>cleans</span></div><div><b>${t.checkIns}</b><span>arrivals</span></div><div><b>${t.turnovers}</b><span>same-day</span></div></div>
+      <div class="wk"><div><b>${t.checkOuts}</b><span>cleans</span></div>${data.cleansOnly ? '' : `<div><b>${t.checkIns}</b><span>arrivals</span></div>`}<div><b>${t.turnovers}</b><span>same-day</span></div></div>
       ${can('view_linen') && t.linenSets !== null ? `<div class="wk-linen"><span class="lh">Linen sets <em>1 per check-out</em></span>${data.linen.map((r) => `<span class="li"><b>${r.sets}</b>${esc(shortType(r.type))}</span>`).join('')}<span class="li total"><b>${t.linenSets}</b>total</span></div>` : ''}</div>`);
     rail.innerHTML = cards.join('');
   }
@@ -1342,7 +1359,8 @@
       body = `<div class="timer-card other"><div class="tc-label">${esc(active.cleanerName)} started at ${fmtClock(active.startedAt)}</div>
         <div class="tc-time" ${active.endedAt ? '' : `data-since="${esc(active.startedAt)}"`}>${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</div>
         <div class="tc-step">${active.status === 'in_progress' ? 'Cleaning now' : active.status === 'checklist' ? 'Doing final checks' : active.status === 'awaiting_key' ? 'Returning the key' : 'Uploading video'}</div>
-        ${can('manage_users') ? '<button class="linkbtn" id="cancel-clean">Cancel this cleaning</button>' : ''}</div>`;
+        ${can('manage_users') ? '<button class="linkbtn" id="cancel-clean">Cancel this cleaning</button>' : ''}</div>`
+        + (active.status === 'awaiting_key' && stepsIn() ? `<p class="stepin-note">You can finish ${esc(active.cleanerName.split(' ')[0])}’s cleaning here.</p>${keyStep(active)}` : '');
     } else if (can('do_cleaning')) {
       body = `<button class="btn big primary" id="begin-clean"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 5v14l11-7z"/></svg>Begin cleaning</button>`;
     }
@@ -1407,7 +1425,7 @@
     on('report-maint', () => taskForm({ listingId: sheetListing, label: u.label, building: u.building }));
     loadSheetMaint(sheetListing);
     if (active && mine && active.status === 'awaiting_video') wireEvidence(active);
-    if (active && mine && active.status === 'awaiting_key') wireKey(active);
+    if (active && (mine || stepsIn()) && active.status === 'awaiting_key') wireKey(active);
     loadSheetDamages(sheetListing);
   }
 
@@ -1427,6 +1445,25 @@
     return `<ol class="miles">${rows.map(([label, detail, time, state]) => `<li class="${state}"><span class="mdot" aria-hidden="true"></span><span class="mtxt"><b>${esc(label)}</b>${detail ? `<small>${esc(detail)}</small>` : ''}</span><em>${time && state === 'done' ? fmtClock(time) : state === 'now' ? 'Now' : ''}</em></li>`).join('')}</ol>`;
   }
 
+  // Admin, User and supervisor roles can finish someone else's cleaning at the key step and override KeyNest.
+  const stepsIn = () => Boolean(me && ['admin', 'user', 'supervisor'].includes(me.role));
+  // A pop-up asking to confirm something. Resolves to { note } when confirmed, or null.
+  function askConfirm({ title, text, yes = 'Yes', no = 'Cancel', danger = false, note = null }) {
+    return new Promise((resolve) => {
+      const box = document.createElement('div');
+      box.className = 'modal';
+      box.innerHTML = `<div class="modal-card" role="alertdialog" aria-modal="true" aria-labelledby="md-t" aria-describedby="md-x">
+        <h3 id="md-t">${esc(title)}</h3><p id="md-x">${esc(text)}</p>
+        ${note ? `<label class="md-l" for="md-note">${esc(note)}</label><textarea id="md-note" rows="2" maxlength="300"></textarea>` : ''}
+        <div class="form-actions"><span class="spacer"></span><button class="btn" data-md="no">${esc(no)}</button><button class="btn ${danger ? 'danger-solid' : 'primary'}" data-md="yes">${esc(yes)}</button></div></div>`;
+      document.body.appendChild(box);
+      const done = (ok) => { const n = box.querySelector('#md-note'); box.remove(); document.removeEventListener('keydown', esc_); resolve(ok ? { note: n ? n.value.trim() : '' } : null); };
+      const esc_ = (e) => { if (e.key === 'Escape') done(false); };
+      document.addEventListener('keydown', esc_);
+      box.addEventListener('click', (e) => { if (e.target === box) done(false); const b = e.target.closest('[data-md]'); if (b) done(b.dataset.md === 'yes'); });
+      box.querySelector('[data-md="no"]').focus();
+    });
+  }
   function confirmInline(text, yes) {
     const box = document.createElement('div');
     box.className = 'confirm-del';
@@ -1533,7 +1570,7 @@
   function keyNote(c) {
     if (!c.key) return '';
     if (c.key.mode === 'lockbox') return c.key.code && can('view_cleaning') ? ` · key in lockbox, new code <b>${esc(c.key.code)}</b>` : c.key.note ? ' · key returned' : ' · key back in the lockbox';
-    return ' · key back in KeyNest';
+    return c.key.overridden ? ` · KeyNest check overridden by ${esc(c.key.overriddenBy || '')}` : ' · key back in KeyNest';
   }
   let keyPoll = null;
   function keyStep(a) {
@@ -1565,6 +1602,7 @@
       <div class="kn-stores" id="kn-stores"></div>
       <button class="btn wide" id="kn-check">Check again</button>
       <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
+      ${stepsIn() ? '<button class="linkbtn kn-override" id="kn-override">Override KeyNest and complete</button>' : ''}
     </div>`;
   }
   function wireKey(a) {
@@ -1644,6 +1682,13 @@
     };
     again.onclick = check;
     done.onclick = () => finish({});
+    if ($('kn-override')) $('kn-override').onclick = async () => {
+      const r = await askConfirm({
+        title: 'Override KeyNest?', danger: true, yes: 'Override and complete', no: 'Cancel', note: 'Reason (optional)',
+        text: 'We don’t recommend doing this, as the cleaner should return the key to KeyNest. Are you sure you want to override?',
+      });
+      if (r) finish({ override: true, note: r.note });
+    };
     check();
     keyPoll = setInterval(check, 20000);
   }
@@ -1889,7 +1934,7 @@
             <span>Time <b ${x.endedAt ? '' : `data-since="${esc(x.startedAt)}"`}>${fmtDur((x.endedAt ? Date.parse(x.endedAt) : Date.now()) - Date.parse(x.startedAt))}</b></span>
             ${x.status === 'completed' ? `<span>Checks ${x.checklist.length}/${c.checklist.length}</span>` : ''}
             ${(x.media || []).length ? `<span>${x.media.filter((m) => m.kind === 'video').length} video${x.media.filter((m) => m.kind === 'video').length === 1 ? '' : 's'}${x.media.some((m) => m.kind === 'photo') ? ` · ${x.media.filter((m) => m.kind === 'photo').length} photos` : ''}</span>` : ''}
-            ${x.key && x.key.mode === 'lockbox' ? `<span>Lockbox code <b>${esc(x.key.code)}</b></span>` : x.key && x.key.mode === 'keynest' ? '<span>Key at KeyNest ✓</span>' : ''}
+            ${x.key && x.key.mode === 'lockbox' ? `<span>Lockbox code <b>${esc(x.key.code)}</b></span>` : x.key && x.key.mode === 'keynest' ? (x.key.overridden ? `<span class="warn">KeyNest overridden by ${esc(x.key.overriddenBy || '')}</span>` : '<span>Key at KeyNest ✓</span>') : ''}
             ${x.guesty === 'updated' ? '<span>Guesty ✓</span>' : x.guesty === 'failed' ? '<span class="warn">Guesty not updated</span>' : ''}</div>
           <span class="cv-more">View details</span>
         </button>`).join('') : '<div class="card empty"><b>No cleanings recorded</b>Nothing was started on this day.</div>';
@@ -1917,6 +1962,7 @@
       const checks = defs.map((d) => { const got = (c.checklist || []).find((x) => x.key === d.key); return `<li class="${got ? 'ok' : 'no'}"><span class="dt-tick" aria-hidden="true">${got ? '✓' : '–'}</span><span><b>${esc(d.title)}</b> ${esc(d.text)}</span><em>${got ? t(got.confirmedAt) : 'Not confirmed'}</em></li>`; }).join('');
       const key = !c.keyMode && !c.key ? '<p class="muted">No key step for this flat.</p>'
         : c.key && c.key.mode === 'lockbox' ? (c.key.code ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>` : `<p>${c.key.note ? `Key returned: ${esc(c.key.note)}` : 'Key back in the lockbox (no new code needed)'} · ${t(c.key.returnedAt)}</p>`)
+        : c.key && c.key.mode === 'keynest' && c.key.overridden ? `<p class="warn">KeyNest check overridden by ${esc(c.key.overriddenBy || '')} · ${t(c.key.confirmedAt)}${c.key.note ? ` — “${esc(c.key.note)}”` : ''}</p>`
         : c.key && c.key.mode === 'keynest' ? `<p>Key in KeyNest ✓ (${esc(c.key.status || 'in store')}) · checked ${t(c.key.confirmedAt)}</p>`
         : `<p class="warn">Key not returned yet (${esc(c.keyMode === 'keynest' ? 'KeyNest' : 'lockbox')}).</p>`;
       // What KeyNest recorded for this flat's key around the cleaning (from its webhook): who collected it and when it came back.
@@ -1936,7 +1982,7 @@
           <dt>Time taken</dt><dd>${esc(took)}</dd>
           <dt>Checks confirmed</dt><dd>${c.checksConfirmedAt ? `${t(c.checksConfirmedAt)} · held ${Math.round((c.checksHeldMs || 0) / 1000)} s` : '—'}</dd>
           <dt>Video uploaded</dt><dd>${t(c.videoAt)}</dd>
-          <dt>Completed</dt><dd>${t(c.completedAt)}</dd>
+          <dt>Completed</dt><dd>${t(c.completedAt)}${c.completedBy ? ` · finished by ${esc(c.completedBy)}` : ''}</dd>
           <dt>Guesty</dt><dd>${guesty}</dd>
           ${c.status === 'cancelled' ? `<dt>Cancelled</dt><dd>${t(c.cancelledAt)}${c.cancelledBy ? ' by ' + esc(c.cancelledBy) : ''}</dd>` : ''}
         </dl>
