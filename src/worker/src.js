@@ -220,43 +220,72 @@ function cleanUserInput(body, existing) {
   if (out.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)) return { error: 'That email address doesn’t look right.' };
   return { out };
 }
+// Supervisors manage only the people they add themselves — as supervisors or cleaners, within their own buildings,
+// never with more access than they have. They don't see Admins, Users or anyone someone else added.
+// Admins (and anyone given "Manage users") manage everyone, as before.
+const SUP_ROLES = ['supervisor', 'cleaner'];
+const limitedManager = (me) => me.role === 'supervisor';
+const addedBy = (u, me) => u.createdById === me.id || (!u.createdById && u.createdBy === me.username);
+function limitForSupervisor(me, out, existing) {
+  if (out.role !== undefined && !SUP_ROLES.includes(out.role)) return 'Supervisors can add supervisors and cleaners only.';
+  const role = out.role || (existing && existing.role);
+  const mine = effectivePerms(me);
+  // Access: never more than the supervisor has, and never managing users.
+  const base = out.perms || (existing ? existing.perms : null) || roleDefaults(role).perms;
+  out.perms = Object.fromEntries(PERMS.map(([k]) => [k, k !== 'manage_users' && Boolean(base[k]) && Boolean(mine[k])]));
+  // Buildings: only ones the supervisor covers.
+  if (out.buildings !== undefined || !existing) {
+    let b = out.buildings !== undefined ? out.buildings : roleDefaults(role).buildings;
+    if (b === 'all' && me.buildings !== 'all') b = [...(me.buildings || [])];
+    if (Array.isArray(b)) b = b.filter((x) => coversBuilding(me, x));
+    out.buildings = b;
+  }
+  return null;
+}
 async function usersApi(req, env, ctx, me, id) {
-  const users = await loadUsers(env, true);
+  const all = await loadUsers(env, true);
+  const limited = limitedManager(me);
+  const users = limited ? all.filter((u) => addedBy(u, me) && SUP_ROLES.includes(u.role)) : all;
   if (req.method === 'GET' && !id) {
     const snap = await getSnapshot(env, ctx);
-    const buildings = [...new Set([...listingMap(snap.listings, config(env)).values()].map((l) => l.building))].sort(byBuilding);
+    const buildings = [...new Set([...listingMap(snap.listings, config(env)).values()].map((l) => l.building))].sort(byBuilding).filter((b) => !limited || coversBuilding(me, b));
+    const roles = limited ? SUP_ROLES : ROLES, mine = effectivePerms(me);
     return json({
       users: users.map(publicUser).sort((a, b) => ROLES.indexOf(a.role) - ROLES.indexOf(b.role) || a.name.localeCompare(b.name)),
-      perms: PERMS, roles: ROLES, defaults: Object.fromEntries(ROLES.map((r) => [r, roleDefaults(r)])), buildings,
+      perms: limited ? PERMS.filter(([k]) => k !== 'manage_users' && mine[k]) : PERMS, roles,
+      defaults: Object.fromEntries(roles.map((r) => { const d = roleDefaults(r); if (!limited) return [r, d]; const o = { role: r }; limitForSupervisor(me, o); return [r, { perms: o.perms, buildings: o.buildings }]; })),
+      buildings, limited, canAllBuildings: !limited || me.buildings === 'all',
     });
   }
   const body = req.method === 'DELETE' ? {} : await req.json().catch(() => ({}));
   if (req.method === 'POST' && !id) {
     const { out, error } = cleanUserInput(body);
     if (error) return json({ error }, 400);
-    if (users.some((u) => u.username === out.username)) return json({ error: `The username “${out.username}” is already taken.` }, 400);
+    if (limited) { const bad = limitForSupervisor(me, out); if (bad) return json({ error: bad }, 403); }
+    if (all.some((u) => u.username === out.username)) return json({ error: `The username “${out.username}” is already taken.` }, 400);
     const problem = passwordProblem(body.password);
     if (problem) return json({ error: problem }, 400);
     const d = roleDefaults(out.role);
     const user = {
       id: crypto.randomUUID().replace(/-/g, '').slice(0, 16), active: true, perms: d.perms, buildings: d.buildings, ...out,
-      pw: await hashPassword(body.password), epoch: 1, createdAt: new Date().toISOString(), createdBy: me.username,
+      pw: await hashPassword(body.password), epoch: 1, createdAt: new Date().toISOString(), createdBy: me.username, createdById: me.id,
     };
-    users.push(user);
-    await saveUsers(env, users);
+    all.push(user);
+    await saveUsers(env, all);
     return json({ user: publicUser(user) });
   }
   const u = users.find((x) => x.id === id);
-  if (!u) return json({ error: 'That person no longer exists.' }, 404);
+  if (!u) return json({ error: limited && all.some((x) => x.id === id) ? 'You can only manage people you added.' : 'That person no longer exists.' }, limited && all.some((x) => x.id === id) ? 403 : 404);
   if (req.method === 'DELETE') {
     if (u.id === me.id) return json({ error: 'You can’t delete your own account.' }, 400);
-    await saveUsers(env, users.filter((x) => x.id !== id));
+    await saveUsers(env, all.filter((x) => x.id !== id));
     return json({ ok: true });
   }
   if (req.method === 'PUT') {
     const { out, error } = cleanUserInput(body, u);
     if (error) return json({ error }, 400);
-    if (out.username && out.username !== u.username && users.some((x) => x.username === out.username)) return json({ error: `The username “${out.username}” is already taken.` }, 400);
+    if (limited) { const bad = limitForSupervisor(me, out, u); if (bad) return json({ error: bad }, 403); }
+    if (out.username && out.username !== u.username && all.some((x) => x.username === out.username)) return json({ error: `The username “${out.username}” is already taken.` }, 400);
     if (u.id === me.id && (out.active === false || (out.perms && !out.perms.manage_users))) return json({ error: 'You can’t remove your own access to manage users or deactivate yourself.' }, 400);
     let signOut = out.active === false && u.active;
     if (body.password) {
@@ -267,7 +296,7 @@ async function usersApi(req, env, ctx, me, id) {
     }
     Object.assign(u, out, { updatedAt: new Date().toISOString() });
     if (signOut) u.epoch = (u.epoch || 1) + 1;
-    await saveUsers(env, users);
+    await saveUsers(env, all);
     return json({ user: publicUser(u) });
   }
   return json({ error: 'Not supported' }, 405);
@@ -1831,7 +1860,7 @@ async function handle(req, env, ctx) {
     return json({ ok: false }, 400);
   }
   if (p === '/api/users' || p.startsWith('/api/users/')) {
-    if (!can(me, 'manage_users')) return deny();
+    if (!can(me, 'manage_users') && !limitedManager(me)) return deny();
     return usersApi(req, env, ctx, me, p.split('/')[3] || null);
   }
   return new Response('Not found', { status: 404 });
