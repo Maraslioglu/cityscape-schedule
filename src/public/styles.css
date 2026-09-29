@@ -1212,3 +1212,15 @@ td.unit .u { font-weight: 600; }
 @media (max-width: 760px) { .snav button[data-group="admin"] { display: none !important; } }
 .ks-one { margin: 4px 0 14px; font-size: 15.5px; line-height: 1.55; color: var(--ink); }
 .lbx-i { color: var(--ink); font-weight: 500; }
+
+/* Confirmation pop-up */
+.modal { position: fixed; inset: 0; z-index: 80; background: rgba(30, 45, 38, .38); display: flex; align-items: center; justify-content: center; padding: 20px; animation: fade .12s; }
+.modal-card { width: 100%; max-width: 420px; background: var(--surface); border-radius: 20px; padding: 22px 22px 18px; box-shadow: 0 30px 80px -30px rgba(30, 45, 38, .6); }
+.modal-card h3 { margin: 0 0 8px; font: 500 20px/1.25 var(--font-head); color: var(--ink); }
+.modal-card p { margin: 0 0 14px; font-size: 14.5px; line-height: 1.55; color: var(--ink-2); }
+.md-l { display: block; font-size: 13px; font-weight: 600; color: var(--ink); margin: 0 0 6px; }
+.modal-card textarea { width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2); font: 15px/1.5 var(--font); color: var(--ink); resize: vertical; }
+.modal-card .form-actions { margin-top: 14px; }
+.modal-card .btn { margin-top: 0; }
+.kn-override { display: block; margin: 12px auto 0; color: var(--out); }
+.stepin-note { margin: 14px 0 8px; font-size: 13.5px; color: var(--ink-2); }

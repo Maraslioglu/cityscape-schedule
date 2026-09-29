@@ -112,9 +112,10 @@ function roleDefaults(role) {
   // For now everyone gets everything; only admins manage users unless it's ticked for them.
   const perms = Object.fromEntries(PERMS.map(([k]) => [k, true]));
   perms.manage_users = role === 'admin';
+  if (role === 'cleaner') { perms.manage_damage = false; perms.refresh = false; } // new cleaners only; existing accounts keep their ticks
   return { perms, buildings: role === 'cleaner' ? [] : 'all' };
 }
-const PBKDF2_ITER = 20000;
+const PBKDF2_ITER = typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers' ? 100000 : 600000;
 const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 async function hashPassword(pw, saltB64, iter = PBKDF2_ITER) {
@@ -183,12 +184,13 @@ function cookie(req, name) {
   const m = (req.headers.get('Cookie') || '').match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
   return m ? decodeURIComponent(m[1]) : '';
 }
-const attempts = new Map(); // per-instance login throttle
-function throttled(key) {
+const attempts = new Map(); // per-instance login throttle: by address, by address+account, and by account
+function throttled(key, max = 10) {
   const now = Date.now();
+  if (attempts.size > 5000) for (const [k, v] of attempts) if (!v.length || now - v[v.length - 1] > 10 * 60e3) attempts.delete(k);
   const list = (attempts.get(key) || []).filter((t) => now - t < 10 * 60e3);
-  attempts.set(key, list);
-  return list.length >= 10;
+  if (list.length) attempts.set(key, list); else attempts.delete(key);
+  return list.length >= max;
 }
 function recordFail(key) { (attempts.get(key) || attempts.set(key, []).get(key)).push(Date.now()); }
 
@@ -200,9 +202,17 @@ async function login(env, username, password) {
   const u = users.find((x) => x.username === username && x.active);
   if (!u) { await hashPassword(password); return null; } // same work either way, so timing doesn't reveal usernames
   if (!(await checkPassword(password, u.pw))) return null;
-  u.lastLoginAt = new Date().toISOString();
-  await saveUsers(env, users);
-  return u;
+  const pw = (u.pw.iter || 0) < PBKDF2_ITER ? await hashPassword(password) : null; // stronger hash from now on
+  // Re-read inside the lock, so an admin's change made while this sign-in was being checked isn't undone.
+  return withLock('users', async () => {
+    const fresh = await loadUsers(env, true);
+    const x = fresh.find((y) => y.id === u.id);
+    if (!x || !x.active) return null;
+    x.lastLoginAt = new Date().toISOString();
+    if (pw && x.pw && x.pw.salt === u.pw.salt) x.pw = pw;
+    await saveUsers(env, fresh);
+    return x;
+  });
 }
 
 // ---- Users API (manage_users) ----
@@ -226,7 +236,10 @@ function cleanUserInput(body, existing) {
 // Admins (and anyone given "Manage users") manage everyone, as before.
 const SUP_ROLES = ['supervisor', 'cleaner'];
 const limitedManager = (me) => me.role === 'supervisor';
-const addedBy = (u, me) => u.createdById === me.id || (!u.createdById && u.createdBy === me.username);
+const addedBy = (u, me) => u.createdById === me.id;
+// Someone a supervisor may manage must not reach beyond them (e.g. after an admin narrowed the supervisor's buildings).
+const withinReach = (me, u) => (u.buildings === 'all' ? me.buildings === 'all' || me.buildings == null : (u.buildings || []).every((b) => coversBuilding(me, b)))
+  && Object.entries(effectivePerms(u)).every(([k, v]) => !v || effectivePerms(me)[k]);
 function limitForSupervisor(me, out, existing) {
   if (out.role !== undefined && !SUP_ROLES.includes(out.role)) return 'Supervisors can add supervisors and cleaners only.';
   const role = out.role || (existing && existing.role);
@@ -245,6 +258,11 @@ function limitForSupervisor(me, out, existing) {
 }
 async function usersApi(req, env, ctx, me, id) {
   const all = await loadUsers(env, true);
+  // Accounts made before "added by" was recorded as an id: match their creator's username once, now, and keep the id.
+  if (all.some((u) => !u.createdById && u.createdBy)) {
+    for (const u of all) if (!u.createdById && u.createdBy) u.createdById = u.createdBy === 'owner' ? 'owner' : (all.find((x) => x.username === u.createdBy) || {}).id || 'unknown';
+    await saveUsers(env, all);
+  }
   const limited = limitedManager(me);
   const users = limited ? all.filter((u) => addedBy(u, me) && SUP_ROLES.includes(u.role)) : all;
   if (req.method === 'GET' && !id) {
@@ -277,6 +295,7 @@ async function usersApi(req, env, ctx, me, id) {
   }
   const u = users.find((x) => x.id === id);
   if (!u) return json({ error: limited && all.some((x) => x.id === id) ? 'You can only manage people you added.' : 'That person no longer exists.' }, limited && all.some((x) => x.id === id) ? 403 : 404);
+  if (limited && !withinReach(me, u)) return json({ error: `${u.name} has buildings or access you don’t. Ask an admin to change their account.` }, 403);
   if (req.method === 'DELETE') {
     if (u.id === me.id) return json({ error: 'You can’t delete your own account.' }, 400);
     await saveUsers(env, all.filter((x) => x.id !== id));
@@ -336,11 +355,18 @@ async function fetchToken(env) {
   if (memToken && memToken.expires_at > Date.now() + 5 * 60e3) return memToken.access_token;
   const stored = await env.STORE.get('guesty_token', 'json');
   if (stored && stored.client_id === env.GUESTY_CLIENT_ID && stored.expires_at > Date.now() + 5 * 60e3) { memToken = stored; return stored.access_token; }
-  const r = await fetch(`${GUESTY}/oauth2/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams({ grant_type: 'client_credentials', scope: 'open-api', client_id: env.GUESTY_CLIENT_ID, client_secret: env.GUESTY_CLIENT_SECRET }),
-  });
+  // Guesty allows 5 tokens a day: keep one spare, so a burst of errors can't lock the schedule out for a day.
+  const issued = ((await env.STORE.get('guesty_token_log', 'json')) || []).filter((t) => Date.now() - t < 864e5);
+  if (issued.length >= 4) throw userError('The app has asked Guesty for access 4 times today, so it’s waiting before trying again. The schedule will refresh on its own.');
+  let r;
+  try {
+    r = await fetch(`${GUESTY}/oauth2/token`, {
+      method: 'POST', signal: AbortSignal.timeout(20000),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: new URLSearchParams({ grant_type: 'client_credentials', scope: 'open-api', client_id: env.GUESTY_CLIENT_ID, client_secret: env.GUESTY_CLIENT_SECRET }),
+    });
+  } catch (e) { throw userError('Guesty isn’t answering right now. The schedule will refresh on its own.'); }
+  await env.STORE.put('guesty_token_log', JSON.stringify([...issued, Date.now()]));
   if (r.status === 429) throw userError('Guesty’s daily login limit has been reached (5 per day). The schedule will load again once it resets.');
   if (!r.ok) throw userError(`Guesty didn’t accept the API keys (error ${r.status}). Check GUESTY_CLIENT_ID and GUESTY_CLIENT_SECRET in Railway.`);
   const d = await r.json();
@@ -353,11 +379,15 @@ function userError(msg, status = 502) { const e = new Error(msg); e.userMessage 
 
 async function gapi(env, method, path, { params, body } = {}, attempt = 0) {
   const qs = params ? '?' + new URLSearchParams(Object.entries(params).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)])) : '';
-  const r = await fetch(`${GUESTY}${path}${qs}`, {
-    method,
-    headers: { Authorization: `Bearer ${await getToken(env)}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const token = await getToken(env);
+  let r;
+  try {
+    r = await fetch(`${GUESTY}${path}${qs}`, {
+      method, signal: AbortSignal.timeout(30000),
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) { console.log('[guesty]', e.name, path); throw userError('Guesty isn’t answering right now. Try again in a minute.'); }
   if (r.status === 401 && attempt === 0) { memToken = null; await env.STORE.delete('guesty_token'); return gapi(env, method, path, { params, body }, 1); }
   if (r.status === 429 && attempt < 3) { await new Promise((ok) => setTimeout(ok, 800 * (attempt + 1))); return gapi(env, method, path, { params, body }, attempt + 1); }
   const text = await r.text();
@@ -713,6 +743,18 @@ const londonDate = (iso) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe
 const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
 
 async function loadList(env, key) { return (await env.STORE.get(key, 'json')) || []; }
+// One change at a time per list. Everything is saved in one shared data file; a change that reads a list, waits for
+// something (KeyNest, a password check…) and then saves it could otherwise undo a change saved in between.
+// The app runs as one process on Railway, so an in-memory queue per list is enough.
+const locks = new Map();
+function withLock(key, fn) {
+  const prev = locks.get(key) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.then(() => {}, () => {});
+  locks.set(key, tail);
+  tail.then(() => { if (locks.get(key) === tail) locks.delete(key); });
+  return run;
+}
 async function saveList(env, key, list) { await env.STORE.put(key, JSON.stringify(list)); }
 
 async function listingInfo(env, ctx, listingId) {
@@ -723,12 +765,13 @@ function inScope(u, building) {
   const allow = allowBuildingFor(u);
   return !allow || allow(building);
 }
-async function mediaReady(env, ids, kindWanted) {
+async function mediaReady(env, ids, kindWanted, accept) {
   const out = [];
   for (const id of ids || []) {
     const m = await env.STORE.get('media:' + id, 'json');
     if (!m || !m.uploaded) continue;
     if (kindWanted && m.kind !== kindWanted) continue;
+    if (accept && !accept(m)) continue;
     out.push(m);
   }
   return out;
@@ -772,10 +815,16 @@ const KEYNEST_IN = /^(in store|in locker|in office)/i;
 let knCache = null; // { at, keys }
 async function keynestGet(env, path, { base, body } = {}) {
   if (!env.KEYNEST_API_KEY) throw userError('KeyNest isn’t connected yet. An admin needs to add KEYNEST_API_KEY in Railway.', 400);
-  const r = await fetch((base || env.KEYNEST_API_URL || KEYNEST_DEFAULT) + path, {
-    method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(8000),
-    headers: { ApiKey: env.KEYNEST_API_KEY, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
-  });
+  let r;
+  try {
+    r = await fetch((base || env.KEYNEST_API_URL || KEYNEST_DEFAULT) + path, {
+      method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(8000),
+      headers: { ApiKey: env.KEYNEST_API_KEY, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    });
+  } catch (e) {
+    console.log('[keynest]', path.split('/')[1], e.name, e.message);
+    throw userError(e.name === 'TimeoutError' ? 'KeyNest took too long to answer. Try again in a minute.' : 'KeyNest isn’t answering right now. Try again in a minute.', 502);
+  }
   const text = await r.text();
   let j = null; try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
   if (!r.ok || !j || (j.Status && j.Status !== 'Success')) {
@@ -1286,7 +1335,24 @@ async function assignmentsApi(req, env, ctx, me, url) {
   return json({ error: 'Not supported' }, 405);
 }
 
-async function cleaningsApi(req, env, ctx, me, parts, url) {
+// Before a cleaning's key step is saved: ask KeyNest where the key is (outside the one-at-a-time queue, as it can take
+// seconds). Not for overrides, which don't need KeyNest to answer.
+async function keyPrecheck(req, env, ctx, parts) {
+  const [, , , id, action] = parts;
+  if (req.method !== 'POST' || action !== 'key' || !env.KEYNEST_API_KEY) return null;
+  const body = await req.json().catch(() => ({}));
+  if (body.override === true) return null;
+  const rec = (await loadList(env, 'cleanings')).find((c) => c.id === id);
+  if (!rec || rec.keyMode !== 'keynest' || rec.status !== 'awaiting_key') return null;
+  const l = await listingInfo(env, ctx, rec.listingId);
+  let link = null;
+  try { link = l && await keynestLink(env, l); } catch (e) { return { error: e.userMessage || 'KeyNest isn’t answering right now. Try again in a minute.' }; }
+  if (!link) return { link: null };
+  try { return { link, chk: await keynestCheck(env, link.keyId) }; } catch (e) { return { link, error: e.userMessage || 'KeyNest isn’t answering right now. Try again in a minute.' }; }
+}
+// Admin, User and supervisor roles can finish someone else's cleaning at the key step, and override the KeyNest check.
+const canStepIn = (me, rec) => ['admin', 'user', 'supervisor'].includes(me.role) && inScope(me, rec.building);
+async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   const [, , , id, action] = parts; // /api/cleanings/:id/:action
   const list = await loadList(env, 'cleanings');
   const deny = (msg) => json({ error: msg || 'You don’t have permission for that. Ask an admin.' }, 403);
@@ -1335,7 +1401,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
   const rec = list.find((c) => c.id === id);
   if (!rec) return json({ error: 'That cleaning wasn’t found.' }, 404);
   const isMine = rec.cleanerId === me.id;
-  const isAdmin = can(me, 'manage_users');
+  const isAdmin = can(me, 'manage_users') && inScope(me, rec.building);
+  const stepIn = canStepIn(me, rec);
 
   if (req.method === 'POST' && action === 'end') {
     if (!isMine) return deny('Only the person who started this cleaning can end it.');
@@ -1374,16 +1441,21 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
   const finish = async () => {
     rec.completedAt = nowIso();
     rec.status = 'completed';
+    if (rec.cleanerId !== me.id) { rec.completedBy = me.name; rec.completedById = me.id; }
     await saveList(env, 'cleanings', list);
+    if (rec.cleanerId !== me.id) await notify(env, ctx, [rec.cleanerId], { type: 'cleaned', title: `${me.name} finished your cleaning · ${rec.label}`,
+      body: rec.key && rec.key.overridden ? 'The KeyNest check was overridden.' : 'The key step was completed for you.', url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch(() => {});
     const mins = Math.max(1, Math.round((Date.parse(rec.endedAt || rec.completedAt) - Date.parse(rec.startedAt)) / 60000));
     await notify(env, ctx, await recipients(env, ['admin', 'user'], rec.building, rec.cleanerId), {
       type: 'cleaned', title: `${rec.label} cleaned`, body: `${rec.cleanerName} · ${rec.building} · ${mins} min`,
       url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch((e) => console.log('[notify] failed', e.message));
     ctx.waitUntil((async () => {
       const g = await markCleanInGuesty(env, rec.listingId);
-      const l2 = await loadList(env, 'cleanings');
-      const r2 = l2.find((c) => c.id === rec.id);
-      if (r2) { r2.guesty = g; await saveList(env, 'cleanings', l2); }
+      await withLock('cleanings', async () => {
+        const l2 = await loadList(env, 'cleanings');
+        const r2 = l2.find((c) => c.id === rec.id);
+        if (r2) { r2.guesty = g; await saveList(env, 'cleanings', l2); }
+      });
     })());
     return json({ cleaning: await withMedia(env, rec) });
   };
@@ -1392,9 +1464,10 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     if (rec.status !== 'awaiting_video') return json({ error: 'Finish the checklist first.' }, 400);
     const body = await req.json().catch(() => ({}));
     const ids = [...new Set([...(body.videoIds || []), ...(body.photoIds || [])].map(String))];
-    const videos = await mediaReady(env, ids, 'video');
+    const own = (m) => m.purpose === 'cleaning' && m.ownerId === rec.id && m.byId === me.id; // filmed for this cleaning
+    const videos = await mediaReady(env, ids, 'video', own);
     if (!videos.length) return json({ error: 'A video of the flat is required before you can finish.' }, 400);
-    const all = await mediaReady(env, ids);
+    const all = await mediaReady(env, ids, null, own);
     rec.media = all.map((m) => m.id);
     rec.videoAt = nowIso();
     // Flats tagged LOCKBOX or KEYNEST in Guesty have one more step: returning the key.
@@ -1410,7 +1483,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
   }
   if (req.method === 'GET' && action === 'key-status') {
     // Live KeyNest status for the cleaner's "key back in KeyNest" screen.
-    if (!isMine && !isAdmin) return deny();
+    if (!isMine && !stepIn) return deny();
     if (rec.keyMode !== 'keynest') return json({ ok: false, status: null });
     if (!env.KEYNEST_API_KEY) return json({ ok: false, status: null, error: 'KeyNest isn’t connected yet. Ask an admin.' });
     const l = await listingInfo(env, ctx, rec.listingId);
@@ -1420,7 +1493,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
   }
   if (req.method === 'GET' && action === 'key-stores') {
     // Where to drop the key off: the nearest KeyNest to the flat, and the nearest one open 24 hours.
-    if (!isMine && !isAdmin) return deny();
+    if (!isMine && !stepIn) return deny();
     if (rec.keyMode !== 'keynest') return json({ nearest: null, nearest24: null });
     const l = await listingInfo(env, ctx, rec.listingId);
     const at = l && await flatLatLng(l);
@@ -1443,7 +1516,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
     return json({ nearest, nearest24, usual });
   }
   if (req.method === 'POST' && action === 'key') {
-    if (!isMine) return deny();
+    if (!isMine && !stepIn) return deny('Only the cleaner, or an Admin, User or supervisor, can finish this cleaning.');
     if (rec.status !== 'awaiting_key') return json({ error: rec.status === 'completed' ? 'This cleaning is already complete.' : 'Upload the video first.' }, 400);
     const body = await req.json().catch(() => ({}));
     if (rec.keyMode === 'lockbox') {
@@ -1463,12 +1536,23 @@ async function cleaningsApi(req, env, ctx, me, parts, url) {
       await env.STORE.put('lockboxCodes', JSON.stringify(codes));
       return finish();
     }
+    if (rec.keyMode === 'keynest' && body.override === true) {
+      // Finishing without KeyNest confirming the key is back: Admin, User or supervisor only, and recorded.
+      if (!stepIn) return json({ error: 'Only Admins, Users and supervisors can override the KeyNest check.' }, 403);
+      const l = await listingInfo(env, ctx, rec.listingId);
+      let keyId = null; try { keyId = l ? ((await keynestLink(env, l)) || {}).keyId || null : null; } catch (_) { /* KeyNest down: that's often why */ }
+      rec.key = { mode: 'keynest', keyId, status: 'not checked', overridden: true, overriddenBy: me.name, overriddenById: me.id, confirmedAt: nowIso(),
+        note: String(body.note || '').trim().slice(0, 300) || null };
+      console.log(`[keynest] ${me.name} overrode the KeyNest check for ${rec.label} (cleaning ${rec.id} by ${rec.cleanerName})`);
+      return finish();
+    }
     if (rec.keyMode === 'keynest') {
       if (!env.KEYNEST_API_KEY) return json({ error: 'KeyNest isn’t connected yet. Ask an admin.' }, 400);
       const l = await listingInfo(env, ctx, rec.listingId);
       const link = l && await keynestLink(env, l);
       if (!link) return json({ error: 'This flat isn’t linked to a KeyNest key yet. Ask an admin to link it in Settings › Integrations › KeyNest.' }, 400);
-      const chk = await keynestCheck(env, link.keyId);
+      if (pre && pre.error) return json({ error: pre.error }, 502);
+      const chk = pre && pre.chk && pre.link && pre.link.keyId === link.keyId ? pre.chk : await keynestCheck(env, link.keyId);
       if (!chk.ok) return json({ error: `KeyNest doesn’t show the key in the store yet (status: ${chk.status}). Hand it in at the KeyNest store, then check again.`, keynest: chk }, 409);
       rec.key = { mode: 'keynest', keyId: link.keyId, status: chk.status, lastMovement: chk.lastMovement, confirmedAt: nowIso() };
       return finish();
@@ -1516,7 +1600,7 @@ async function damagesApi(req, env, ctx, me, parts, url) {
     if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
     const description = String(body.description || '').trim().slice(0, 2000);
     if (description.length < 3) return json({ error: 'Describe what’s damaged.' }, 400);
-    const media = await mediaReady(env, (body.mediaIds || []).map(String));
+    const media = await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => m.purpose === 'damage' && m.listingId === l.id && m.byId === me.id);
     if (!media.length) return json({ error: 'Add a video or photo of the damage.' }, 400);
     const rec = {
       id: newId(), listingId: l.id, listingName: l.name, label: l.label, building: l.building,
@@ -1641,7 +1725,7 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
       id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
       priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due: null, repeat: null, cost: null,
       reporterId: me.id, reporterName: me.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
-      media: (await mediaReady(env, (body.mediaIds || []).map(String))).map((m) => m.id), log: [], damageId: body.damageId ? String(body.damageId) : null,
+      media: (await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => ['maintenance', 'damage'].includes(m.purpose) && m.listingId === l.id && (m.byId === me.id || isManager(me)))).map((m) => m.id), log: [], damageId: body.damageId ? String(body.damageId) : null,
     };
     t.seriesId = t.id;
     if (isManager(me)) { // triage details come from Admins and Users
@@ -1709,7 +1793,7 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
   }
   if (req.method === 'POST' && action === 'notes') {
     if (!canMove(t) && t.reporterId !== me.id) return json({ error: 'You can’t add notes to this task.' }, 403);
-    const txt = text(body.text, 2000), media = (await mediaReady(env, (body.mediaIds || []).map(String))).map((m) => m.id);
+    const txt = text(body.text, 2000), media = (await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => m.purpose === 'maintenance' && m.listingId === t.listingId && m.byId === me.id)).map((m) => m.id);
     if (!txt && !media.length) return json({ error: 'Write a note or add a photo.' }, 400);
     log(t, txt || `Added ${media.length} photo${media.length === 1 ? '' : 's'}/video${media.length === 1 ? '' : 's'}`, 'note');
     t.media = [...new Set([...(t.media || []), ...media])];
@@ -1823,10 +1907,10 @@ async function handle(req, env, ctx) {
   if (p === '/login' && req.method === 'POST') {
     const form = await req.formData().catch(() => null);
     const username = String((form && form.get('username')) || '').trim().toLowerCase();
-    const tkey = ip + '|' + username;
-    if (throttled(tkey) || throttled(ip)) return redirect('/login?e=locked');
+    const tkey = ip + '|' + username, akey = 'acct|' + username;
+    if (throttled(tkey) || throttled(ip) || throttled(akey, 20)) return redirect('/login?e=locked');
     const user = await login(env, username, (form && form.get('password')) || '');
-    if (!user) { recordFail(tkey); recordFail(ip); return redirect('/login?e=1&u=' + encodeURIComponent(username)); }
+    if (!user) { recordFail(tkey); recordFail(ip); recordFail(akey); console.log(`[login] failed for "${username.slice(0, 40)}"`); return redirect('/login?e=1&u=' + encodeURIComponent(username)); }
     return redirect('/', { 'Set-Cookie': `cs_session=${await makeSession(env, user)}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}` });
   }
   if (p === '/logout') return redirect('/login', { 'Set-Cookie': 'cs_session=; HttpOnly; Secure; Path=/; Max-Age=0' });
@@ -1867,7 +1951,7 @@ async function handle(req, env, ctx) {
     return json(await weekData(env, ctx, url.searchParams.get('date'), fresh, me));
   }
   if (p === '/api/properties') return can(me, 'view_properties') ? json(await propertiesData(env, ctx, me)) : deny();
-  if (p.startsWith('/api/properties/') && req.method === 'PUT') return propertyEditApi(req, env, ctx, me, decodeURIComponent(p.split('/')[3] || ''));
+  if (p.startsWith('/api/properties/') && req.method === 'PUT') return withLock('propertyOverrides', () => propertyEditApi(req, env, ctx, me, decodeURIComponent(p.split('/')[3] || '')));
   if (p.startsWith('/api/lockbox/') && req.method === 'GET') {
     // The flat's current lockbox code, for its panel: cleaners check it every time they arrive.
     const l = await listingInfo(env, ctx, decodeURIComponent(p.split('/')[3] || ''));
@@ -1879,14 +1963,19 @@ async function handle(req, env, ctx) {
     const hook = config(env).mock ? 'preview' : (await env.STORE.get('webhook_url')) ? 'registered' : 'pending';
     return json({ version: dataVersion(snap), at: snap.at, webhook: hook });
   }
-  if (p === '/api/cleanings' || p.startsWith('/api/cleanings/')) return cleaningsApi(req, env, ctx, me, p.split('/'), url);
-  if (p === '/api/keynest' || p.startsWith('/api/keynest/')) return keynestAdminApi(req, env, ctx, me, p.split('/'));
-  if (p === '/api/damages' || p.startsWith('/api/damages/')) return damagesApi(req, env, ctx, me, p.split('/'), url);
-  if (p === '/api/notifications' || p.startsWith('/api/notifications/')) return notificationsApi(req, env, me, p.split('/'));
-  if (p.startsWith('/api/push/')) return pushApi(req, env, me, p.split('/'));
-  if (p === '/api/assignments' || p === '/api/assignees') return assignmentsApi(req, env, ctx, me, url);
-  if (p === '/api/forum' || p.startsWith('/api/forum/')) return forumApi(req, env, ctx, me, p.split('/'));
-  if (p === '/api/maintenance' || p.startsWith('/api/maintenance/')) return maintenanceApi(req, env, ctx, me, p.split('/'), url);
+  const locked = (key, fn) => (req.method === 'GET' ? fn() : withLock(key, fn)); // reads never wait
+  if (p === '/api/cleanings' || p.startsWith('/api/cleanings/')) {
+    if (req.method === 'GET') return cleaningsApi(req, env, ctx, me, p.split('/'), url);
+    const pre = await keyPrecheck(req.clone(), env, ctx, p.split('/')); // KeyNest can take seconds: ask it before queuing
+    return withLock('cleanings', () => cleaningsApi(req, env, ctx, me, p.split('/'), url, pre));
+  }
+  if (p === '/api/keynest' || p.startsWith('/api/keynest/')) return locked('keynestLinks', () => keynestAdminApi(req, env, ctx, me, p.split('/')));
+  if (p === '/api/damages' || p.startsWith('/api/damages/')) return locked('damages', () => damagesApi(req, env, ctx, me, p.split('/'), url));
+  if (p === '/api/notifications' || p.startsWith('/api/notifications/')) return locked('notifications', () => notificationsApi(req, env, me, p.split('/')));
+  if (p.startsWith('/api/push/')) return locked('pushSubs', () => pushApi(req, env, me, p.split('/')));
+  if (p === '/api/assignments' || p === '/api/assignees') return locked('assignments', () => assignmentsApi(req, env, ctx, me, url));
+  if (p === '/api/forum' || p.startsWith('/api/forum/')) return locked('forum', () => forumApi(req, env, ctx, me, p.split('/')));
+  if (p === '/api/maintenance' || p.startsWith('/api/maintenance/')) return locked('maintenance', () => maintenanceApi(req, env, ctx, me, p.split('/'), url));
   // Internal checks used by server.mjs for uploads and playback (same-process only; not reachable from outside).
   if (p === '/api/internal/media-check' && req.headers.get('x-internal') === env.__INTERNAL_KEY) {
     const body = await req.json().catch(() => ({}));
@@ -1897,6 +1986,7 @@ async function handle(req, env, ctx) {
       if (body.purpose === 'cleaning') { const c = (await loadList(env, 'cleanings')).find((x) => x.id === body.ownerId); building = c && c.building; }
       return json({ ok: true, user: { id: me.id, name: me.name }, building });
     }
+    if (body.mode === 'admin') return json({ ok: me.role === 'admin', user: { id: me.id, name: me.name } }); // backups: Admins only
     if (body.mode === 'view') {
       const m = await env.STORE.get('media:' + body.id, 'json');
       return json({ ok: Boolean(m && (await mediaViewAllowed(env, me, m))), userId: me.id });
@@ -1905,7 +1995,7 @@ async function handle(req, env, ctx) {
   }
   if (p === '/api/users' || p.startsWith('/api/users/')) {
     if (!can(me, 'manage_users') && !limitedManager(me)) return deny();
-    return usersApi(req, env, ctx, me, p.split('/')[3] || null);
+    return (req.method === 'GET' ? usersApi : (...a) => withLock('users', () => usersApi(...a)))(req, env, ctx, me, p.split('/')[3] || null);
   }
   return new Response('Not found', { status: 404 });
 }

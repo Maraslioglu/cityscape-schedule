@@ -27,19 +27,63 @@ const HAS_ZSCALE = HAS_FFMPEG && /\bzscale\b/.test(spawnSync('ffmpeg', ['-hide_b
 // Damage-report media is never deleted. The playback copy is kept.
 const KEEP_ORIGINAL_DAYS = Number(process.env.KEEP_ORIGINAL_DAYS ?? 30);
 
-// ---------------- simple key-value storage saved to disk ----------------
-let data = {};
-try { data = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) {}
-let saveTimer = null;
-const save = () => {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
+// ---------------- key-value storage saved to disk (store.json) ----------------
+// Every save writes a temp file, flushes it to disk and swaps it in; the previous version is kept as store.json.bak
+// and a copy is kept per day in backups/ (the last 14). If store.json can't be read at start-up, the newest good copy
+// is used instead — and if none can be read, the app stops rather than starting empty and overwriting real data.
+const BACKUPS = path.join(DIR, 'backups');
+fs.mkdirSync(BACKUPS, { recursive: true });
+if (process.env.RAILWAY_ENVIRONMENT && !process.env.DATA_DIR && DIR !== '/data') { console.log('[store] FATAL: the /data volume isn’t mounted. Not starting.'); process.exit(1); }
+const backupFiles = () => fs.readdirSync(BACKUPS).filter((n) => /^store-\d{4}-\d{2}-\d{2}\.json$/.test(n)).sort();
+let restoredFrom = null;
+function loadStore() {
+  const candidates = [FILE, FILE + '.bak', ...backupFiles().reverse().map((n) => path.join(BACKUPS, n))].filter((f) => fs.existsSync(f));
+  if (!candidates.length) return {}; // first run
+  for (const f of candidates) {
     try {
-      fs.writeFileSync(FILE + '.tmp', JSON.stringify(data));
-      fs.renameSync(FILE + '.tmp', FILE);
-    } catch (e) { console.log('[store] could not save', e.message); } // e.g. disk full: keep running, retry on next change
-  }, 200);
+      const d = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('not a store');
+      if (f !== FILE) { restoredFrom = f; console.log(`[store] WARNING: ${FILE} couldn’t be read, so the app is using ${f}`); }
+      return d;
+    } catch (e) {
+      console.log(`[store] ${f} can’t be read: ${e.message}`);
+      if (f === FILE) try { fs.copyFileSync(FILE, `${FILE}.unreadable-${Date.now()}`); } catch (_) {}
+    }
+  }
+  console.log('[store] FATAL: store.json and all its backups are unreadable. Not starting, so nothing gets overwritten.');
+  process.exit(1);
+}
+let data = loadStore();
+let saveTimer = null, firstPending = 0, lastSaveError = null, lastSavedAt = 0;
+function dailyBackup() {
+  const f = path.join(BACKUPS, `store-${new Date().toISOString().slice(0, 10)}.json`);
+  if (fs.existsSync(f) || !fs.existsSync(FILE)) return;
+  try {
+    fs.copyFileSync(FILE, f);
+    for (const old of backupFiles().slice(0, -14)) fs.rmSync(path.join(BACKUPS, old), { force: true });
+    console.log(`[backup] saved ${path.basename(f)}`);
+  } catch (e) { console.log('[backup] failed', e.message); }
+}
+function writeNow() {
+  clearTimeout(saveTimer); saveTimer = null; firstPending = 0;
+  try {
+    const tmp = FILE + '.tmp';
+    const fd = fs.openSync(tmp, 'w');
+    try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    if (fs.existsSync(FILE)) fs.renameSync(FILE, FILE + '.bak');
+    fs.renameSync(tmp, FILE);
+    lastSaveError = null; lastSavedAt = Date.now();
+    dailyBackup();
+  } catch (e) { lastSaveError = e.message; console.log('[store] could not save', e.message); } // e.g. disk full: keep running, retry on next change
+}
+const save = () => {
+  if (!firstPending) firstPending = Date.now();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(writeNow, Date.now() - firstPending > 2000 ? 0 : 200); // group quick changes, but never wait over 2 s
 };
+// Railway stops the old copy on every deploy: save anything pending first.
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { if (saveTimer) writeNow(); process.exit(0); });
+dailyBackup();
 const STORE = {
   async get(key, type) {
     const e = data[key];
@@ -124,9 +168,10 @@ function run(args) {
     const p = spawn('ffmpeg', ['-hide_banner', '-nostdin', ...args], { stdio: ['ignore', 'ignore', 'pipe'] });
     try { os.setPriority(p.pid, 15); } catch (_) {} // low priority, so the app stays quick while a video converts
     let err = '';
+    const timer = setTimeout(() => { err += ' [stopped: took over 3 hours]'; try { p.kill('SIGKILL'); } catch (_) {} }, 3 * 3600e3);
     p.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
-    p.on('error', (e) => resolve({ code: -1, err: e.message }));
-    p.on('close', (code) => resolve({ code, err }));
+    p.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, err: e.message }); });
+    p.on('close', (code) => { clearTimeout(timer); resolve({ code, err }); });
   });
 }
 // What was actually uploaded: resolution (as shown, i.e. after the phone's rotation), frame rate, codec, HDR.
@@ -134,6 +179,7 @@ function probe(file) {
   if (!HAS_FFPROBE) return Promise.resolve(null);
   return new Promise((resolve) => {
     const p = spawn('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', file], { stdio: ['ignore', 'pipe', 'ignore'] });
+    setTimeout(() => { try { p.kill('SIGKILL'); } catch (_) {} }, 120e3);
     let out = '';
     p.stdout.on('data', (d) => { out += d; });
     p.on('error', () => resolve(null));
@@ -257,6 +303,16 @@ async function sweepMedia() {
   await freeSpace();
 }
 
+// Up to 40 GB a day per person (about ten long 4K walkthroughs), so one account can't fill the disk.
+const DAILY_UPLOAD = Number(process.env.DAILY_UPLOAD_GB || 40) * 1024 ** 3;
+const uploads = new Map();
+function uploadedToday(userId) {
+  const day = new Date().toISOString().slice(0, 10);
+  let q = uploads.get(userId);
+  if (!q || q.day !== day) { q = { day, bytes: 0 }; uploads.set(userId, q); }
+  return q;
+}
+
 // ---------------- media routes ----------------
 async function mediaRoute(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean); // api, media, :id, :action  |  media, :id[, thumb]
@@ -270,8 +326,8 @@ async function mediaRoute(req, res, url) {
     const c = await check(req, { mode: 'upload', purpose: body.purpose, ownerId: body.ownerId, listingId: body.listingId });
     if (c.status === 401) return sendJson(res, 401, { error: 'Not signed in' });
     if (!c.ok) return sendJson(res, 403, { error: 'You can’t upload for this right now.' });
-    await freeSpace(size + LOW_WATER);
-    if (freeBytes() < size + FREE_MARGIN) {
+    // Space is freed as the file actually arrives (see PUT); starting an upload can't make the server delete anything.
+    if (freeBytes() < Math.min(size, 2 * 1024 ** 3) + FREE_MARGIN) {
       console.log(`[media] refused ${Math.round(size / 1e6)} MB upload: only ${Math.round(freeBytes() / 1e9)} GB free`);
       return sendJson(res, 507, { error: 'The server is out of space for videos. Please tell an admin.' });
     }
@@ -309,6 +365,8 @@ async function mediaRoute(req, res, url) {
       const onDisk = fs.statSync(f).size;
       if (onDisk < offset) { req.resume(); m.received = onDisk; await putMeta(m); return sendJson(res, 409, { received: onDisk }); }
       if (onDisk > offset) await fsp.truncate(f, offset);
+      const quota = uploadedToday(m.byId);
+      if (quota.bytes > DAILY_UPLOAD) { req.resume(); return sendJson(res, 429, { received: offset, error: 'You’ve uploaded a lot today. Please ask an admin if you need to upload more.' }); }
       if (freeBytes() < MAX_CHUNK + 512 * 1024 ** 2) await freeSpace(MAX_CHUNK + FREE_MARGIN);
       if (freeBytes() < MAX_CHUNK + 512 * 1024 ** 2) { req.resume(); return sendJson(res, 507, { received: offset, error: 'The server is out of space for videos. Please tell an admin.' }); }
       const out = fs.createWriteStream(f, { flags: 'a' });
@@ -325,6 +383,7 @@ async function mediaRoute(req, res, url) {
         return sendJson(res, 507, { received: offset, error: 'The server couldn’t save the video. Please tell an admin.' });
       }
       const actual = fs.statSync(f).size;
+      quota.bytes += Math.max(0, actual - offset);
       m.received = actual;
       m.lastChunkAt = new Date().toISOString();
       if (tooBig) { await fsp.truncate(f, offset); m.received = offset; await putMeta(m); return sendJson(res, 413, { received: offset }); }
@@ -371,12 +430,52 @@ async function mediaRoute(req, res, url) {
       if (start >= stat.size || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` }); return res.end(); }
       end = Math.min(end, stat.size - 1);
       res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Content-Length': end - start + 1 });
-      return fs.createReadStream(file, { start, end }).pipe(res);
+      return fs.createReadStream(file, { start, end }).on('error', () => res.destroy()).pipe(res);
     }
     res.writeHead(200, { ...headers, 'Content-Length': stat.size });
-    return fs.createReadStream(file).pipe(res);
+    return fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
   }
   return false;
+}
+
+// ---------------- status (for an uptime monitor) and backups (Admins) ----------------
+const MAX_BODY = 1024 * 1024;
+const bootAt = Date.now();
+// /status: 200 when all is well, 503 when something needs attention. No private data.
+function sendStatus(res) {
+  let snap = null; try { snap = data.snapshot ? JSON.parse(data.snapshot.v) : null; } catch (_) {}
+  const freeGb = Math.round(freeBytes() / 1e8) / 10;
+  const snapMins = snap && snap.at ? Math.round((Date.now() - snap.at) / 60000) : null;
+  const problems = [];
+  if (lastSaveError) problems.push(`Saving data failed: ${lastSaveError}`);
+  if (restoredFrom) problems.push(`store.json couldn’t be read at start-up; running from ${path.basename(restoredFrom)}`);
+  if (freeGb < 10) problems.push(`Only ${freeGb} GB of disk left`);
+  if (snapMins === null || snapMins > 30) problems.push(snapMins === null ? 'No bookings loaded from Guesty yet' : `Bookings last loaded from Guesty ${snapMins} min ago`);
+  if (queue.length > 20) problems.push(`${queue.length} videos waiting to be processed`);
+  sendJson(res, problems.length ? 503 : 200, {
+    ok: !problems.length, problems, bookingsLoadedMinutesAgo: snapMins, diskFreeGb: freeGb, lastSavedSecondsAgo: lastSavedAt ? Math.round((Date.now() - lastSavedAt) / 1000) : null,
+    backups: backupFiles().length, videoQueue: queue.length, upSinceMinutes: Math.round((Date.now() - bootAt) / 60000),
+  });
+}
+// Admins can download the app's data: today's live copy or one of the daily backups. (Videos and photos aren't
+// included — they stay on the volume.) The file holds everything, including password hashes: keep it safe.
+async function backupsRoute(req, res, url) {
+  const c = await check(req, { mode: 'admin' });
+  if (c.status === 401) return sendJson(res, 401, { error: 'Not signed in' });
+  if (!c.ok) return sendJson(res, 403, { error: 'Only Admins can download backups.' });
+  const name = url.pathname.split('/')[4] || '';
+  if (req.method === 'GET' && !name) {
+    return sendJson(res, 200, { backups: backupFiles().reverse().map((n) => ({ name: n, day: n.slice(6, 16), size: fs.statSync(path.join(BACKUPS, n)).size })) });
+  }
+  if (req.method !== 'GET') return sendJson(res, 405, { error: 'Not supported' });
+  let file;
+  if (name === 'now') { if (saveTimer) writeNow(); file = FILE; }
+  else if (/^store-\d{4}-\d{2}-\d{2}\.json$/.test(name) && fs.existsSync(path.join(BACKUPS, name))) file = path.join(BACKUPS, name);
+  else return sendJson(res, 404, { error: 'That backup wasn’t found.' });
+  console.log(`[backup] ${c.user.name} downloaded ${name === 'now' ? 'the live data' : name}`);
+  const stamp = name === 'now' ? new Date().toISOString().slice(0, 16).replace(':', '') : name.slice(6, 16);
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="cityscape-schedule-data-${stamp}.json"`, 'Content-Length': fs.statSync(file).size });
+  fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
 }
 
 // ---------------- HTTP server ----------------
@@ -390,11 +489,18 @@ http.createServer(async (req, res) => {
     }
     if (url.pathname.startsWith('/api/internal/')) return sendJson(res, 404, { error: 'Not found' });
 
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
+    if (url.pathname === '/status') return sendStatus(res);
+    if (url.pathname.startsWith('/api/admin/backups')) return backupsRoute(req, res, url);
+
+    // Everything except video/photo uploads is small: refuse bodies over 1 MB before reading them into memory.
+    if (Number(req.headers['content-length'] || 0) > MAX_BODY) { req.resume(); return sendJson(res, 413, { error: 'That request is too large.' }); }
+    const chunks = []; let size = 0;
+    for await (const c of req) { size += c.length; if (size > MAX_BODY) { req.destroy(); return; } chunks.push(c); }
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) if (v != null) headers.set(k, Array.isArray(v) ? v.join(', ') : v);
-    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    // Railway's proxy adds the real address at the end of X-Forwarded-For; anything before it came from the browser.
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const ip = fwd.length ? fwd[fwd.length - 1] : req.socket.remoteAddress || '';
     headers.set('CF-Connecting-IP', ip);
     headers.delete('x-internal');
     const request = new Request(`${origin(req)}${req.url}`, {
