@@ -251,9 +251,9 @@
       $('props-sub').textContent = `${p.total} flats · ${counts}`;
       $('props').innerHTML = p.buildings.map((b) => `<div class="card pcard">
         <h3>${esc(b.name)}</h3><div class="pc">${esc(b.postcode)}</div>
-        ${b.units.map((u) => `<div class="prow${u.hidden ? ' off' : ''}" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span>${p.canManage ? `<button class="btn pedit" data-edit="${esc(u.id)}" aria-label="Edit ${esc(u.label)}">Edit</button>` : ''}</div>
+        ${b.units.map((u) => `<div class="prow${u.hidden ? ' off' : ''}" title="${esc(u.address)}"><span class="u">${esc(u.label)}</span><span>${esc(shortType(u.unitType))}</span><span class="t">Out ${esc(u.checkOut)} · In ${esc(u.checkIn)}</span>${p.canEdit ? `<button class="btn pedit" data-edit="${esc(u.id)}" aria-label="Edit ${esc(u.label)}">Edit</button>` : ''}</div>
           ${u.hidden || u.edited ? `<div class="ptags">${u.hidden ? '<span class="ptag off">Hidden from the schedule</span>' : ''}${u.edited ? `<span class="ptag" title="${u.editedBy ? `Changed by ${esc(u.editedBy)}${u.editedAt ? `, ${esc(fmtWhen(u.editedAt))}` : ''}` : ''}">Edited in the app</span>` : ''}</div>` : ''}
-          ${u.keyMode === 'lockbox' ? (u.lockboxNoCode ? noCodeBlock(u.keyInstruction) : lockboxBlock(u.lockbox)) : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key must be back in KeyNest after each clean</span></div>' : ''}`).join('')}
+          ${u.keyMode === 'lockbox' ? (u.lockboxNoCode ? noCodeBlock(u.keyInstruction) : lockboxBlock(u.lockbox, p.canEditCode && u.id)) : u.keyMode === 'keynest' ? '<div class="pnote"><span class="kbadge kn">KeyNest</span><span>Key must be back in KeyNest after each clean</span></div>' : ''}`).join('')}
       </div>`).join('');
       // KeyNest flats that aren't linked to a KeyNest key can't be completed by cleaners: say so at the top.
       const kn = p.keynest || { unlinked: [] };
@@ -272,16 +272,52 @@
   // The lockbox code, big: cleaners check it every time they arrive.
   const noCodeBlock = (instr) => (instr ? `<div class="lbx none"><span class="lbx-k">Key</span><span class="lbx-by lbx-i" title="${esc(instr)}">${esc(instr)}</span></div>`
     : '<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code needed</span></div>');
-  const lockboxBlock = (lb) => (lb
-    ? `<div class="lbx" title="Set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}"><span class="lbx-k">Lockbox code</span><b class="lbx-code">${esc(lb.code)}</b><span class="lbx-by">set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}</span></div>`
-    : '<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code recorded yet</span></div>');
+  // editFor: the flat's id when this person may change the code here (Properties page).
+  const codeBtn = (id, lb) => (id ? `<button class="linkbtn lbx-edit" data-code="${esc(id)}">${lb ? 'Edit code' : 'Add code'}</button>` : '');
+  const lockboxBlock = (lb, editFor) => (lb
+    ? `<div class="lbx" title="Set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}"><span class="lbx-k">Lockbox code</span><b class="lbx-code">${esc(lb.code)}</b><span class="lbx-by">set by ${esc(lb.by)}, ${esc(fmtWhen(lb.at))}</span>${codeBtn(editFor, lb)}</div>`
+    : `<div class="lbx none"><span class="lbx-k">Lockbox</span><span class="lbx-by">No code recorded yet</span>${codeBtn(editFor, null)}</div>`);
   $('props').addEventListener('click', (e) => {
-    const b = e.target.closest('[data-edit]');
+    const b = e.target.closest('[data-edit], [data-code]');
     if (!b || !props) return;
-    for (const g of props.buildings) { const u = g.units.find((x) => x.id === b.dataset.edit); if (u) return openPropEditor(u); }
+    const id = b.dataset.edit || b.dataset.code;
+    for (const g of props.buildings) { const u = g.units.find((x) => x.id === id); if (u) return b.dataset.code ? askCode(u) : openPropEditor(u); }
   });
 
-  // ---------- editing a flat's details (Admin and User): on top of Guesty, blank = use Guesty's ----------
+  // ---------- changing a lockbox code by hand (anyone who sees codes, cleaners included) ----------
+  function askCode(u) {
+    const box = document.createElement('div');
+    box.className = 'modal';
+    box.innerHTML = `<form class="modal-card" role="dialog" aria-modal="true" aria-labelledby="md-t" novalidate>
+      <h3 id="md-t">${u.lockbox ? 'Change' : 'Add'} the lockbox code</h3>
+      <p>${esc(u.label)}${u.lockbox ? ` · the code now is <b>${esc(u.lockbox.code)}</b>` : ''}. Everyone sees the new code straight away.</p>
+      <label class="md-l" for="md-code">New code</label>
+      <input id="md-code" class="md-code" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4 numbers">
+      <p class="md-err" id="md-err" role="alert"></p>
+      <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary" id="md-save">Save code</button></div></form>`;
+    document.body.appendChild(box);
+    const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) close(); });
+    const input = $('md-code');
+    input.oninput = () => { input.value = input.value.replace(/\D/g, '').slice(0, 4); $('md-err').textContent = ''; };
+    input.focus();
+    box.querySelector('form').onsubmit = async (e) => {
+      e.preventDefault();
+      const code = input.value;
+      if (!/^\d{4}$/.test(code)) { $('md-err').textContent = 'Enter exactly 4 numbers.'; return; }
+      if (u.lockbox && u.lockbox.code === code) { $('md-err').textContent = 'That’s already the code.'; return; }
+      $('md-save').disabled = true;
+      try {
+        await send('PUT', `/api/lockbox/${encodeURIComponent(u.id)}`, { code });
+        close(); toast(`${u.label}’s lockbox code is now ${code}`);
+        loadProps(); // redraws in place, so the page stays where it was
+      } catch (err) { $('md-err').textContent = err.message; $('md-save').disabled = false; }
+    };
+  }
+
+  // ---------- editing a flat's details (Admin, User and supervisor): on top of Guesty, blank = use Guesty's ----------
   const KEY_WORDS = { keynest: 'KeyNest', lockbox: 'Lockbox', none: 'No key step' };
   function openPropEditor(u) {
     detailId = null;
@@ -373,7 +409,7 @@
     : a.type === 'contractor' ? `<span class="mt-who"><span class="avatar sm ct" aria-hidden="true">${ICONS.tool}</span>${esc(a.name)}${a.trade ? ` <em>· ${esc(a.trade)}</em>` : ''}</span>`
     : `<span class="mt-who"><span class="avatar sm">${esc(initials(a.name))}</span>${a.id === me.id ? 'You' : esc(a.name)}</span>`);
   const mtCard = (t) => `<button class="card mtask${t.overdue ? ' late' : ''}" data-task="${esc(t.id)}">
-      <span class="mt-top"><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${t.repeat ? `<span class="mt-rep" title="${esc(everyText(t.repeat))}">${ICONS.repeat}${esc(everyText(t.repeat))}</span>` : ''}<span class="mt-flat">${esc(t.label)} · ${esc(t.building)}</span></span>
+      <span class="mt-top">${t.kind === 'guest_request' ? '<span class="mt-kind">Guest request</span>' : ''}<span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${t.repeat ? `<span class="mt-rep" title="${esc(everyText(t.repeat))}">${ICONS.repeat}${esc(everyText(t.repeat))}</span>` : ''}<span class="mt-flat">${esc(t.label)} · ${esc(t.building)}</span></span>
       <span class="mt-title">${esc(t.title)}</span>
       <span class="mt-bot">${whoHtml(t.assignee)}${t.due ? `<span class="mt-due${t.overdue ? ' late' : ''}">${esc(dueText(t))}</span>` : ''}${(t.media || []).length ? `<span class="mt-n">${(t.media || []).length} photo${(t.media || []).length === 1 ? '' : 's'}</span>` : ''}</span>
     </button>`;
@@ -521,7 +557,7 @@
           <div class="sh-sub">Added by ${esc(t.reporterName)} · ${esc(fmtWhen(t.createdAt))}</div></div><div class="sh-right"><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${CLOSE_BTN}</div></div>
         ${moves.length ? `<div class="mt-moves">${moves.map(([s, w]) => `<button class="btn ${s === 'done' ? 'primary' : ''}" data-move="${s}">${esc(w)}</button>`).join('')}</div>` : ''}
         <dl class="mt-facts">
-          <div><dt>Priority</dt><dd><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span></dd></div>
+          ${t.kind === 'guest_request' ? '<div><dt>Type</dt><dd><span class="mt-kind">Guest request</span></dd></div>' : ''}<div><dt>Priority</dt><dd><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span></dd></div>
           <div><dt>Due</dt><dd class="${t.overdue ? 'late' : ''}">${t.due ? esc(dueText(t)) : '—'}</dd></div>
           <div><dt>Who</dt><dd>${whoHtml(t.assignee)}${t.assignee && t.assignee.type === 'contractor' && t.assignee.phone ? ` <a class="mt-tel" href="tel:${esc(t.assignee.phone.replace(/[^\d+]/g, ''))}">${esc(t.assignee.phone)}</a>` : ''}</dd></div>
           <div><dt>Repeats</dt><dd>${t.repeat ? esc(everyText(t.repeat)) : 'No'}</dd></div>
@@ -1468,10 +1504,15 @@
     const box = document.createElement('div');
     box.className = 'confirm-del';
     box.innerHTML = `${esc(text)} <button class="btn danger">Yes</button> <button class="btn">No</button>`;
+    $('sheet-body').querySelectorAll('.confirm-del').forEach((x) => x.remove()); // one question at a time
     $('sheet-body').prepend(box);
     const [y, n] = box.querySelectorAll('button');
     y.onclick = () => { box.remove(); yes(); };
     n.onclick = () => box.remove();
+    // It sits at the top of the panel, often out of sight after scrolling down to the button: scroll up to it.
+    // (A frame later, once the browser has finished keeping the view steady around the new box.)
+    requestAnimationFrame(() => $('sheet-body').scrollTo({ top: 0, behavior: 'smooth' }));
+    n.focus({ preventScroll: true });
   }
 
   // ---------------- checklist: tap each item, then hold to confirm the summary ----------------
