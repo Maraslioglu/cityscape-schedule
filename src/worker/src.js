@@ -1841,13 +1841,16 @@ async function assistantMaintenanceApi(req, env, ctx) {
   const l = await listingInfo(env, ctx, String(body.listingId || ''));
   if (!l) return json({ error: 'Unknown or hidden listing.' }, 404);
   const title = text(body.title, 140);
-  if (title.length < 3) return json({ error: 'Say what needs fixing.' }, 400);
+  if (title.length < 3) return json({ error: 'Say what needs doing.' }, 400);
   const reservationId = text(body.reservationId, 40) || null;
+  // Something a guest asked for (early luggage drop-off, a cot) rather than something broken.
+  const guestRequest = body.kind === 'guest_request';
+  const due = realDate(body.due) ? body.due : null;
   const bot = { id: 'assistant', name: 'Guest assistant (AI)' };
   const tasks = await loadList(env, 'maintenance');
   const link = (t) => `/?view=maintenance&task=${t.id}`;
   const same = reservationId && tasks.find((t) => t.reporterId === bot.id && t.reservationId === reservationId && t.listingId === l.id
-    && !['done', 'cancelled'].includes(t.status) && normName(t.title) === normName(title));
+    && !['done', 'cancelled'].includes(t.status) && normName(t.title) === normName(title) && (t.kind === 'guest_request') === guestRequest);
   if (same) {
     same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: text(body.details, 2000) || 'The guest mentioned this again.' }].slice(-200);
     same.updatedAt = nowIso();
@@ -1856,17 +1859,18 @@ async function assistantMaintenanceApi(req, env, ctx) {
   }
   const t = {
     id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
-    priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due: null, repeat: null, cost: null,
+    priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due, repeat: null, cost: null,
     reporterId: bot.id, reporterName: bot.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
-    media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: 'Reported from a guest message' }],
-    damageId: null, reservationId,
+    media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: guestRequest ? 'Guest request from a guest message' : 'Reported from a guest message' }],
+    damageId: null, reservationId, ...(guestRequest ? { kind: 'guest_request' } : {}),
   };
   t.seriesId = t.id;
   tasks.push(t);
   await saveList(env, 'maintenance', tasks.slice(-2000));
   const urgent = t.priority === 'urgent' ? 'Urgent: ' : '';
-  await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: `${urgent}Maintenance reported · ${t.label}`, body: `${t.title} — from a guest message`, url: link(t), tag: `mt-${t.id}` });
-  console.log(`[maintenance] guest assistant reported "${t.title}" at ${t.label}`);
+  const heading = guestRequest ? `Guest request · ${t.label}` : `${urgent}Maintenance reported · ${t.label}`;
+  await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: heading, body: `${t.title} — from a guest message`, url: link(t), tag: `mt-${t.id}` });
+  console.log(`[maintenance] guest assistant ${guestRequest ? 'added guest request' : 'reported'} "${t.title}" at ${t.label}`);
   return json({ task: { id: t.id, url: link(t), duplicate: false } });
 }
 

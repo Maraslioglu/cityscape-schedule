@@ -373,7 +373,7 @@
     : a.type === 'contractor' ? `<span class="mt-who"><span class="avatar sm ct" aria-hidden="true">${ICONS.tool}</span>${esc(a.name)}${a.trade ? ` <em>· ${esc(a.trade)}</em>` : ''}</span>`
     : `<span class="mt-who"><span class="avatar sm">${esc(initials(a.name))}</span>${a.id === me.id ? 'You' : esc(a.name)}</span>`);
   const mtCard = (t) => `<button class="card mtask${t.overdue ? ' late' : ''}" data-task="${esc(t.id)}">
-      <span class="mt-top"><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${t.repeat ? `<span class="mt-rep" title="${esc(everyText(t.repeat))}">${ICONS.repeat}${esc(everyText(t.repeat))}</span>` : ''}<span class="mt-flat">${esc(t.label)} · ${esc(t.building)}</span></span>
+      <span class="mt-top">${t.kind === 'guest_request' ? '<span class="mt-kind">Guest request</span>' : ''}<span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${t.repeat ? `<span class="mt-rep" title="${esc(everyText(t.repeat))}">${ICONS.repeat}${esc(everyText(t.repeat))}</span>` : ''}<span class="mt-flat">${esc(t.label)} · ${esc(t.building)}</span></span>
       <span class="mt-title">${esc(t.title)}</span>
       <span class="mt-bot">${whoHtml(t.assignee)}${t.due ? `<span class="mt-due${t.overdue ? ' late' : ''}">${esc(dueText(t))}</span>` : ''}${(t.media || []).length ? `<span class="mt-n">${(t.media || []).length} photo${(t.media || []).length === 1 ? '' : 's'}</span>` : ''}</span>
     </button>`;
@@ -521,7 +521,7 @@
           <div class="sh-sub">Added by ${esc(t.reporterName)} · ${esc(fmtWhen(t.createdAt))}</div></div><div class="sh-right"><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${CLOSE_BTN}</div></div>
         ${moves.length ? `<div class="mt-moves">${moves.map(([s, w]) => `<button class="btn ${s === 'done' ? 'primary' : ''}" data-move="${s}">${esc(w)}</button>`).join('')}</div>` : ''}
         <dl class="mt-facts">
-          <div><dt>Priority</dt><dd><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span></dd></div>
+          ${t.kind === 'guest_request' ? '<div><dt>Type</dt><dd><span class="mt-kind">Guest request</span></dd></div>' : ''}<div><dt>Priority</dt><dd><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span></dd></div>
           <div><dt>Due</dt><dd class="${t.overdue ? 'late' : ''}">${t.due ? esc(dueText(t)) : '—'}</dd></div>
           <div><dt>Who</dt><dd>${whoHtml(t.assignee)}${t.assignee && t.assignee.type === 'contractor' && t.assignee.phone ? ` <a class="mt-tel" href="tel:${esc(t.assignee.phone.replace(/[^\d+]/g, ''))}">${esc(t.assignee.phone)}</a>` : ''}</dd></div>
           <div><dt>Repeats</dt><dd>${t.repeat ? esc(everyText(t.repeat)) : 'No'}</dd></div>
