@@ -7,7 +7,8 @@
 //   Cron trigger  */5 * * * *            – keeps bookings fresh in the background
 //   Optional vars PUBLIC_URL, WEEK_START_DAY, RESERVATION_STATUSES, DEFAULT_CHECKIN_TIME,
 //                 DEFAULT_CHECKOUT_TIME, UNIT_TYPE_OVERRIDES, BUILDING_OVERRIDES,
-//                 HIDDEN_LISTINGS, NEW_BOOKING_HOURS, KEYNEST_API_KEY
+//                 HIDDEN_LISTINGS, NEW_BOOKING_HOURS, KEYNEST_API_KEY,
+//                 ASSISTANT_API_KEY (lets the guest assistant report maintenance)
 //
 // Without Guesty keys it runs on sample data so it can be previewed.
 
@@ -1783,6 +1784,47 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
   return json({ error: 'Not supported' }, 405);
 }
 
+// The Cityscape guest assistant reports problems guests mention in messages ("no hot water"). It can only report:
+// the task arrives open and unassigned, exactly like a cleaner's report, and Admins/Users of the building are told.
+// If the same guest reports the same thing again while it's still open, it's added as a note instead of a new task.
+// Off unless the ASSISTANT_API_KEY secret is set; the assistant sends it as "Authorization: Bearer <key>".
+async function assistantMaintenanceApi(req, env, ctx) {
+  const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.ASSISTANT_API_KEY || !safeEqual(key, env.ASSISTANT_API_KEY)) return json({ error: 'unauthorised' }, 401);
+  const body = await req.json().catch(() => ({}));
+  const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
+  const l = await listingInfo(env, ctx, String(body.listingId || ''));
+  if (!l) return json({ error: 'Unknown or hidden listing.' }, 404);
+  const title = text(body.title, 140);
+  if (title.length < 3) return json({ error: 'Say what needs fixing.' }, 400);
+  const reservationId = text(body.reservationId, 40) || null;
+  const bot = { id: 'assistant', name: 'Guest assistant (AI)' };
+  const tasks = await loadList(env, 'maintenance');
+  const link = (t) => `/?view=maintenance&task=${t.id}`;
+  const same = reservationId && tasks.find((t) => t.reporterId === bot.id && t.reservationId === reservationId && t.listingId === l.id
+    && !['done', 'cancelled'].includes(t.status) && normName(t.title) === normName(title));
+  if (same) {
+    same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: text(body.details, 2000) || 'The guest mentioned this again.' }].slice(-200);
+    same.updatedAt = nowIso();
+    await saveList(env, 'maintenance', tasks.slice(-2000));
+    return json({ task: { id: same.id, url: link(same), duplicate: true } });
+  }
+  const t = {
+    id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
+    priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due: null, repeat: null, cost: null,
+    reporterId: bot.id, reporterName: bot.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
+    media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: 'Reported from a guest message' }],
+    damageId: null, reservationId,
+  };
+  t.seriesId = t.id;
+  tasks.push(t);
+  await saveList(env, 'maintenance', tasks.slice(-2000));
+  const urgent = t.priority === 'urgent' ? 'Urgent: ' : '';
+  await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: `${urgent}Maintenance reported · ${t.label}`, body: `${t.title} — from a guest message`, url: link(t), tag: `mt-${t.id}` });
+  console.log(`[maintenance] guest assistant reported "${t.title}" at ${t.label}`);
+  return json({ task: { id: t.id, url: link(t), duplicate: false } });
+}
+
 // Used by server.mjs before accepting or serving media files.
 async function mediaAccess(env, ctx, me, body) {
   if (body.purpose === 'damage') return can(me, 'report_damage');
@@ -1815,6 +1857,8 @@ async function handle(req, env, ctx) {
     await keynestRecord(env, await req.json().catch(() => ({})));
     return new Response('ok');
   }
+
+  if (p === '/api/integrations/maintenance' && req.method === 'POST') return assistantMaintenanceApi(req, env, ctx);
 
   if (p.startsWith('/webhooks/guesty/') && req.method === 'POST') {
     const expectedKey = (await hmac(await secretKey(env), 'webhook')).slice(0, 32);
