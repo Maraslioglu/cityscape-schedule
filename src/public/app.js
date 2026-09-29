@@ -198,7 +198,7 @@
     const linenBits = can('view_linen') ? Object.entries(day.linen).map(([t, n]) => `${esc(shortType(t))} <b>${n}</b>`).join(' · ') : '';
     $('daypanel').innerHTML = `
       ${linenBits ? `<div class="dlinen">Linen for this day: ${linenBits}</div>` : ''}
-      ${day.units.length ? '' : '<div class="card empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
+      ${day.units.length ? '' : data.cleansOnly ? '<div class="card empty"><b>Nothing to clean</b>No check-outs on this day.</div>' : '<div class="card empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
       ${section('turn', 'Same-day turnovers', 'Guests leave and arrive the same day', turn)}
       ${section('out', 'Check-outs', 'Clean once the guest leaves', outs)}
       ${section('in', 'Arrivals', 'Make sure the flat is ready', ins)}`;
@@ -1155,6 +1155,7 @@
     const turns = s.cleans.filter((u) => u.checkIn).length;
     $('m-clean').textContent = s.cleans.length;
     $('m-clean-s').textContent = s.cleans.length ? `${turns} same-day · ${s.cleans.length - turns} check-out${s.cleans.length - turns === 1 ? '' : 's'}` : 'Nothing to clean';
+    $('m-in').previousElementSibling.textContent = data.cleansOnly ? 'Same-day arrivals' : 'Arrivals';
     $('m-in').textContent = s.arrivals.length;
     $('m-in-s').textContent = firstIn ? `First guests from ${s.arrivals.find((u) => u.checkIn.timeRaw === firstIn).checkIn.time}` : 'No arrivals';
     if (isManager()) {
@@ -1208,7 +1209,7 @@
     cards.push(`<div class="card rcard"><div class="rc-h"><h3>Needs attention</h3></div>${att.join('') || '<p class="muted rnone">Nothing right now.</p>'}</div>`);
     const t = data.totals;
     cards.push(`<div class="card rcard"><div class="rc-h"><h3>This week</h3></div>
-      <div class="wk"><div><b>${t.checkOuts}</b><span>cleans</span></div><div><b>${t.checkIns}</b><span>arrivals</span></div><div><b>${t.turnovers}</b><span>same-day</span></div></div>
+      <div class="wk"><div><b>${t.checkOuts}</b><span>cleans</span></div>${data.cleansOnly ? '' : `<div><b>${t.checkIns}</b><span>arrivals</span></div>`}<div><b>${t.turnovers}</b><span>same-day</span></div></div>
       ${can('view_linen') && t.linenSets !== null ? `<div class="wk-linen"><span class="lh">Linen sets <em>1 per check-out</em></span>${data.linen.map((r) => `<span class="li"><b>${r.sets}</b>${esc(shortType(r.type))}</span>`).join('')}<span class="li total"><b>${t.linenSets}</b>total</span></div>` : ''}</div>`);
     rail.innerHTML = cards.join('');
   }

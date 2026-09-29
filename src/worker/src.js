@@ -337,6 +337,24 @@ function shapeWeek(data, u) {
     for (const d of data.days) for (const x of d.units) { if (x.checkIn) x.checkIn.guests = null; if (x.checkOut) x.checkOut.guests = null; }
   }
   if (!can(u, 'view_linen')) { data.linen = []; data.totals.linenSets = null; for (const d of data.days) d.linen = {}; }
+  // Supervisors and cleaners only see flats that need cleaning that day: check-outs and same-day turnovers.
+  // Arrival-only flats were cleaned on an earlier day, so they're left out (and so is who's staying mid-week).
+  if (u.role === 'supervisor' || u.role === 'cleaner') {
+    let fresh = 0;
+    for (const d of data.days) {
+      d.units = d.units.filter((x) => x.checkOut);
+      d.arrivals = d.turnovers;
+      d.hasNew = d.units.some((x) => (x.checkIn && x.checkIn.isNew) || x.checkOut.isNew);
+      fresh += d.units.filter((x) => x.checkIn && x.checkIn.isNew).length;
+    }
+    const empty = { occ: false, out: null, in: null };
+    data.board = data.board.map((b) => ({ ...b, units: b.units
+      .map((x) => ({ ...x, cells: x.cells.map((c) => (c.out ? { occ: Boolean(c.in), out: c.out, in: c.in } : empty)) }))
+      .filter((x) => x.cells.some((c) => c.out)) })).filter((b) => b.units.length);
+    data.totals.checkIns = data.totals.turnovers;
+    data.totals.newBookings = fresh;
+    data.cleansOnly = true;
+  }
   if (u.buildings !== 'all') data.warnings = [];
   if (Array.isArray(u.buildings) && !u.buildings.length) data.warnings = ['No buildings are assigned to you yet. Ask an admin to add your buildings.'];
   return data;
