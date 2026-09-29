@@ -555,8 +555,10 @@ function listingMap(raw, cfg, allow, { all = false } = {}) {
 }
 
 const UNIT_TYPES = ['Studio', '1 Bedroom', '2 Bedroom', '3 Bedroom', '4 Bedroom', '5 Bedroom'];
+// Admins, Users and supervisors edit flats' details; cleaners only change lockbox codes (lockboxCodeApi).
+const editsProps = (u) => Boolean(u && (isManager(u) || u.role === 'supervisor'));
 async function propertyEditApi(req, env, ctx, me, id) {
-  if (!isManager(me)) return json({ error: 'Only Admins and Users can edit properties.' }, 403);
+  if (!editsProps(me)) return json({ error: 'Only Admins, Users and supervisors can edit properties.' }, 403);
   const snap = await getSnapshot(env, ctx);
   await loadPropOverrides(env, true);
   const l = listingMap(snap.listings, config(env), null, { all: true }).get(id);
@@ -698,8 +700,8 @@ async function weekDataRaw(env, ctx, dateParam, fresh, allow, user) {
 async function propertiesData(env, ctx, user) {
   const cfg = config(env);
   const snap = await getSnapshot(env, ctx);
-  const manage = isManager(user);
-  const every = listingMap(snap.listings, cfg, allowBuildingFor(user), { all: manage });
+  const manage = isManager(user), edit = editsProps(user);
+  const every = listingMap(snap.listings, cfg, allowBuildingFor(user), { all: edit });
   const listings = new Map([...every].filter(([, l]) => !l.hidden));
   const codes = can(user, 'view_cleaning') ? ((await env.STORE.get('lockboxCodes', 'json')) || {}) : {};
   const groups = new Map();
@@ -707,13 +709,13 @@ async function propertiesData(env, ctx, user) {
     if (!groups.has(l.building)) groups.set(l.building, { name: l.building, postcode: l.postcode, units: [] });
     groups.get(l.building).units.push({ id: l.id, name: l.name, label: l.label, address: l.address, unitType: l.unitType, checkIn: fmtTime(l.checkInTime), checkOut: fmtTime(l.checkOutTime), keyMode: l.keyMode, lockbox: codes[l.id] || null,
       hidden: l.hidden, edited: l.edited, lockboxNoCode: l.keyMode === 'lockbox' && l.lockboxNoCode, keyInstruction: l.keyMode === 'lockbox' ? l.keyInstruction : '',
-      ...(manage ? { postcode: l.postcode, checkInTime: l.checkInTime, checkOutTime: l.checkOutTime, building: l.building, guesty: l.guesty, hiddenByEnv: l.hiddenByEnv, editedAt: l.editedAt, editedBy: l.editedBy } : {}) });
+      ...(edit ? { postcode: l.postcode, checkInTime: l.checkInTime, checkOutTime: l.checkOutTime, building: l.building, guesty: l.guesty, hiddenByEnv: l.hiddenByEnv, editedAt: l.editedAt, editedBy: l.editedBy } : {}) });
   }
   const buildings = [...groups.values()].sort((a, b) => byBuilding(a.name, b.name));
   for (const b of buildings) b.units.sort((x, y) => natural(x.label, y.label));
   const counts = {};
   for (const l of listings.values()) counts[l.unitType] = (counts[l.unitType] || 0) + 1;
-  return { buildings, total: listings.size, counts, mock: cfg.mock, keynest: await keynestStatus(env, listings), canManage: manage, unitTypes: UNIT_TYPES };
+  return { buildings, total: listings.size, counts, mock: cfg.mock, keynest: await keynestStatus(env, listings), canManage: manage, canEdit: edit, canEditCode: can(user, 'view_cleaning'), unitTypes: UNIT_TYPES };
 }
 
 // ---------------------------------------------------------------- Guesty webhook (instant updates)
@@ -778,6 +780,20 @@ async function saveList(env, key, list) { await env.STORE.put(key, JSON.stringif
 async function listingInfo(env, ctx, listingId) {
   const snap = await getSnapshot(env, ctx);
   return listingMap(snap.listings, config(env)).get(listingId) || null;
+}
+// Changing a flat's lockbox code by hand (from Properties): anyone who can see codes, cleaners included, in their buildings.
+async function lockboxCodeApi(req, env, ctx, me, id) {
+  const l = await listingInfo(env, ctx, id);
+  if (!l || !inScope(me, l.building) || !can(me, 'view_cleaning')) return json({ error: 'You don’t have permission for that. Ask an admin.' }, 403);
+  if (l.keyMode !== 'lockbox' || l.lockboxNoCode) return json({ error: `${l.label} doesn’t use a lockbox code.` }, 400);
+  const body = await req.json().catch(() => ({}));
+  const code = String(body.code || '').trim();
+  if (!/^\d{4}$/.test(code)) return json({ error: 'The lockbox code is exactly 4 numbers.' }, 400);
+  const codes = (await env.STORE.get('lockboxCodes', 'json')) || {};
+  codes[l.id] = { code, at: nowIso(), by: me.name, byId: me.id, edited: true };
+  await env.STORE.put('lockboxCodes', JSON.stringify(codes));
+  console.log(`[lockbox] ${me.name} changed ${l.label}'s code`); // never the code itself
+  return json({ ok: true, lockbox: codes[l.id] });
 }
 function inScope(u, building) {
   const allow = allowBuildingFor(u);
@@ -1974,6 +1990,7 @@ async function handle(req, env, ctx) {
   }
   if (p === '/api/properties') return can(me, 'view_properties') ? json(await propertiesData(env, ctx, me)) : deny();
   if (p.startsWith('/api/properties/') && req.method === 'PUT') return withLock('propertyOverrides', () => propertyEditApi(req, env, ctx, me, decodeURIComponent(p.split('/')[3] || '')));
+  if (p.startsWith('/api/lockbox/') && req.method === 'PUT') return withLock('cleanings', () => lockboxCodeApi(req, env, ctx, me, decodeURIComponent(p.split('/')[3] || ''))); // cleanings also write codes
   if (p.startsWith('/api/lockbox/') && req.method === 'GET') {
     // The flat's current lockbox code, for its panel: cleaners check it every time they arrive.
     const l = await listingInfo(env, ctx, decodeURIComponent(p.split('/')[3] || ''));

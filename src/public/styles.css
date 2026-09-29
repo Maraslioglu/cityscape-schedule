@@ -1225,3 +1225,9 @@ td.unit .u { font-weight: 600; }
 .modal-card .btn { margin-top: 0; }
 .kn-override { display: block; margin: 12px auto 0; color: var(--out); }
 .stepin-note { margin: 14px 0 8px; font-size: 13.5px; color: var(--ink-2); }
+/* Edit code (Properties) */
+.lbx-edit { flex: none; margin-left: auto; font-size: 12.5px; }
+.md-code { width: 100%; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2); font: 600 24px/1.2 var(--font-head); letter-spacing: .3em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.md-code:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.modal-card .md-err { min-height: 0; margin: 8px 0 0; font-size: 13px; color: var(--out); }
+.modal-card .md-err:empty { display: none; }
