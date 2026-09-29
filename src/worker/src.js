@@ -1862,22 +1862,32 @@ async function assistantMaintenanceApi(req, env, ctx) {
   // Something a guest asked for (early luggage drop-off, a cot) rather than something broken.
   const guestRequest = body.kind === 'guest_request';
   const due = realDate(body.due) ? body.due : null;
+  // Asked for by a team member in Slack rather than spotted in a guest message.
+  const fromSlack = body.source === 'slack';
+  const origin = fromSlack ? 'from Slack' : 'from a guest message';
   const bot = { id: 'assistant', name: 'Guest assistant (AI)' };
   const tasks = await loadList(env, 'maintenance');
   const link = (t) => `/?view=maintenance&task=${t.id}`;
   const same = reservationId && tasks.find((t) => t.reporterId === bot.id && t.reservationId === reservationId && t.listingId === l.id
     && !['done', 'cancelled'].includes(t.status) && normName(t.title) === normName(title) && (t.kind === 'guest_request') === guestRequest);
   if (same) {
-    same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: text(body.details, 2000) || 'The guest mentioned this again.' }].slice(-200);
+    same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: text(body.details, 2000) || 'The guest mentioned this again.' }];
+    // The guest changed the day: the task moves to it.
+    const dueChanged = Boolean(due && due !== same.due);
+    if (dueChanged) {
+      same.log.push({ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `Due ${due} (was ${same.due || 'not set'})` });
+      same.due = due;
+    }
+    same.log = same.log.slice(-200);
     same.updatedAt = nowIso();
     await saveList(env, 'maintenance', tasks.slice(-2000));
-    return json({ task: { id: same.id, url: link(same), duplicate: true } });
+    return json({ task: { id: same.id, url: link(same), duplicate: true, due: same.due, dueChanged } });
   }
   const t = {
     id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
     priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due, repeat: null, cost: null,
     reporterId: bot.id, reporterName: bot.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
-    media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: guestRequest ? 'Guest request from a guest message' : 'Reported from a guest message' }],
+    media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `${guestRequest ? 'Guest request' : 'Reported'} ${origin}` }],
     damageId: null, reservationId, ...(guestRequest ? { kind: 'guest_request' } : {}),
   };
   t.seriesId = t.id;
@@ -1885,9 +1895,9 @@ async function assistantMaintenanceApi(req, env, ctx) {
   await saveList(env, 'maintenance', tasks.slice(-2000));
   const urgent = t.priority === 'urgent' ? 'Urgent: ' : '';
   const heading = guestRequest ? `Guest request · ${t.label}` : `${urgent}Maintenance reported · ${t.label}`;
-  await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: heading, body: `${t.title} — from a guest message`, url: link(t), tag: `mt-${t.id}` });
+  await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: heading, body: `${t.title} — ${origin}`, url: link(t), tag: `mt-${t.id}` });
   console.log(`[maintenance] guest assistant ${guestRequest ? 'added guest request' : 'reported'} "${t.title}" at ${t.label}`);
-  return json({ task: { id: t.id, url: link(t), duplicate: false } });
+  return json({ task: { id: t.id, url: link(t), duplicate: false, due: t.due, dueChanged: false } });
 }
 
 // Used by server.mjs before accepting or serving media files.
