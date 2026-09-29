@@ -19,7 +19,8 @@
   const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null };
   // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
   const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
-  const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
+  const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : v === 'users' ? can('manage_users') || Boolean(me && me.role === 'supervisor') // supervisors manage the people they add
+    : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
   // Sidebar: Schedule holds the Day and Week views; each other entry is one view.
   const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum', maintenance: 'maintenance' };
   const navAllowed = (n) => (n === 'schedule' ? allowed('day') || allowed('board') : allowed(n));
@@ -851,7 +852,7 @@
   }
   function renderUsers() {
     const active = U.users.filter((u) => u.active).length;
-    $('users-sub').textContent = `${active} active · owner recovery login not listed`;
+    $('users-sub').textContent = U.limited ? `People you’ve added · ${active} active · you can add supervisors and cleaners` : `${active} active · owner recovery login not listed`;
     $('users-list').innerHTML = U.users.length ? U.users.map((u) => `
       <tr class="${u.id === editing ? 'sel' : ''} ${u.active ? '' : 'off'}">
         <td class="who"><b>${esc(u.name)}</b><span>${esc(u.username)}${u.email ? ' · ' + esc(u.email) : ''}${u.active ? '' : ' · deactivated'}</span></td>
@@ -859,7 +860,7 @@
         <td class="hide-sm">${u.buildings === 'all' ? 'All' : u.buildings.length ? esc(u.buildings.length + ' building' + (u.buildings.length > 1 ? 's' : '')) : '<span style="color:var(--out)">None yet</span>'}</td>
         <td class="hide-sm">${when(u.lastLoginAt)}</td>
         <td><button class="btn" data-edit="${u.id}">Edit</button></td>
-      </tr>`).join('') : '<tr><td colspan="5" class="empty"><b>No users yet</b>Click “Add user” to create the first account.</td></tr>';
+      </tr>`).join('') : `<tr><td colspan="5" class="empty"><b>${U.limited ? 'You haven’t added anyone yet' : 'No users yet'}</b>Click “Add user” to ${U.limited ? 'add a supervisor or cleaner' : 'create the first account'}.</td></tr>`;
     if (editing) renderForm(); else { $('user-form').classList.add('hidden'); document.querySelector('.users-layout').classList.remove('editing'); }
   }
   $('users-list').addEventListener('click', (e) => { const b = e.target.closest('[data-edit]'); if (b) { editing = b.dataset.edit; renderUsers(); } });
@@ -872,7 +873,8 @@
   }
   function renderForm() {
     const isNew = editing === 'new';
-    const u = isNew ? { name: '', username: '', email: '', role: 'user', active: true, ...U.defaults.user } : U.users.find((x) => x.id === editing);
+    const r0 = U.roles.includes('user') ? 'user' : 'cleaner';
+    const u = isNew ? { name: '', username: '', email: '', role: r0, active: true, ...U.defaults[r0] } : U.users.find((x) => x.id === editing);
     if (!u) { editing = null; return renderUsers(); }
     const allB = u.buildings === 'all';
     const f = $('user-form');
@@ -892,7 +894,7 @@
         ${U.perms.map(([k, label]) => `<label><input type="checkbox" data-perm="${k}" ${u.perms && u.perms[k] ? 'checked' : ''}>${esc(label)}</label>`).join('')}
       </div></fieldset>
       <fieldset><legend>Buildings they can see</legend>
-        <div class="radio"><label><input type="radio" name="uf-bmode" value="all" ${allB ? 'checked' : ''}>All buildings</label><label><input type="radio" name="uf-bmode" value="some" ${allB ? '' : 'checked'}>Only these</label></div>
+        <div class="radio"><label class="${U.canAllBuildings === false ? 'hidden' : ''}"><input type="radio" name="uf-bmode" value="all" ${allB ? 'checked' : ''}>All buildings</label><label><input type="radio" name="uf-bmode" value="some" ${allB ? '' : 'checked'}>Only these</label></div>
         <div class="checks ${allB ? 'hidden' : ''}" id="uf-blist">${U.buildings.map((b) => `<label><input type="checkbox" data-b="${esc(b)}" ${!allB && u.buildings.includes(b) ? 'checked' : ''}>${esc(b)}</label>`).join('')}</div>
       </fieldset>
       ${isNew ? '' : `<fieldset><legend>Status</legend><div class="radio"><label><input type="radio" name="uf-active" value="1" ${u.active ? 'checked' : ''}>Active</label><label><input type="radio" name="uf-active" value="0" ${u.active ? '' : 'checked'}>Deactivated</label></div></fieldset>`}
