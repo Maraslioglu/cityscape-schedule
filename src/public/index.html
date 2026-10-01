@@ -27,6 +27,7 @@
     <button data-nav="cleaning" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M4 12h10M4 17h6"/><path d="m15 16.5 2.2 2.2L21 14.5"/></svg><span class="nl">Cleaning log</span><span class="ns">Cleaning</span></button>
     <button data-nav="damage" data-group="day" class="hidden"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5M12 17.2v.3"/></svg><span class="nl">Damage reports</span><span class="ns">Damage</span><span class="nbadge hidden" id="nb-damage"></span></button>
     <button data-nav="maintenance" data-group="day"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4.2 4.2 0 0 0-5.5 5.4L3.8 17.1a1.9 1.9 0 0 0 2.7 2.7l5.4-5.4a4.2 4.2 0 0 0 5.4-5.5l-2.5 2.5-2.3-.4-.4-2.3z"/></svg><span class="nl">Maintenance</span><span class="ns">Fixes</span><span class="nbadge hidden" id="nb-maint"></span></button>
+    <button data-nav="complaints" data-group="day"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-11.1 6.6L4 19.5l1.4-4.6A7.5 7.5 0 1 1 20 11.5z"/><path d="M12.5 8v4M12.5 15v.01"/></svg><span class="nl">Complaints</span><span class="ns">Complaints</span><span class="nbadge hidden" id="nb-cp"></span></button>
     <div class="nlbl" data-group="portfolio">Portfolio</div>
     <button data-nav="props" data-group="portfolio"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20.5V6.5l7-3v17M11 8.5l9 3v9M2.5 20.5h19M7 9v.01M7 12.5v.01M7 16v.01M15 14v.01M15 17.5v.01"/></svg><span class="nl">Properties</span><span class="ndot hidden" id="nd-props" title="A KeyNest flat needs linking"></span></button>
     <div class="nlbl" data-group="team">Team</div>
@@ -130,8 +131,6 @@
 
   <!-- MAINTENANCE -->
   <section id="view-maintenance" class="hidden">
-    <div class="mt-tabs" role="tablist" aria-label="Maintenance or complaints"><button role="tab" data-mtab="tasks" aria-selected="true">Tasks</button><button role="tab" data-mtab="complaints" aria-selected="false">Complaints<span class="tabn hidden" id="cp-tabn"></span></button></div>
-    <div id="mt-pane">
     <div class="weekbar"><h1>Maintenance</h1>
       <div class="range" role="tablist" aria-label="Which tasks"><button role="tab" data-mtf="open" aria-selected="true">To do</button><button role="tab" data-mtf="done" aria-selected="false">Done</button><button role="tab" data-mtf="all" aria-selected="false">All</button></div>
       <button class="btn mt-mine" id="mt-mine" aria-pressed="false">Mine only</button>
@@ -140,20 +139,21 @@
     </div>
     <div class="mt-sum" id="mt-sum"></div>
     <div id="mt-list"></div>
+  </section>
+
+  <!-- COMPLAINTS -->
+  <section id="view-complaints" class="hidden">
+    <div class="weekbar"><h1>Complaints</h1>
+      <div class="range" role="tablist" aria-label="Which complaints"><button role="tab" data-cps="open" aria-selected="true">Open</button><button role="tab" data-cps="closed" aria-selected="false">Resolved</button><button role="tab" data-cps="all" aria-selected="false">All</button></div>
+      <button class="btn" id="cp-pat" aria-pressed="false">Patterns</button>
+      <span class="spacer"></span>
+      <a class="btn hidden" id="cp-csv" href="/api/complaints/export.csv" download>Export CSV</a>
+      <button class="btn primary hidden" id="cp-new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Log complaint</button>
     </div>
-    <div id="cp-pane" class="hidden">
-      <div class="weekbar"><h1>Complaints</h1>
-        <div class="range" role="tablist" aria-label="Which complaints"><button role="tab" data-cps="open" aria-selected="true">Open</button><button role="tab" data-cps="closed" aria-selected="false">Resolved</button><button role="tab" data-cps="all" aria-selected="false">All</button></div>
-        <button class="btn" id="cp-pat" aria-pressed="false">Patterns</button>
-        <span class="spacer"></span>
-        <a class="btn hidden" id="cp-csv" href="/api/complaints/export.csv" download>Export CSV</a>
-        <button class="btn primary hidden" id="cp-new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Log complaint</button>
-      </div>
-      <div class="cp-filters" id="cp-filters"></div>
-      <div id="cp-patterns" class="hidden"></div>
-      <div class="mt-sum" id="cp-sum"></div>
-      <div id="cp-list"></div>
-    </div>
+    <div class="cp-filters" id="cp-filters"></div>
+    <div id="cp-patterns" class="hidden"></div>
+    <div class="mt-sum" id="cp-sum"></div>
+    <div id="cp-list"></div>
   </section>
 
   <!-- FORUM -->

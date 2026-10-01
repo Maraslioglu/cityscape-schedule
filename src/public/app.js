@@ -16,15 +16,15 @@
   let view = store.get('cs_view') || 'day';
   let me = null;            // signed-in person and their permissions
   const can = (perm) => Boolean(me && me.perms && me.perms[perm]);
-  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null };
+  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null, complaints: null };
   // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
   const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
   const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? can('manage_settings') || can('download_backups') : v === 'users' ? can('manage_users') || Boolean(me && me.role === 'supervisor') // supervisors manage the people they add
     : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
   // Sidebar: Schedule holds the Day and Week views; each other entry is one view.
-  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum', maintenance: 'maintenance' };
+  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum', maintenance: 'maintenance', complaints: 'complaints' };
   const navAllowed = (n) => (n === 'schedule' ? allowed('day') || allowed('board') : allowed(n));
-  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account', forum: 'Forum', maintenance: 'Maintenance' };
+  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account', forum: 'Forum', maintenance: 'Maintenance', complaints: 'Complaints' };
   let lastSched = store.get('cs_sched') || 'day';
   let selected = null;      // selected date in day view
   let version = null;       // bookings version from the server
@@ -441,19 +441,12 @@
       box.querySelectorAll('[data-task]').forEach((b) => b.onclick = () => openTask(b.dataset.task));
     } catch (_) {}
   }
-  // ---------- Complaints (under Maintenance): logged against the stay and the cleaning that prepared it ----------
-  let cpCache = null, cpStatus = 'open', cpPatterns = false, mtTab = 'tasks';
+  // ---------- Complaints (own page, under Maintenance in the menu): logged against the stay and the cleaning that prepared it ----------
+  let cpCache = null, cpStatus = 'open', cpPatterns = false;
   const cpF = { cat: '', building: '', flat: '', cleaner: '', period: '90', q: '' };
   const CP_ST = { open: 'Open', investigating: 'Investigating', resolved: 'Resolved', dismissed: 'Dismissed' };
   const CP_SEV = { high: 'High', medium: 'Medium', low: 'Low' };
-  function setMtTab(tab) {
-    mtTab = tab;
-    document.querySelectorAll('[data-mtab]').forEach((b) => b.setAttribute('aria-selected', b.dataset.mtab === tab));
-    $('mt-pane').classList.toggle('hidden', tab !== 'tasks');
-    $('cp-pane').classList.toggle('hidden', tab !== 'complaints');
-    if (tab === 'complaints') loadComplaints(); else loadMaintenance();
-  }
-  document.querySelectorAll('[data-mtab]').forEach((b) => b.onclick = () => setMtTab(b.dataset.mtab));
+  const cpBadge = (n) => { $('nb-cp').textContent = n > 9 ? '9+' : String(n); $('nb-cp').classList.toggle('hidden', !n); };
   async function loadComplaints() {
     if (!cpCache) $('cp-list').innerHTML = '<div class="card"><div class="loading">Loading…</div></div>';
     try { cpCache = await getJSON('/api/complaints'); renderComplaints(); }
@@ -492,8 +485,7 @@
       cpF[el.dataset.cpf] = el.value; if (el.dataset.cpf === 'building') cpF.flat = '';
       if (el.tagName === 'INPUT') { drawCpList(); drawPatterns(); } else renderComplaints();
     });
-    const open = all.filter((c) => ['open', 'investigating'].includes(c.status)).length;
-    $('cp-tabn').textContent = open || ''; $('cp-tabn').classList.toggle('hidden', !open);
+    cpBadge(all.filter((c) => ['open', 'investigating'].includes(c.status)).length);
     drawCpList(); drawPatterns();
   }
   function drawCpList() {
@@ -1043,7 +1035,7 @@
     return 1 + Math.round(((d - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
   };
   const weekNo = () => isoWeek(data.dates.find((x) => D(x).getUTCDay() === 1) || data.weekStart);
-  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account', forum: 'Team', maintenance: 'Day to day' };
+  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account', forum: 'Team', maintenance: 'Day to day', complaints: 'Day to day' };
   function setPageHead() {
     const eb = $('page-eyebrow'), h = $('page-title');
     if ((view === 'day' || view === 'board') && data) {
@@ -1078,6 +1070,7 @@
     $('view-damage').classList.toggle('hidden', v !== 'damage');
     $('view-forum').classList.toggle('hidden', v !== 'forum');
     $('view-maintenance').classList.toggle('hidden', v !== 'maintenance');
+    $('view-complaints').classList.toggle('hidden', v !== 'complaints');
     $('foot').classList.toggle('hidden', !(v === 'day' || v === 'board'));
     if (v === 'board' && data && boardDirty) renderBoard();
     if (v === 'props') loadProps();
@@ -1087,7 +1080,8 @@
     if (v === 'settings') loadSettings();
     if (v === 'damage') loadDamageView();
     if (v === 'forum') loadForum();
-    if (v === 'maintenance') { if (mtTab === 'complaints') loadComplaints(); else loadMaintenance(); }
+    if (v === 'maintenance') loadMaintenance();
+    if (v === 'complaints') loadComplaints();
   }
 
   // ---------- who's signed in ----------
@@ -2324,6 +2318,7 @@
       $('nb-maint').textContent = n > 9 ? '9+' : String(n);
       $('nb-maint').classList.toggle('hidden', !n);
     } catch (_) {}
+    try { cpBadge((await getJSON('/api/complaints?summary=1')).open); } catch (_) {}
     try {
       const f = await getJSON('/api/forum');
       forumCache = f;
@@ -2397,7 +2392,9 @@
     const v = q.get('view'), date = q.get('date'), flat = q.get('flat');
     const okDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '');
     if (v === 'forum') { if (view !== 'forum') setView('forum'); if (q.get('post')) openPost(q.get('post')); return; }
-    if (v === 'maintenance') { if (view !== 'maintenance') setView('maintenance'); if (q.get('tab') === 'complaints' || q.get('complaint')) setMtTab('complaints'); if (q.get('task')) openTask(q.get('task')); if (q.get('complaint')) openComplaint(q.get('complaint')); return; }
+    // Complaints used to be a tab of Maintenance: links from then (?view=maintenance&tab=complaints) still land on Complaints.
+    if (v === 'complaints' || (v === 'maintenance' && (q.get('tab') === 'complaints' || q.get('complaint')))) { if (view !== 'complaints') setView('complaints'); if (q.get('complaint')) openComplaint(q.get('complaint')); return; }
+    if (v === 'maintenance') { if (view !== 'maintenance') setView('maintenance'); if (q.get('task')) openTask(q.get('task')); return; }
     if (v === 'cleaning' && allowed('cleaning')) { if (okDate) cvDate = date; if (view === 'cleaning') loadCleaningView(); else setView('cleaning'); return; }
     if (v === 'day' && allowed('day')) {
       if (view !== 'day') setView('day');

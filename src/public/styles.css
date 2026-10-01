@@ -1238,11 +1238,11 @@ td.unit .u { font-weight: 600; }
 .perm-group h4 { margin: 12px 0 6px; font: 500 10.5px var(--font-head); letter-spacing: .16em; text-transform: uppercase; color: var(--accent-strong); }
 .perm-group:first-of-type h4 { margin-top: 4px; }
 
-/* Complaints (under Maintenance) */
-.mt-tabs { display: inline-flex; gap: 4px; padding: 4px; margin: 0 0 14px; border-radius: 14px; background: var(--sunken); }
-.mt-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 18px; border: 0; border-radius: 10px; background: none; font: 500 14px var(--font-head); color: var(--ink-2); cursor: pointer; }
-.mt-tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(30, 45, 38, .12); }
-.tabn { min-width: 18px; padding: 1px 6px; border-radius: 999px; background: var(--out); color: #fff; font: 600 11px/16px var(--font); text-align: center; }
+/* Complaints (own page, under Maintenance in the menu) */
+#view-complaints .weekbar { gap: 10px; }
+@media (max-width: 760px) { #view-complaints .weekbar .range { flex: 1 1 auto; } #cp-new { flex: 1 1 100%; order: 10; } }
+/* Phone menu: seven items, so each gets room for its own label rather than an equal slot ("Complaints" is the longest). */
+@media (max-width: 760px) { .snav button { flex: 1 1 auto; min-width: 0; padding-left: 1px; padding-right: 1px; } }
 .cp-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 12px; }
 .cpf { display: flex; flex-direction: column; gap: 4px; min-width: 140px; flex: 0 1 180px; }
 .cpf.grow { flex: 1 1 200px; }

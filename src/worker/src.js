@@ -1950,7 +1950,7 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
   const manage = (c) => can(me, 'manage_complaints') && inScope(me, c.building);
   const tagged = (c) => Boolean(c.cleaning && (c.cleaning.cleanerId === me.id || c.cleaning.assignedId === me.id));
   const canSee = (c) => (can(me, 'view_complaints') && inScope(me, c.building)) || manage(c) || tagged(c);
-  const link = (c) => `/?view=maintenance&tab=complaints&complaint=${c.id}`;
+  const link = (c) => `/?view=complaints&complaint=${c.id}`;
   const log = (c, kind, txt) => { c.log = [...(c.log || []), { at: nowIso(), byId: me.id, byName: me.name, kind, text: txt }]; c.updatedAt = nowIso(); };
   const cats = await cpCategories(env);
   const readFields = async (c, l) => {
@@ -2016,6 +2016,9 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
     return new Response([head, ...rows].map((r) => r.map(q).join(',')).join('\r\n'), { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="complaints-${londonDate()}.csv"` } });
   }
   if (!id) {
+    if (req.method === 'GET' && url.searchParams.get('summary') === '1') { // menu badge: open complaints you can see
+      return json({ open: list.filter((c) => canSee(c) && ['open', 'investigating'].includes(c.status)).length });
+    }
     if (req.method === 'GET') {
       const out = list.filter(canSee).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt)).map(shape);
       return json({ complaints: out, categories: cats, sources: CP_SOURCES, canManage: can(me, 'manage_complaints'), seesAll: can(me, 'view_complaints') });
