@@ -358,7 +358,6 @@ function shapeWeek(data, u) {
     let fresh = 0;
     for (const d of data.days) {
       d.units = d.units.filter((x) => x.checkOut || x.movedOut);
-      for (const x of d.units) if (!x.checkOut) x.checkIn = null; // a clean moved away: no arrival details on that row
       d.arrivals = d.turnovers;
       d.hasNew = d.units.some((x) => (x.checkIn && x.checkIn.isNew) || (x.checkOut && x.checkOut.isNew));
       fresh += d.units.filter((x) => x.checkIn && x.checkIn.isNew).length;
@@ -538,6 +537,19 @@ async function loadJobMoves(env, fresh) {
   jobMv = { at: Date.now(), map, ver: Object.keys(map).length ? fnv(JSON.stringify(map)) : '' };
   return map;
 }
+// Does a clean moved for stay `r` still apply? Not if Guesty changed things since: another booking code, another stay
+// now checking out on the new day, or new guests arriving before the new day (unless the move was made knowing that).
+// Decided from all the flat's stays, so every week (and every endpoint) gives the same answer.
+function moveFor(moves, r, stays, statuses) {
+  const co = r.checkOutDateLocalized, mv = moves[`${r.listingId}|${co}`];
+  if (!mv || !mv.to || mv.to === co) return null;
+  if (mv.code && r.confirmationCode && mv.code !== r.confirmationCode) return null;
+  const others = stays.filter((x) => x !== r && x.listingId === r.listingId && statuses.includes(x.status));
+  if (others.some((x) => x.checkOutDateLocalized === mv.to)) return { mv, void: 'clash' };
+  const nextIn = others.map((x) => x.checkInDateLocalized).filter((d) => d >= co).sort()[0] || null;
+  if (nextIn && nextIn < mv.to && nextIn !== (mv.nextIn || null)) return { mv, void: 'arrival', nextIn };
+  return { mv };
+}
 // What the page compares to know the schedule changed: Guesty's bookings plus any details edited or cleans moved in the app.
 const dataVersion = (snap) => snap.hash + (propOv.ver ? '.' + propOv.ver : '') + (jobMv.ver ? '~' + jobMv.ver : '');
 function listingMap(raw, cfg, allow, { all = false } = {}) {
@@ -650,26 +662,23 @@ function buildWeek(start, rawListings, stays, cfg, meta, allow, moves = {}) {
   for (const r of stays) {
     const ci = r.checkInDateLocalized, co = r.checkOutDateLocalized;
     if (!cfg.statuses.includes(r.status)) continue;
-    const mv = moves[`${r.listingId}|${co}`];
-    // A move made for a booking that has since changed (another confirmation code) no longer applies.
-    const job = mv && mv.to && mv.to !== co && !(mv.code && r.confirmationCode && mv.code !== r.confirmationCode) ? mv.to : null;
-    if (!((ci <= end && co >= start) || (job && inWeek(job)))) continue;
+    const m = moveFor(moves, r, stays, cfg.statuses), mv = m && m.mv;
+    const job = m && !m.void ? mv.to : null;
+    if (!((ci <= end && co >= start) || (mv && inWeek(mv.to)))) continue;
     const l = listings.get(r.listingId);
     if (!l) { if (!allow) hiddenBookings++; continue; }
+    if (m && m.void) moveWarnings.push(m.void === 'clash'
+      ? `${l.label}: another booking now checks out on ${dayLabel(mv.to)}, so the clean moved there shows on ${dayLabel(co)} again. Move it again if needed.`
+      : `${l.label}: new guests arrive ${dayLabel(m.nextIn)}, before the clean moved to ${dayLabel(mv.to)}, so it shows on ${dayLabel(co)} again.`);
     for (const d of dates) if (d >= ci && d < co) cell(r.listingId, d).occ = true;
     if (inWeek(ci)) cell(r.listingId, ci).in = ev(r, l, 'in');
     const out = { ...ev(r, l, 'out'), nextIn: nextIn(r.listingId, co) };
     if (job) moved.push({ id: r.listingId, l, co, job, mv, out });
     else if (inWeek(co)) cell(r.listingId, co).out = out;
   }
-  // Cleans moved to another day show there; the original day says where it went. If the new day has a check-out of
-  // its own (a booking made after the move), the move is ignored so the clean can't disappear.
-  for (const { id, l, co, job, mv, out } of moved) {
-    if (inWeek(job) && cell(id, job).out) {
-      if (inWeek(co)) cell(id, co).out = out;
-      moveWarnings.push(`${l.label}: the clean moved to ${dayLabel(job)} clashes with a check-out that day, so it shows on ${dayLabel(co)} instead.`);
-      continue;
-    }
+  // Cleans moved to another day show there; the original day says where it went. (Moves that no longer apply were
+  // already put back on their own day above.)
+  for (const { id, co, job, mv, out } of moved) {
     if (inWeek(job)) cell(id, job).out = { ...out, movedFrom: co, movedBy: mv.byName || '', movedNote: mv.note || '' };
     if (inWeek(co)) cell(id, co).movedOut = { to: job, by: mv.byName || '' };
   }
@@ -1462,8 +1471,8 @@ async function jobFor(env, ctx, l, date) {
   const stay = stays.find((r) => r.checkOutDateLocalized === date);
   if (!stay) return null;
   const nxt = stays.filter((r) => r !== stay && r.checkInDateLocalized >= date).sort((a, b) => a.checkInDateLocalized.localeCompare(b.checkInDateLocalized))[0] || null;
-  const mv = jobMv.map[`${l.id}|${date}`];
-  const moved = mv && mv.to && mv.to !== date && !(mv.code && stay.confirmationCode && mv.code !== stay.confirmationCode) ? mv : null;
+  const m = moveFor(jobMv.map, stay, snap.stays || [], cfg.statuses);
+  const moved = m && !m.void ? m.mv : null;
   return {
     date, code: stay.confirmationCode || '', checkIn: stay.checkInDateLocalized, outTime: stay.plannedDeparture || l.checkOutTime || null,
     displayDay: moved ? moved.to : date, moved, window: { from: snap.from, to: snap.to },
@@ -1530,7 +1539,9 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     let forDate = null;
     if (body.forDate && realDate(String(body.forDate))) {
       const job = await jobFor(env, ctx, l, String(body.forDate));
-      if (job && job.displayDay <= addDays(londonDate(), 1)) {
+      if (job && job.date > addDays(londonDate(), 1) && job.displayDay > addDays(londonDate(), 1)) return json({ error: `Those guests leave ${l.label} on ${dayLabel(job.date)}, so it can’t be cleaned for them yet.` }, 400);
+      if (job && job.nextIn && londonDate() > addDays(job.nextIn.date, 1)) return json({ error: `New guests have arrived at ${l.label} since that check-out (${dayLabel(job.nextIn.date)}). To record a clean done back then, use Mark as cleaned.` }, 400);
+      if (job) {
         const counted = list.find((c) => c.listingId === l.id && c.status === 'completed' && c.forDate === job.date);
         if (counted) return json({ error: `${l.label} is already cleaned for ${dayLabel(job.displayDay)} (${counted.manual ? 'marked by ' + counted.manual.byName : counted.cleanerName}). Reset that cleaning first if it needs doing again.` }, 409);
         forDate = job.date;
@@ -1561,8 +1572,9 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     const sum = (c) => ({ id: c.id, cleanerName: c.cleanerName, date: c.date, forDate: c.forDate || null, startedAt: c.startedAt, endedAt: c.endedAt, manual: c.manual || null, videos: (c.media || []).length });
     const done = list.filter((c) => c.listingId === l.id && c.status === 'completed');
     const counted = done.find((c) => c.forDate === job.date) || null;
-    const last = [londonDate(), addDays(job.displayDay, 3)].sort()[0];
-    const candidates = counted ? [] : done.filter((c) => (!c.forDate || c.forDate === job.date) && c.date >= addDays(job.displayDay, -1) && c.date <= last).sort((a, b) => a.startedAt.localeCompare(b.startedAt)).map(sum);
+    const since = [job.date, job.displayDay].sort()[0]; // the guests left on job.date; a clean moved earlier counts from then
+    const last = [londonDate(), addDays([job.date, job.displayDay].sort()[1], 3)].sort()[0];
+    const candidates = counted ? [] : done.filter((c) => (!c.forDate || c.forDate === job.date) && c.date >= addDays(since, -1) && c.date <= last).sort((a, b) => a.startedAt.localeCompare(b.startedAt)).map(sum);
     const assigned = ((await env.STORE.get('assignments', 'json')) || {})[`${job.displayDay}|${l.id}`] || null;
     return json({ job, counted: counted && sum(counted), candidates, assigned: assigned && { cleanerId: assigned.cleanerId, cleanerName: assigned.cleanerName }, guestyEligible: flatWaiting(job) && !config(env).mock });
   }
@@ -1577,7 +1589,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     if (!job) return json({ error: `There’s no check-out at ${l.label} on ${realDate(forDate) ? dayLabel(forDate) : 'that day'} to mark cleaned.` }, 400);
     if (!realDate(date)) return json({ error: 'Pick the day it was cleaned.' }, 400);
     if (date > londonDate()) return json({ error: 'That day hasn’t happened yet.' }, 400);
-    if (date < job.displayDay) return json({ error: `That’s before the guests left (${dayLabel(job.displayDay)}).` }, 400);
+    const since = [job.date, job.displayDay].sort()[0];
+    if (date < since) return json({ error: `That’s before the guests left (${dayLabel(job.date)}).` }, 400);
     if (date < job.window.from) return json({ error: 'That’s too far back to record here.' }, 400);
     if (job.nextIn && date > job.nextIn.date) return json({ error: `The next guests arrived on ${dayLabel(job.nextIn.date)}, so it must have been cleaned by then.` }, 400);
     const start = body.start ? String(body.start) : '', end = body.end ? String(body.end) : '';
@@ -1585,7 +1598,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     if (start && end && end <= start) return json({ error: 'It has to finish after it started.' }, 400);
     if (start && date === job.date && !job.moved && job.outTime && start < minusMin(job.outTime, 120)) return json({ error: `That’s before the guests left (check-out ${fmtTime(job.outTime)}).` }, 400);
     if (start && job.nextIn && date === job.nextIn.date && job.nextIn.time && start >= job.nextIn.time) return json({ error: `That’s after the next guests arrived (${fmtTime(job.nextIn.time)}).` }, 400);
-    const startedAt = londonToIso(date, start || (date === job.date && job.outTime ? job.outTime : '12:00'));
+    let startedAt = londonToIso(date, start || (date === job.date && job.outTime ? job.outTime : '12:00'));
+    if (!start && Date.parse(startedAt) > Date.now()) startedAt = nowIso(); // no time given for today: never a time still to come
     const endedAt = end ? londonToIso(date, end) : startedAt;
     if ((start && Date.parse(startedAt) > Date.now()) || (end && Date.parse(endedAt) > Date.now() + 60e3)) return json({ error: 'That time hasn’t happened yet.' }, 400);
     let cleaner = null;
@@ -1626,6 +1640,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   const stepIn = canStepIn(me, rec);
   // Someone reset this cleaning while it was being done: say so instead of a confusing step error.
   if (req.method === 'POST' && rec.status === 'cancelled' && ['end', 'confirm', 'checks-done', 'complete', 'key', 'no-video'].includes(action)) {
+    if (!isMine && !stepIn && !canReset) return deny();
     return json({ error: rec.reset ? `${rec.reset.byName} reset this cleaning. Start again if the flat still needs cleaning.` : 'This cleaning was cancelled.', cleaning: rec }, 409);
   }
 
@@ -1710,6 +1725,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   if (req.method === 'POST' && action === 'no-video') {
     // The cleaner's phone won't upload the walkthrough video: an Admin, User or supervisor can finish without it (recorded).
     if (!stepIn) return deny('Only an Admin, User or supervisor can finish a cleaning without its video.');
+    if (isMine) return deny('Upload the video of your own cleaning, or ask another Admin, User or supervisor to finish it without one.');
     if (rec.status !== 'awaiting_video') return json({ error: 'This cleaning isn’t waiting for its video.' }, 400);
     const body = await req.json().catch(() => ({}));
     rec.videoSkipped = { byId: me.id, byName: me.name, at: nowIso(), reason: String(body.reason || '').trim().slice(0, 300) || null };
@@ -1736,7 +1752,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     if (rec.forDate === job.date) return json({ cleaning: rec });
     const other = list.find((c) => c.id !== rec.id && c.listingId === rec.listingId && c.status === 'completed' && c.forDate === job.date);
     if (other) return json({ error: `Already counted: ${other.manual ? 'marked by ' + other.manual.byName : other.cleanerName + '’s cleaning'} on ${dayLabel(other.date)}. Reset that one first.` }, 409);
-    if (rec.date < addDays(job.displayDay, -1)) return json({ error: `This cleaning was before the guests left (${dayLabel(job.displayDay)}).` }, 400);
+    if (rec.date < addDays([job.date, job.displayDay].sort()[0], -1)) return json({ error: `This cleaning was before the guests left (${dayLabel(job.date)}).` }, 400);
+    if (job.nextIn && rec.date > addDays(job.nextIn.date, 1)) return json({ error: `The next guests arrived on ${dayLabel(job.nextIn.date)}, so this cleaning can’t be for that check-out.` }, 400);
     rec.forBy = { byId: me.id, byName: me.name, at: nowIso(), previous: rec.forDate || null };
     rec.forDate = job.date;
     await saveList(env, 'cleanings', list);
@@ -1834,8 +1851,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   }
   if (req.method === 'POST' && (action === 'reset' || action === 'cancel')) {
     // Reset: the flat shows as not cleaned again. The record stays in the log, marked reset, with who, when and why.
-    if (rec.status === 'cancelled') return json({ cleaning: rec });
     if (!canReset) return deny(rec.status === 'completed' ? 'Only an Admin, User or supervisor can reset a finished cleaning.' : 'You don’t have permission to stop someone else’s cleaning.');
+    if (rec.status === 'cancelled') return json({ cleaning: rec });
     const body = await req.json().catch(() => ({}));
     const from = rec.status, now = nowIso();
     let dirty = false;
@@ -2349,16 +2366,31 @@ async function jobMovesApi(req, env, ctx, me) {
   const from = String(body.from || ''), to = req.method === 'DELETE' ? from : String(body.to || '');
   if (!realDate(from) || !realDate(to)) return json({ error: 'Pick a day.' }, 400);
   const job = await jobFor(env, ctx, l, from);
-  if (!job) return json({ error: `There’s no check-out at ${l.label} on ${dayLabel(from)}.` }, 404);
   const moves = (await env.STORE.get('jobMoves', 'json')) || {};
-  const key = `${l.id}|${from}`, oldDay = job.displayDay, force = body.force === true;
+  const key = `${l.id}|${from}`;
+  if (!job) {
+    // The booking changed in Guesty (a new check-out day, or cancelled): a move left behind can still be undone.
+    if (req.method === 'DELETE' && moves[key]) {
+      const assigned = (await env.STORE.get('assignments', 'json')) || {}, old = moves[key];
+      const a = assigned[`${old.to}|${l.id}`];
+      if (a && a.movedFrom) { delete assigned[`${old.to}|${l.id}`]; await env.STORE.put('assignments', JSON.stringify(assigned)); }
+      delete moves[key];
+      await env.STORE.put('jobMoves', JSON.stringify(moves)); await loadJobMoves(env, true);
+      if (a && a.movedFrom && a.cleanerId !== me.id) await notify(env, ctx, [a.cleanerId], { type: 'unassigned', title: `${l.label}: ${dayLabel(old.to)} cancelled`, body: `The booking changed, so the clean moved there no longer applies · ${me.name}`, url: `/?view=day&date=${old.to}`, tag: `move-${key}` }).catch(() => {});
+      return json({ ok: true, removed: true });
+    }
+    return json({ error: `There’s no check-out at ${l.label} on ${dayLabel(from)}.` }, 404);
+  }
+  const oldDay = job.displayDay, force = body.force === true;
   if (to === oldDay) return json({ ok: true, unchanged: true, move: job.moved });
   if (to !== from) {
     const days = Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 864e5);
     if (Math.abs(days) > 14 || to < job.window.from || to > job.window.to) return json({ error: 'Pick a day within 2 weeks of the check-out.' }, 400);
     if (to <= job.checkIn) return json({ error: `Those guests only arrived on ${dayLabel(job.checkIn)}. Pick a day after that.` }, 400);
     const snap = await getSnapshot(env, ctx), cfg = config(env);
-    if ((snap.stays || []).some((r) => r.listingId === l.id && cfg.statuses.includes(r.status) && r.checkOutDateLocalized === to && !moves[`${l.id}|${to}`]) || Object.entries(moves).some(([k, m]) => k !== key && m.listingId === l.id && m.to === to)) {
+    const stays = (snap.stays || []).filter((r) => r.listingId === l.id && cfg.statuses.includes(r.status));
+    const applies = (k) => { const [, f] = k.split('|'); const r = stays.find((x) => x.checkOutDateLocalized === f); const m2 = r && moveFor(moves, r, snap.stays || [], cfg.statuses); return Boolean(m2 && !m2.void); };
+    if (stays.some((r) => r.checkOutDateLocalized === to && !applies(`${l.id}|${to}`)) || Object.entries(moves).some(([k, m]) => k !== key && m.listingId === l.id && m.to === to && applies(k))) {
       return json({ error: `${l.label} already has a clean on ${dayLabel(to)}.` }, 409);
     }
     const warnings = [];
@@ -2374,12 +2406,13 @@ async function jobMovesApi(req, env, ctx, me) {
   if (aOld) {
     delete assigned[`${oldDay}|${l.id}`];
     const tk = `${to}|${l.id}`;
-    if (assigned[tk] && assigned[tk].cleanerId !== aOld.cleanerId) bumped = aOld;
-    else assigned[tk] = { ...aOld, date: to, movedFrom: oldDay, byId: me.id, byName: me.name, at: nowIso() };
+    // Nothing else is cleaned there that day (checked above), so an assignment already on it is a leftover: replace it.
+    if (assigned[tk] && assigned[tk].cleanerId !== aOld.cleanerId) bumped = assigned[tk];
+    assigned[tk] = { ...aOld, date: to, movedFrom: oldDay, byId: me.id, byName: me.name, at: nowIso() };
   }
   const note = String(body.note || '').trim().slice(0, 300);
   if (to === from) delete moves[key];
-  else moves[key] = { listingId: l.id, from, to, code: job.code, label: l.label, building: l.building, byId: me.id, byName: me.name, at: nowIso(), note, forced: force };
+  else moves[key] = { listingId: l.id, from, to, code: job.code, nextIn: job.nextIn ? job.nextIn.date : null, label: l.label, building: l.building, byId: me.id, byName: me.name, at: nowIso(), note, forced: force };
   for (const [k, m] of Object.entries(moves)) if (m.from < addDays(londonDate(), -90)) delete moves[k];
   await env.STORE.put('jobMoves', JSON.stringify(moves));
   if (aOld) await env.STORE.put('assignments', JSON.stringify(assigned));
@@ -2388,8 +2421,8 @@ async function jobMovesApi(req, env, ctx, me) {
   const link = `/?view=day&date=${to}&flat=${encodeURIComponent(l.id)}`;
   const title = to === from ? `${l.label} moved back to ${dayLabel(to)}` : `${l.label} moved to ${dayLabel(to)}`;
   const text = `Was ${dayLabel(oldDay)} · moved by ${me.name}${note ? ` — ${note}` : ''}`;
-  if (aOld && !bumped) await notify(env, ctx, [aOld.cleanerId].filter((x) => x !== me.id), { type: 'moved', title, body: text, url: link, tag: `move-${key}` }).catch(() => {});
-  if (bumped) await notify(env, ctx, [bumped.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', title: `${l.label} moved to ${dayLabel(to)}`, body: `Someone else is already cleaning it that day, so you’re no longer assigned. ${text}`, url: link, tag: `move-${key}` }).catch(() => {});
+  if (aOld) await notify(env, ctx, [aOld.cleanerId].filter((x) => x !== me.id), { type: 'moved', title, body: text, url: link, tag: `move-${key}` }).catch(() => {});
+  if (bumped) await notify(env, ctx, [bumped.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', title: `${l.label} on ${dayLabel(to)}`, body: `You’re no longer assigned: ${aOld.cleanerName} cleans it that day (moved from ${dayLabel(oldDay)} by ${me.name}).`, url: link, tag: `move-${key}` }).catch(() => {});
   return json({ ok: true, move: moves[key] || null, to });
 }
 

@@ -1413,7 +1413,10 @@
       cRange = range;
       const wasMine = myActive();
       cleanings = r.cleanings; checklistDef = r.checklist; holdMs = r.holdMs;
-      const gone = wasMine && cleanings.find((c) => c.id === wasMine.id && c.status === 'cancelled' && c.reset);
+      let gone = wasMine && cleanings.find((c) => c.id === wasMine.id && c.status === 'cancelled' && c.reset);
+      if (wasMine && !gone && !cleanings.some((c) => c.id === wasMine.id)) { // not in this week's list any more: ask about it directly
+        try { const x = (await getJSON('/api/cleanings/' + encodeURIComponent(wasMine.id))).cleaning; if (x && x.status === 'cancelled' && x.reset) gone = x; } catch (_) {}
+      }
       if (gone) {
         for (const [k, x] of uploads) if (x.ownerId === gone.id) { x.cancelled = true; uploads.delete(k); }
         releaseWake(); clearInterval(keyPoll); keyPoll = null;
@@ -1682,9 +1685,9 @@
         ${can('reset_cleanings') ? '<button class="linkbtn" id="reset-active">Reset this cleaning</button>' : ''}</div>`
         + (active.status === 'awaiting_key' && stepsIn() ? `<p class="stepin-note">You can finish ${esc(active.cleanerName.split(' ')[0])}’s cleaning here.</p>${keyStep(active)}` : '')
         + (active.status === 'awaiting_video' && stepsIn() ? `<p class="stepin-note">${esc(active.cleanerName.split(' ')[0])} hasn’t uploaded the video yet${active.checksConfirmedAt ? ` (checks done at ${fmtClock(active.checksConfirmedAt)})` : ''}. If their phone won’t upload it, you can finish without it.</p><button class="btn wide" id="no-video">Finish without the video</button>` : '');
-    } else if (can('do_cleaning') && me.role !== 'user' && !(duNow && duNow.movedOut && !duNow.checkOut) && !(duNow && duNow.checkOut && done.length)) {
+    } else if (can('do_cleaning') && me.role !== 'user' && !(duNow && duNow.movedOut && !duNow.checkOut) && !(duNow && duNow.checkOut && done.length) && !(data && selected > nextDay(data.today))) {
       // Users don't clean; Admins are asked first. Not when this check-out is already cleaned (reset it to clean again),
-      // nor on a day whose clean was moved to another day.
+      // nor on a day whose clean was moved to another day, nor further ahead than tomorrow.
       body = `<button class="btn big primary" id="begin-clean"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 5v14l11-7z"/></svg>Begin cleaning</button>`;
     }
 
@@ -1745,7 +1748,7 @@
       const forDate = job ? job.from : null, otherDay = forDate && data && selected !== data.today;
       if (admin || otherDay) {
         const text = [admin ? 'You’re not a cleaner. Are you sure you want to start this cleaning yourself? It will be recorded under your name.' : '',
-          otherDay ? `It will count for the check-out on ${longDate(selected)}${selected < data.today ? ' (to record a cleaning that’s already done, use “Mark as cleaned” instead)' : ''}.` : ''].filter(Boolean).join(' ');
+          otherDay ? `It will count for the guests who ${job.from <= data.today ? 'left' : 'leave'} on ${longDate(job.from)}${job.moved ? ` (clean moved to ${longDate(selected)})` : ''}${selected < data.today && can('mark_cleaned') ? '. To record a cleaning that’s already done, use “Mark as cleaned” instead' : ''}.` : ''].filter(Boolean).join(' ');
         if (!(await askConfirm({ title: admin ? 'You’re not a cleaner' : `Clean for ${WD_LONG.format(D(selected))}?`, text, yes: 'Yes, start cleaning', no: 'Cancel' }))) return;
       }
       try { await send('POST', '/api/cleanings/start', { listingId: sheetListing, forDate, ...(admin ? { notCleanerConfirmed: true } : {}) }); toast('Cleaning started'); await refreshCleanings(); }
@@ -1839,7 +1842,7 @@
     const html = `<p>${esc(u.label)} · guests left ${esc(longDate(j.date))}${j.moved ? ` (clean moved to ${esc(longDate(j.displayDay))})` : ''}${j.nextIn ? ` · next guests ${esc(longDate(j.nextIn.date))}${j.nextIn.time ? ' at ' + esc(ampm(j.nextIn.time)) : ''}` : ''}.</p>
       ${cand ? `<div class="md-sec"><b>Already in the Cleaning log</b><p class="muted">Started on another day, so it isn’t counted here yet.</p>${cand}</div><p class="md-or">Or record a cleaning that isn’t in the log:</p>` : ''}
       <div class="md-grid">
-        <label><span>When was it cleaned?</span><input type="date" id="mc-date" value="${esc(j.displayDay)}" min="${esc(j.displayDay)}" max="${esc(last)}" required></label>
+        <label><span>When was it cleaned?</span><input type="date" id="mc-date" value="${esc([j.displayDay, last].sort()[0])}" min="${esc([j.date, j.displayDay].sort()[0])}" max="${esc(last)}" required></label>
         <label><span>Who cleaned it?</span><select id="mc-who"><option value="">Not recorded</option>${people.map((p) => `<option value="${esc(p.id)}" ${c.assigned && c.assigned.cleanerId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
         <label><span>Started <span class="muted">(optional)</span></span><input type="time" id="mc-start"></label>
         <label><span>Finished <span class="muted">(optional)</span></span><input type="time" id="mc-end"></label>
