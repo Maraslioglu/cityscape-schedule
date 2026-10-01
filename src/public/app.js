@@ -1111,6 +1111,9 @@
     $('acct-users').classList.toggle('hidden', !navAllowed('users'));
     $('acct-settings').classList.toggle('hidden', !navAllowed('settings'));
     $('acct-admin').classList.toggle('hidden', !navAllowed('users') && !navAllowed('settings'));
+    $('acct-props').classList.toggle('hidden', !navAllowed('props'));
+    $('acct-forum').classList.toggle('hidden', !navAllowed('forum'));
+    $('acct-more').classList.toggle('hidden', !navAllowed('props') && !navAllowed('forum'));
   }
   $('pw-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1305,6 +1308,15 @@
   $('me-btn').onclick = () => setView('account');
   $('acct-users').onclick = () => setView('users');
   $('acct-settings').onclick = () => setView('settings');
+  // On phones Properties and Forum sit under My account › More (not in the bottom bar): their dots follow them there,
+  // and the profile button shows a dot when either has something new.
+  $('acct-props').onclick = () => setView('props');
+  $('acct-forum').onclick = () => setView('forum');
+  const syncMoreDots = () => {
+    const props = !$('nd-props').classList.contains('hidden') && navAllowed('props'), forum = !$('nd-forum').classList.contains('hidden') && navAllowed('forum');
+    $('nd-props2').classList.toggle('hidden', !props); $('nd-forum2').classList.toggle('hidden', !forum); $('nd-me').classList.toggle('hidden', !props && !forum);
+  };
+  for (const id of ['nd-props', 'nd-forum']) new MutationObserver(syncMoreDots).observe($(id), { attributes: true, attributeFilter: ['class'] });
   $('me-btn2').onclick = () => setView('account');
   (async () => {
     const q0 = new URLSearchParams(location.search);

@@ -48,7 +48,7 @@
     <div class="brand"><svg class="cs-mark" viewBox="18.5 20 64.1 60" aria-hidden="true"><path fill="currentColor" d="M18.5 41.3 39.3 20H61v21.3H39.3V80H18.5zM61 41.3h21.6v14.5L61 80z"/></svg><b class="name">Cityscape</b></div>
     <span class="spacer"></span>
     <button class="btn sq bell" id="bell" aria-label="Notifications" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16.5V11a6 6 0 1 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg><span class="bell-n hidden" id="bell-n"></span></button>
-    <button class="btn me" id="me-btn2" title="My account"><span class="avatar" id="me-avatar2"></span></button>
+    <button class="btn me" id="me-btn2" title="My account"><span class="avatar" id="me-avatar2"></span><span class="ndot hidden" id="nd-me" title="Something new under More"></span></button>
   </div>
 </header>
 
@@ -194,6 +194,7 @@
     <div class="acct-grid">
       <div class="acct-left">
         <div class="card pad" id="acct-info"></div>
+        <div class="card pad acct-more hidden" id="acct-more"><h3>More</h3><div class="acct-links"><button class="btn" id="acct-props">Properties<span class="ndot hidden" id="nd-props2" title="A KeyNest flat needs linking"></span></button><button class="btn" id="acct-forum">Forum<span class="ndot hidden" id="nd-forum2" title="New posts"></span></button></div></div>
         <div class="card pad acct-admin hidden" id="acct-admin"><h3>Admin</h3><div class="acct-links"><button class="btn" id="acct-users">Users</button><button class="btn" id="acct-settings">Settings</button></div></div>
       </div>
       <form class="card pad" id="pw-form">

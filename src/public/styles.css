@@ -1241,8 +1241,12 @@ td.unit .u { font-weight: 600; }
 /* Complaints (own page, under Maintenance in the menu) */
 #view-complaints .weekbar { gap: 10px; }
 @media (max-width: 760px) { #view-complaints .weekbar .range { flex: 1 1 auto; } #cp-new { flex: 1 1 100%; order: 10; } }
-/* Phone menu: seven items, so each gets room for its own label rather than an equal slot ("Complaints" is the longest). */
-@media (max-width: 760px) { .snav button { flex: 1 1 auto; min-width: 0; padding-left: 1px; padding-right: 1px; } }
+/* Phone menu: the day-to-day pages only. Properties and Forum (like Users and Settings) are under My account › More. */
+@media (max-width: 760px) { .snav button[data-group="portfolio"], .snav button[data-group="team"] { display: none !important; } .acct-more, .acct-admin { order: -1; } }
+@media (min-width: 761px) { .acct-more { display: none; } }
+.acct-links .btn .ndot { margin-left: 6px; }
+#me-btn2 { position: relative; }
+#me-btn2 .ndot { position: absolute; top: 2px; right: 2px; box-shadow: 0 0 0 2px var(--surface); }
 .cp-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 12px; }
 .cpf { display: flex; flex-direction: column; gap: 4px; min-width: 140px; flex: 0 1 180px; }
 .cpf.grow { flex: 1 1 200px; }
