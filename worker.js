@@ -2235,6 +2235,7 @@ async function assistantMaintenanceApi(req, env, ctx) {
     reporterId: bot.id, reporterName: bot.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
     media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `${guestRequest ? 'Guest request' : 'Reported'} ${origin}` }],
     damageId: null, reservationId, ...(guestRequest ? { kind: 'guest_request' } : {}),
+    complaintId: text(body.complaintId, 40) || null, // the guest complaint it came with, if any
   };
   t.seriesId = t.id;
   tasks.push(t);
@@ -2244,6 +2245,113 @@ async function assistantMaintenanceApi(req, env, ctx) {
   await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: heading, body: `${t.title} — ${origin}`, url: link(t), tag: `mt-${t.id}` });
   console.log(`[maintenance] guest assistant ${guestRequest ? 'added guest request' : 'reported'} "${t.title}" at ${t.label}`);
   return json({ task: { id: t.id, url: link(t), duplicate: false, due: t.due, dueChanged: false } });
+}
+
+// ---------------------------------------------------------------- guest assistant: complaints
+// The guest assistant logs complaints it spots in guest messages. Each is tied to the exact booking (by its Guesty
+// reservation id) and to the cleaning that got the flat ready for that stay. The cleaner of that cleaning is told
+// straight away only when the complaint is about the clean (the assistant says so); managers are always told, since
+// nobody logged it by hand. A complaint the team says isn't one is dismissed from Slack.
+const ASSISTANT = { id: 'assistant', name: 'Guest assistant (AI)' };
+const assistantAuthorised = (req, env) => {
+  const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  return Boolean(env.ASSISTANT_API_KEY && safeEqual(key, env.ASSISTANT_API_KEY));
+};
+// The stay for a booking, and the cleaning that prepared it: the last finished cleaning on or before check-in. If that
+// cleaning is older than the previous guest's checkout, no cleaning was recorded for this turnover, so none is tagged.
+async function cpStayForBooking(env, ctx, l, reservationId, hint, date) {
+  const snap = await getSnapshot(env, ctx);
+  const stays = (snap.stays || []).filter((r) => r.listingId === l.id);
+  const r = reservationId ? stays.find((x) => x._id === reservationId) : null;
+  let stay = r ? { code: r.confirmationCode || '', checkIn: r.checkInDateLocalized, checkOut: r.checkOutDateLocalized, guests: r.guestsCount || null } : null;
+  if (!stay && hint && realDate(hint.checkIn)) stay = { code: String(hint.code || '').slice(0, 40), checkIn: hint.checkIn, checkOut: realDate(hint.checkOut) ? hint.checkOut : null, guests: Number(hint.guests) || null };
+  if (!stay) stay = (await cpLookup(env, ctx, l, date)).stay;
+  if (!stay) return { stay: null, cleaning: null, gap: false };
+  const previous = stays.filter((x) => x._id !== reservationId && x.checkOutDateLocalized <= stay.checkIn).sort((a, b) => b.checkOutDateLocalized.localeCompare(a.checkOutDateLocalized))[0];
+  const assigned = (await env.STORE.get('assignments', 'json')) || {};
+  const done = (await loadList(env, 'cleanings')).filter((c) => c.listingId === l.id && c.status === 'completed' && (c.forDate || c.date) <= stay.checkIn)
+    .sort((a, b) => (b.forDate || b.date).localeCompare(a.forDate || a.date) || (b.endedAt || b.date).localeCompare(a.endedAt || a.date));
+  const last = done[0] || null;
+  const gap = Boolean(last && previous && (last.forDate || last.date) < previous.checkOutDateLocalized);
+  return { stay, cleaning: last && !gap ? cpCleaning(assigned)(last) : null, gap, noCleaning: !last };
+}
+async function assistantComplaintsApi(req, env, ctx, parts) {
+  if (!assistantAuthorised(req, env)) return json({ error: 'unauthorised' }, 401);
+  const [, , , , id, action] = parts; // /api/integrations/complaints/:id/:action
+  const cats = await cpCategories(env);
+  if (id === 'categories' && req.method === 'GET') return json({ categories: cats });
+  const body = req.method === 'GET' ? {} : await req.json().catch(() => ({}));
+  const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
+  const list = await loadList(env, 'complaints');
+  const link = (c) => `/?view=complaints&complaint=${c.id}`;
+  const log = (c, kind, txt) => { c.log = [...(c.log || []), { at: nowIso(), byId: ASSISTANT.id, byName: ASSISTANT.name, kind, text: txt }]; c.updatedAt = nowIso(); };
+  const managers = async (c) => recipients(env, ['admin', 'user'], c.building, null);
+  const cleanerIds = (c) => (c.cleaning ? [c.cleaning.cleanerId, c.cleaning.assignedId].filter(Boolean) : []);
+  const reply = (c, duplicate) => json({ complaint: { id: c.id, url: link(c), duplicate, status: c.status, severity: c.severity, categories: c.categories,
+    stay: c.stay, cleaning: c.cleaning ? { date: c.cleaning.date, cleanerName: c.cleaning.cleanerName, assignedName: c.cleaning.assignedName } : null,
+    cleanerTold: Boolean(c.cleanerTold), noCleaningRecorded: Boolean(c.noCleaningRecorded) } });
+  const tellCleaner = async (c) => {
+    const who = cleanerIds(c);
+    if (!who.length || c.cleanerTold) return;
+    c.cleanerTold = true;
+    await notify(env, ctx, [...new Set(who)], { type: 'complaint', title: `Complaint detected · ${c.label}`, body: `${c.categories.length ? c.categories.join(', ') + ' — ' : ''}${c.title}. About the cleaning on ${c.cleaning.date}.`, url: link(c), tag: `cp-${c.id}` });
+  };
+
+  if (!id && req.method === 'POST') {
+    const l = await listingInfo(env, ctx, String(body.listingId || ''));
+    if (!l) return json({ error: 'Unknown or hidden listing.' }, 404);
+    const title = text(body.title, 160);
+    if (title.length < 3) return json({ error: 'Say in a few words what the guest complained about.' }, 400);
+    const date = realDate(body.date) ? body.date : londonDate();
+    const reservationId = text(body.reservationId, 40) || null;
+    const categories = [...new Set((Array.isArray(body.categories) ? body.categories : []).map((x) => text(x, 40)).filter((x) => cats.includes(x)))];
+    const severity = CP_SEVERITY.includes(body.severity) ? body.severity : 'medium';
+    const aboutCleaning = body.aboutCleaning === true;
+    const details = text(body.details, 4000);
+    // The same guest complaining again about the same thing: added to the open complaint, not a new one.
+    const same = reservationId && list.find((c) => c.createdById === ASSISTANT.id && c.reservationId === reservationId && c.listingId === l.id && ['open', 'investigating'].includes(c.status)
+      && (normName(c.title) === normName(title) || (categories.length && (c.categories || []).some((x) => categories.includes(x)))));
+    if (same) {
+      log(same, 'note', details || title);
+      same.categories = [...new Set([...(same.categories || []), ...categories])];
+      if (CP_SEVERITY.indexOf(severity) > CP_SEVERITY.indexOf(same.severity)) { log(same, 'event', `Severity raised to ${severity}`); same.severity = severity; }
+      if (aboutCleaning && !same.aboutCleaning) { same.aboutCleaning = true; await tellCleaner(same); }
+      await saveList(env, 'complaints', list);
+      return reply(same, true);
+    }
+    const found = await cpStayForBooking(env, ctx, l, reservationId, body.stay, date);
+    const c = { id: newId(), listingId: l.id, label: l.label, building: l.building, unitType: l.unitType, date, title, details, source: 'guest_message', severity, categories, status: 'open', upheld: null, resolution: '', compensation: null,
+      stay: found.stay, cleaning: found.cleaning, media: [], createdAt: nowIso(), updatedAt: nowIso(), createdById: ASSISTANT.id, createdByName: ASSISTANT.name, resolvedAt: null, resolvedBy: null, log: [],
+      reservationId, aboutCleaning, cleanerTold: false, noCleaningRecorded: Boolean(found.gap || found.noCleaning), slackUrl: text(body.slackUrl, 300) || null };
+    log(c, 'event', 'Logged by the guest assistant from a guest message');
+    if (found.gap) log(c, 'event', 'No cleaning was recorded between the previous guest’s checkout and this check-in, so none is tagged.');
+    list.push(c);
+    if (aboutCleaning) await tellCleaner(c);
+    await saveList(env, 'complaints', list);
+    const cleaningLine = c.cleaning ? `Tagged to the cleaning on ${c.cleaning.date} by ${c.cleaning.cleanerName}` : c.noCleaningRecorded ? 'No cleaning recorded before this stay' : 'No cleaning tagged';
+    await notify(env, ctx, await managers(c), { type: 'complaint', title: `${severity === 'high' ? 'Serious complaint' : 'Complaint'} from a guest · ${c.label}`, body: `${c.title}. ${cleaningLine}.`, url: link(c), tag: `cp-${c.id}` });
+    console.log(`[complaints] guest assistant logged a complaint at ${c.label}${c.cleaning ? ` (cleaning by ${c.cleaning.cleanerName}${c.cleanerTold ? ', told' : ''})` : ''}`);
+    return reply(c, false);
+  }
+
+  const c = id ? list.find((x) => x.id === id) : null;
+  if (!c) return json({ error: 'That complaint isn’t available.' }, 404);
+  if (action === 'dismiss' && req.method === 'POST') {
+    if (c.createdById !== ASSISTANT.id) return json({ error: 'Only complaints the assistant logged can be dismissed from Slack.' }, 403);
+    if (!['open', 'investigating'].includes(c.status)) return reply(c, false);
+    const by = text(body.by, 80) || 'the team';
+    c.status = 'dismissed';
+    c.resolvedAt = nowIso();
+    c.resolvedBy = by;
+    c.resolution = c.resolution || 'Not a complaint (marked in Slack).';
+    log(c, 'event', `Dismissed from Slack by ${by}: not a complaint`);
+    await saveList(env, 'complaints', list);
+    // A cleaner who was told shouldn't be left worrying about it.
+    if (c.cleanerTold) await notify(env, ctx, cleanerIds(c), { type: 'complaint', title: `Complaint dismissed · ${c.label}`, body: `The complaint about the cleaning on ${c.cleaning.date} was a mistake and has been dismissed.`, url: link(c), tag: `cp-${c.id}` });
+    console.log(`[complaints] ${by} dismissed the assistant's complaint at ${c.label}`);
+    return reply(c, false);
+  }
+  return json({ error: 'Not supported' }, 405);
 }
 
 // Used by server.mjs before accepting or serving media files.
@@ -2521,7 +2629,8 @@ async function handle(req, env, ctx) {
     return new Response('ok');
   }
 
-  if (p === '/api/integrations/maintenance' && req.method === 'POST') return assistantMaintenanceApi(req, env, ctx);
+  if (p === '/api/integrations/maintenance' && req.method === 'POST') return withLock('maintenance', () => assistantMaintenanceApi(req, env, ctx));
+  if (p === '/api/integrations/complaints' || p.startsWith('/api/integrations/complaints/')) return withLock('complaints', () => assistantComplaintsApi(req, env, ctx, p.split('/')));
 
   if (p.startsWith('/webhooks/guesty/') && req.method === 'POST') {
     const expectedKey = (await hmac(await secretKey(env), 'webhook')).slice(0, 32);
