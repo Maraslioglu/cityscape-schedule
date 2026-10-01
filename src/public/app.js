@@ -1397,7 +1397,7 @@
         <div class="tc-step">${active.status === 'in_progress' ? 'Cleaning now' : active.status === 'checklist' ? 'Doing final checks' : active.status === 'awaiting_key' ? 'Returning the key' : 'Uploading video'}</div>
         ${can('manage_users') ? '<button class="linkbtn" id="cancel-clean">Cancel this cleaning</button>' : ''}</div>`
         + (active.status === 'awaiting_key' && stepsIn() ? `<p class="stepin-note">You can finish ${esc(active.cleanerName.split(' ')[0])}’s cleaning here.</p>${keyStep(active)}` : '');
-    } else if (can('do_cleaning')) {
+    } else if (can('do_cleaning') && me.role !== 'user') { // Users don't clean; Admins are asked first
       body = `<button class="btn big primary" id="begin-clean"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 5v14l11-7z"/></svg>Begin cleaning</button>`;
     }
 
@@ -1440,7 +1440,9 @@
     }
     wireAssign();
     on('begin-clean', async () => {
-      try { await send('POST', '/api/cleanings/start', { listingId: sheetListing }); toast('Cleaning started'); await refreshCleanings(); }
+      const admin = me.role === 'admin';
+      if (admin && !(await askConfirm({ title: 'You’re not a cleaner', text: 'Are you sure you want to start this cleaning yourself? It will be recorded under your name.', yes: 'Yes, start cleaning', no: 'Cancel' }))) return;
+      try { await send('POST', '/api/cleanings/start', { listingId: sheetListing, ...(admin ? { notCleanerConfirmed: true } : {}) }); toast('Cleaning started'); await refreshCleanings(); }
       catch (e) { toast(e.message); refreshCleanings(); }
     });
     on('end-clean', async () => {

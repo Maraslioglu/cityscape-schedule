@@ -1413,7 +1413,10 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
 
   if (req.method === 'POST' && id === 'start') {
     if (!can(me, 'do_cleaning')) return deny();
+    if (me.role === 'user') return deny('Users can’t start cleanings. Assign it to a cleaner instead.');
     const body = await req.json().catch(() => ({}));
+    // Admins can, but only after confirming they really mean to (they're not a cleaner).
+    if (me.role === 'admin' && body.notCleanerConfirmed !== true) return json({ error: 'You’re not a cleaner. Confirm you want to start this cleaning yourself.' }, 400);
     const l = await listingInfo(env, ctx, String(body.listingId || ''));
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
     if (!inScope(me, l.building)) return deny('That property isn’t one of your buildings.');
