@@ -130,6 +130,8 @@
 
   <!-- MAINTENANCE -->
   <section id="view-maintenance" class="hidden">
+    <div class="mt-tabs" role="tablist" aria-label="Maintenance or complaints"><button role="tab" data-mtab="tasks" aria-selected="true">Tasks</button><button role="tab" data-mtab="complaints" aria-selected="false">Complaints<span class="tabn hidden" id="cp-tabn"></span></button></div>
+    <div id="mt-pane">
     <div class="weekbar"><h1>Maintenance</h1>
       <div class="range" role="tablist" aria-label="Which tasks"><button role="tab" data-mtf="open" aria-selected="true">To do</button><button role="tab" data-mtf="done" aria-selected="false">Done</button><button role="tab" data-mtf="all" aria-selected="false">All</button></div>
       <button class="btn mt-mine" id="mt-mine" aria-pressed="false">Mine only</button>
@@ -138,6 +140,20 @@
     </div>
     <div class="mt-sum" id="mt-sum"></div>
     <div id="mt-list"></div>
+    </div>
+    <div id="cp-pane" class="hidden">
+      <div class="weekbar"><h1>Complaints</h1>
+        <div class="range" role="tablist" aria-label="Which complaints"><button role="tab" data-cps="open" aria-selected="true">Open</button><button role="tab" data-cps="closed" aria-selected="false">Resolved</button><button role="tab" data-cps="all" aria-selected="false">All</button></div>
+        <button class="btn" id="cp-pat" aria-pressed="false">Patterns</button>
+        <span class="spacer"></span>
+        <a class="btn hidden" id="cp-csv" href="/api/complaints/export.csv" download>Export CSV</a>
+        <button class="btn primary hidden" id="cp-new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Log complaint</button>
+      </div>
+      <div class="cp-filters" id="cp-filters"></div>
+      <div id="cp-patterns" class="hidden"></div>
+      <div class="mt-sum" id="cp-sum"></div>
+      <div id="cp-list"></div>
+    </div>
   </section>
 
   <!-- FORUM -->

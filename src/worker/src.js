@@ -114,6 +114,8 @@ const PERM_DEFS = [
   ['manage_damage', 'Resolve damage reports', 'Damage & maintenance', LEADS],
   ['report_maintenance', 'Report maintenance issues', 'Damage & maintenance', ALL4],
   ['manage_maintenance', 'Assign & manage maintenance tasks', 'Damage & maintenance', RUNS],
+  ['view_complaints', 'See all complaints', 'Complaints', LEADS],
+  ['manage_complaints', 'Log & manage complaints', 'Complaints', LEADS],
   ['moderate_forum', 'Moderate the forum (status, delete posts)', 'Team', RUNS],
   ['manage_users', 'Manage users', 'Team', ['admin']],
   ['manage_settings', 'Settings & integrations (KeyNest)', 'Admin', RUNS],
@@ -1774,7 +1776,8 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
       id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
       priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due: null, repeat: null, cost: null,
       reporterId: me.id, reporterName: me.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
-      media: (await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => ['maintenance', 'damage'].includes(m.purpose) && m.listingId === l.id && (m.byId === me.id || mm))).map((m) => m.id), log: [], damageId: body.damageId ? String(body.damageId) : null,
+      media: (await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => ['maintenance', 'damage', 'complaint'].includes(m.purpose) && m.listingId === l.id && (m.byId === me.id || mm))).map((m) => m.id), log: [], damageId: body.damageId ? String(body.damageId) : null,
+      complaintId: body.complaintId ? String(body.complaintId).slice(0, 40) : null, // made from a guest complaint
     };
     t.seriesId = t.id;
     if (mm) { // triage details come from Admins and Users
@@ -1916,9 +1919,170 @@ async function assistantMaintenanceApi(req, env, ctx) {
 }
 
 // Used by server.mjs before accepting or serving media files.
+// ---------------------------------------------------------------- guest complaints
+// Kept for good (no trimming) so patterns can be tracked over time: by category, flat, building, cleaner and month.
+// Each complaint is tied to the stay it came from and the cleaning that prepared that stay; the cleaner who did that
+// cleaning (and whoever was assigned to it) is told "Complaint detected" and can see it and reply.
+const CP_DEFAULT_CATEGORIES = ['Cleanliness', 'Hair', 'Dust', 'Bathroom', 'Kitchen', 'Bed linen & towels', 'Missing supplies', 'Rubbish left', 'Smell', 'Damage or broken item', 'Maintenance issue', 'Check-in & keys', 'Noise', 'Pests', 'Other'];
+const CP_SOURCES = { guest_message: 'Guest message', airbnb_review: 'Airbnb review', booking_review: 'Booking.com review', direct: 'Direct / phone', staff: 'Found by staff', other: 'Other' };
+const CP_SEVERITY = ['low', 'medium', 'high'];
+const CP_STATUS = ['open', 'investigating', 'resolved', 'dismissed'];
+async function cpCategories(env) { return (await env.STORE.get('complaintCategories', 'json')) || CP_DEFAULT_CATEGORIES; }
+// The stay a complaint on `date` belongs to, and the cleaning that got the flat ready for it.
+async function cpLookup(env, ctx, l, date) {
+  const snap = await getSnapshot(env, ctx);
+  const stays = (snap.stays || []).filter((r) => r.listingId === l.id && r.checkInDateLocalized <= date && r.checkOutDateLocalized >= addDays(date, -14))
+    .sort((a, b) => b.checkInDateLocalized.localeCompare(a.checkInDateLocalized)).slice(0, 6)
+    .map((r) => ({ code: r.confirmationCode || '', checkIn: r.checkInDateLocalized, checkOut: r.checkOutDateLocalized, guests: r.guestsCount || null }));
+  const stay = stays.find((s) => s.checkIn <= date && s.checkOut >= date) || stays[0] || null;
+  const assigned = (await env.STORE.get('assignments', 'json')) || {};
+  const cleanings = (await loadList(env, 'cleanings')).filter((c) => c.listingId === l.id && c.status === 'completed' && c.date <= (stay ? stay.checkIn : date))
+    .sort((a, b) => (b.endedAt || b.date).localeCompare(a.endedAt || a.date)).slice(0, 8)
+    .map((c) => { const a = assigned[`${c.date}|${c.listingId}`]; return { id: c.id, date: c.date, cleanerId: c.cleanerId, cleanerName: c.cleanerName, startedAt: c.startedAt, endedAt: c.endedAt, assignedId: a ? a.cleanerId : null, assignedName: a ? a.cleanerName : null }; });
+  return { stays, stay, cleanings, suggestedCleaningId: cleanings[0] ? cleanings[0].id : null };
+}
+async function complaintsApi(req, env, ctx, me, parts, url) {
+  const [, , , id, action] = parts; // /api/complaints/:id/:action
+  const list = await loadList(env, 'complaints');
+  const save = () => saveList(env, 'complaints', list);
+  const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await req.json().catch(() => ({}));
+  const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
+  const manage = (c) => can(me, 'manage_complaints') && inScope(me, c.building);
+  const tagged = (c) => Boolean(c.cleaning && (c.cleaning.cleanerId === me.id || c.cleaning.assignedId === me.id));
+  const canSee = (c) => (can(me, 'view_complaints') && inScope(me, c.building)) || manage(c) || tagged(c);
+  const link = (c) => `/?view=maintenance&tab=complaints&complaint=${c.id}`;
+  const log = (c, kind, txt) => { c.log = [...(c.log || []), { at: nowIso(), byId: me.id, byName: me.name, kind, text: txt }]; c.updatedAt = nowIso(); };
+  const cats = await cpCategories(env);
+  const readFields = async (c, l) => {
+    if (body.title !== undefined) c.title = text(body.title, 160);
+    if (body.details !== undefined) c.details = text(body.details, 4000);
+    if (body.date !== undefined) { if (!realDate(body.date)) throw userError('Pick the date of the complaint.', 400); c.date = body.date; }
+    if (body.source !== undefined) c.source = CP_SOURCES[body.source] ? body.source : 'other';
+    if (body.severity !== undefined) c.severity = CP_SEVERITY.includes(body.severity) ? body.severity : 'medium';
+    if (body.categories !== undefined) c.categories = [...new Set((Array.isArray(body.categories) ? body.categories : []).map((x) => text(x, 40)).filter((x) => cats.includes(x)))];
+    if (body.status !== undefined && CP_STATUS.includes(body.status) && body.status !== c.status) {
+      c.status = body.status;
+      if (['resolved', 'dismissed'].includes(c.status)) { c.resolvedAt = nowIso(); c.resolvedBy = me.name; } else { c.resolvedAt = null; c.resolvedBy = null; }
+    }
+    if (body.upheld !== undefined) c.upheld = body.upheld === true ? true : body.upheld === false ? false : null;
+    if (body.resolution !== undefined) c.resolution = text(body.resolution, 2000);
+    if (body.compensation !== undefined) { const n = body.compensation === '' || body.compensation === null ? null : Math.round(Number(body.compensation) * 100) / 100; if (n !== null && !(n >= 0 && n < 100000)) throw userError('Compensation is an amount in pounds, like 25 or 40.50.', 400); c.compensation = n; }
+    if (body.stay !== undefined) c.stay = body.stay && typeof body.stay === 'object' ? { code: text(body.stay.code, 40), checkIn: realDate(body.stay.checkIn) ? body.stay.checkIn : null, checkOut: realDate(body.stay.checkOut) ? body.stay.checkOut : null, guests: Number(body.stay.guests) || null } : null;
+    if (body.cleaningId !== undefined) {
+      if (!body.cleaningId) c.cleaning = null;
+      else {
+        const found = (await cpLookup(env, ctx, l, addDays(c.date, 60))).cleanings; // any recent cleaning at this flat may be picked
+        const all = (await loadList(env, 'cleanings')).find((x) => x.id === body.cleaningId && x.listingId === l.id && x.status === 'completed');
+        if (!all) throw userError('That cleaning isn’t one of this flat’s finished cleanings.', 400);
+        const a = ((await env.STORE.get('assignments', 'json')) || {})[`${all.date}|${all.listingId}`];
+        c.cleaning = found.find((x) => x.id === all.id) || { id: all.id, date: all.date, cleanerId: all.cleanerId, cleanerName: all.cleanerName, startedAt: all.startedAt, endedAt: all.endedAt, assignedId: a ? a.cleanerId : null, assignedName: a ? a.cleanerName : null };
+      }
+    }
+    if (!c.title || c.title.length < 3) throw userError('Say in a few words what the guest complained about.', 400);
+  };
+  const tellCleaner = async (c, before) => {
+    if (!c.cleaning) return;
+    const who = [c.cleaning.cleanerId, c.cleaning.assignedId].filter((x) => x && x !== me.id && !(before && [before.cleanerId, before.assignedId].includes(x)));
+    if (!who.length) return;
+    await notify(env, ctx, [...new Set(who)], { type: 'complaint', title: `Complaint detected · ${c.label}`, body: `${c.categories.length ? c.categories.join(', ') + ' — ' : ''}${c.title}. About the cleaning on ${c.cleaning.date}.`, url: link(c), tag: `cp-${c.id}` });
+  };
+  // Cleaners see their side only: no compensation amounts.
+  const shape = (c) => (manage(c) || can(me, 'view_complaints') ? { ...c, canManage: manage(c) } : { ...c, compensation: null, canManage: false });
+
+  if (id === 'lookup' && req.method === 'GET') {
+    if (!can(me, 'manage_complaints')) return json({ error: 'You don’t have permission to log complaints. Ask an admin.' }, 403);
+    const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
+    const date = url.searchParams.get('date');
+    if (!l || !inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
+    if (!realDate(date)) return json({ error: 'Pick the date of the complaint.' }, 400);
+    return json(await cpLookup(env, ctx, l, date));
+  }
+  if (id === 'categories') {
+    if (req.method === 'GET') return json({ categories: cats });
+    if (req.method !== 'PUT') return json({ error: 'Not supported' }, 405);
+    if (!can(me, 'manage_complaints')) return json({ error: 'You don’t have permission to change complaint categories.' }, 403);
+    const next = [...new Set((Array.isArray(body.categories) ? body.categories : []).map((x) => text(x, 40)).filter(Boolean))].slice(0, 60);
+    if (!next.length) return json({ error: 'Keep at least one category.' }, 400);
+    await env.STORE.put('complaintCategories', JSON.stringify(next));
+    console.log(`[complaints] ${me.name} changed the categories (${next.length})`);
+    return json({ categories: next });
+  }
+  if (id === 'export.csv' && req.method === 'GET') {
+    if (!can(me, 'view_complaints')) return json({ error: 'You don’t have permission for that.' }, 403);
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const head = ['Date', 'Flat', 'Building', 'Categories', 'Severity', 'Source', 'What happened', 'Status', 'Upheld', 'Compensation (£)', 'Booking', 'Check-in', 'Cleaning date', 'Cleaned by', 'Assigned to', 'Resolution', 'Logged by', 'Logged at'];
+    const rows = list.filter(canSee).sort((a, b) => b.date.localeCompare(a.date)).map((c) => [c.date, c.label, c.building, (c.categories || []).join('; '), c.severity, CP_SOURCES[c.source] || c.source, c.title + (c.details ? ' — ' + c.details : ''), c.status,
+      c.upheld === true ? 'Yes' : c.upheld === false ? 'No' : '', c.compensation ?? '', c.stay ? c.stay.code : '', c.stay ? c.stay.checkIn : '', c.cleaning ? c.cleaning.date : '', c.cleaning ? c.cleaning.cleanerName : '', c.cleaning ? c.cleaning.assignedName || '' : '', c.resolution || '', c.createdByName, c.createdAt]);
+    return new Response([head, ...rows].map((r) => r.map(q).join(',')).join('\r\n'), { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="complaints-${londonDate()}.csv"` } });
+  }
+  if (!id) {
+    if (req.method === 'GET') {
+      const out = list.filter(canSee).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt)).map(shape);
+      return json({ complaints: out, categories: cats, sources: CP_SOURCES, canManage: can(me, 'manage_complaints'), seesAll: can(me, 'view_complaints') });
+    }
+    if (req.method !== 'POST') return json({ error: 'Not supported' }, 405);
+    if (!can(me, 'manage_complaints')) return json({ error: 'You don’t have permission to log complaints. Ask an admin.' }, 403);
+    const l = await listingInfo(env, ctx, String(body.listingId || ''));
+    if (!l) return json({ error: 'Pick the flat.' }, 400);
+    if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
+    const c = { id: newId(), listingId: l.id, label: l.label, building: l.building, unitType: l.unitType, date: londonDate(), title: '', details: '', source: 'guest_message', severity: 'medium', categories: [], status: 'open', upheld: null, resolution: '', compensation: null,
+      stay: null, cleaning: null, media: [], createdAt: nowIso(), updatedAt: nowIso(), createdById: me.id, createdByName: me.name, resolvedAt: null, resolvedBy: null, log: [] };
+    await readFields(c, l);
+    if (body.stay === undefined || body.cleaningId === undefined) { // fill in the stay and cleaning when the form didn't say
+      const found = await cpLookup(env, ctx, l, c.date);
+      if (body.stay === undefined) c.stay = found.stay;
+      if (body.cleaningId === undefined) c.cleaning = found.cleanings[0] || null;
+    }
+    c.media = (await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => m.purpose === 'complaint' && m.listingId === l.id && m.byId === me.id)).map((m) => m.id);
+    log(c, 'event', 'Logged');
+    list.push(c);
+    await save();
+    await tellCleaner(c, null);
+    console.log(`[complaints] ${me.name} logged a complaint at ${c.label}${c.cleaning ? ` (cleaning by ${c.cleaning.cleanerName})` : ''}`);
+    return json({ complaint: shape(c) });
+  }
+  const c = list.find((x) => x.id === id);
+  if (!c || !canSee(c)) return json({ error: 'That complaint isn’t available.' }, 404);
+  if (req.method === 'GET' && !action) {
+    const full = shape(await withMedia(env, c));
+    if (c.cleaning) { const rec = (await loadList(env, 'cleanings')).find((x) => x.id === c.cleaning.id); full.cleaningRecord = rec ? await withMedia(env, rec) : null; }
+    full.tasks = (await loadList(env, 'maintenance')).filter((t) => t.complaintId === c.id).map((t) => ({ id: t.id, title: t.title, status: t.status }));
+    return json({ complaint: full, sources: CP_SOURCES });
+  }
+  if (action === 'notes' && req.method === 'POST') {
+    if (!manage(c) && !tagged(c)) return json({ error: 'You can’t add notes to this complaint.' }, 403);
+    const t = text(body.text, 2000);
+    if (!t) return json({ error: 'Write a note first.' }, 400);
+    log(c, 'note', t);
+    await save();
+    const to = [c.createdById, ...(tagged(c) ? [] : [c.cleaning && c.cleaning.cleanerId, c.cleaning && c.cleaning.assignedId])].filter((x) => x && x !== me.id);
+    await notify(env, ctx, [...new Set(to)], { type: 'complaint', title: `${me.name} replied · complaint at ${c.label}`, body: t.slice(0, 140), url: link(c), tag: `cp-${c.id}` });
+    return json({ complaint: shape(c) });
+  }
+  if (req.method === 'PUT' && !action) {
+    if (!manage(c)) return json({ error: 'You don’t have permission to change complaints.' }, 403);
+    const l = await listingInfo(env, ctx, c.listingId) || { id: c.listingId, building: c.building };
+    const before = c.cleaning, was = c.status;
+    await readFields(c, l);
+    log(c, 'event', c.status !== was ? `Marked ${c.status}` : 'Updated');
+    await save();
+    if (c.cleaning && (!before || before.id !== c.cleaning.id)) await tellCleaner(c, before);
+    return json({ complaint: shape(c) });
+  }
+  if (req.method === 'DELETE' && !action) {
+    if (!manage(c)) return json({ error: 'You don’t have permission to delete complaints.' }, 403);
+    list.splice(list.indexOf(c), 1);
+    await save();
+    console.log(`[complaints] ${me.name} deleted a complaint at ${c.label}`);
+    return json({ ok: true });
+  }
+  return json({ error: 'Not supported' }, 405);
+}
+
 async function mediaAccess(env, ctx, me, body) {
   if (body.purpose === 'damage') return can(me, 'report_damage');
   if (body.purpose === 'maintenance') return true; // anyone can report an issue at a flat in their buildings (checked below)
+  if (body.purpose === 'complaint') return can(me, 'manage_complaints'); // the guest's photos, kept as evidence
   if (body.purpose === 'cleaning') {
     const list = await loadList(env, 'cleanings');
     const c = list.find((x) => x.id === body.ownerId);
@@ -1928,6 +2092,11 @@ async function mediaAccess(env, ctx, me, body) {
 }
 async function mediaViewAllowed(env, me, m) {
   if (m.byId === me.id) return true;
+  if (m.purpose === 'complaint') { // whoever sees complaints there, and the cleaner a complaint is about
+    if (can(me, 'view_complaints') && (!m.building || inScope(me, m.building))) return true;
+    return (await loadList(env, 'complaints')).some((c) => (c.media || []).includes(m.id) && c.cleaning && (c.cleaning.cleanerId === me.id || c.cleaning.assignedId === me.id));
+  }
+  if (m.purpose === 'cleaning' && (await loadList(env, 'complaints')).some((c) => c.cleaning && c.cleaning.id === m.ownerId && c.cleaning.assignedId === me.id)) return true;
   if (!(can(me, 'view_cleaning') || can(me, 'manage_damage'))) return false;
   if (!m.building) return true;
   return inScope(me, m.building);
@@ -2039,6 +2208,7 @@ async function handle(req, env, ctx) {
   if (p.startsWith('/api/push/')) return locked('pushSubs', () => pushApi(req, env, me, p.split('/')));
   if (p === '/api/assignments' || p === '/api/assignees') return locked('assignments', () => assignmentsApi(req, env, ctx, me, url));
   if (p === '/api/forum' || p.startsWith('/api/forum/')) return locked('forum', () => forumApi(req, env, ctx, me, p.split('/')));
+  if (p === '/api/complaints' || p.startsWith('/api/complaints/')) return locked('complaints', () => complaintsApi(req, env, ctx, me, p.split('/'), url));
   if (p === '/api/maintenance' || p.startsWith('/api/maintenance/')) return locked('maintenance', () => maintenanceApi(req, env, ctx, me, p.split('/'), url));
   // Internal checks used by server.mjs for uploads and playback (same-process only; not reachable from outside).
   if (p === '/api/internal/media-check' && req.headers.get('x-internal') === env.__INTERNAL_KEY) {
@@ -2046,7 +2216,7 @@ async function handle(req, env, ctx) {
     if (body.mode === 'upload') {
       if (!(await mediaAccess(env, ctx, me, body))) return json({ ok: false }, 403);
       let building = null;
-      if (body.purpose === 'damage' || body.purpose === 'maintenance') { const l = await listingInfo(env, ctx, String(body.listingId || '')); if (!l || !inScope(me, l.building)) return json({ ok: false }, 403); building = l.building; }
+      if (body.purpose === 'damage' || body.purpose === 'maintenance' || body.purpose === 'complaint') { const l = await listingInfo(env, ctx, String(body.listingId || '')); if (!l || !inScope(me, l.building)) return json({ ok: false }, 403); building = l.building; }
       if (body.purpose === 'cleaning') { const c = (await loadList(env, 'cleanings')).find((x) => x.id === body.ownerId); building = c && c.building; }
       return json({ ok: true, user: { id: me.id, name: me.name }, building });
     }

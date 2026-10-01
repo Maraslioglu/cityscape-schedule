@@ -441,8 +441,248 @@
       box.querySelectorAll('[data-task]').forEach((b) => b.onclick = () => openTask(b.dataset.task));
     } catch (_) {}
   }
+  // ---------- Complaints (under Maintenance): logged against the stay and the cleaning that prepared it ----------
+  let cpCache = null, cpStatus = 'open', cpPatterns = false, mtTab = 'tasks';
+  const cpF = { cat: '', building: '', flat: '', cleaner: '', period: '90', q: '' };
+  const CP_ST = { open: 'Open', investigating: 'Investigating', resolved: 'Resolved', dismissed: 'Dismissed' };
+  const CP_SEV = { high: 'High', medium: 'Medium', low: 'Low' };
+  function setMtTab(tab) {
+    mtTab = tab;
+    document.querySelectorAll('[data-mtab]').forEach((b) => b.setAttribute('aria-selected', b.dataset.mtab === tab));
+    $('mt-pane').classList.toggle('hidden', tab !== 'tasks');
+    $('cp-pane').classList.toggle('hidden', tab !== 'complaints');
+    if (tab === 'complaints') loadComplaints(); else loadMaintenance();
+  }
+  document.querySelectorAll('[data-mtab]').forEach((b) => b.onclick = () => setMtTab(b.dataset.mtab));
+  async function loadComplaints() {
+    if (!cpCache) $('cp-list').innerHTML = '<div class="card"><div class="loading">Loading…</div></div>';
+    try { cpCache = await getJSON('/api/complaints'); renderComplaints(); }
+    catch (e) { if (e.message !== 'signed out') $('cp-list').innerHTML = `<div class="banner error">${esc(e.message)}</div>`; }
+  }
+  const cpWho = (c) => (c.cleaning ? c.cleaning.cleanerName : '');
+  function cpFiltered(ignoreStatus) {
+    const since = cpF.period === 'all' ? '' : addDaysStr(todayStr(), -Number(cpF.period));
+    const q = cpF.q.trim().toLowerCase();
+    return cpCache.complaints.filter((c) => (ignoreStatus || cpStatus === 'all' || (cpStatus === 'open' ? ['open', 'investigating'] : ['resolved', 'dismissed']).includes(c.status))
+      && (!since || c.date >= since) && (!cpF.cat || (c.categories || []).includes(cpF.cat)) && (!cpF.building || c.building === cpF.building)
+      && (!cpF.flat || c.listingId === cpF.flat) && (!cpF.cleaner || (c.cleaning && (c.cleaning.cleanerId === cpF.cleaner || c.cleaning.assignedId === cpF.cleaner)))
+      && (!q || `${c.title} ${c.details} ${c.label} ${c.building} ${cpWho(c)} ${(c.categories || []).join(' ')} ${c.stay ? c.stay.code : ''}`.toLowerCase().includes(q)));
+  }
+  function addDaysStr(d, n) { const x = D(d); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+  const cpCard = (c) => `<button class="card mtask cpcard sev-${esc(c.severity)}" data-cp="${esc(c.id)}">
+      <span class="mt-top"><span class="prio ${c.severity === 'high' ? 'urgent' : c.severity === 'medium' ? 'high' : ''}">${esc(CP_SEV[c.severity] || '')}</span><span class="mst ${c.status === 'investigating' ? 'in_progress' : ['resolved', 'dismissed'].includes(c.status) ? 'done' : ''}">${esc(CP_ST[c.status])}</span>${c.upheld === true ? '<span class="mst cp-up">Upheld</span>' : ''}<span class="mt-flat">${esc(c.label)} · ${esc(c.building)}</span><span class="mt-n">${esc(WD_SHORT.format(D(c.date)))} ${esc(shortDate(c.date))}</span></span>
+      <span class="mt-title">${esc(c.title)}</span>
+      <span class="mt-bot">${(c.categories || []).map((x) => `<span class="fk">${esc(x)}</span>`).join('')}${c.cleaning ? `<span class="mt-who"><span class="avatar sm">${esc(initials(c.cleaning.cleanerName))}</span>Cleaned by ${c.cleaning.cleanerId === me.id ? 'you' : esc(c.cleaning.cleanerName)} · ${esc(shortDate(c.cleaning.date))}</span>` : '<span class="mt-who none">No cleaning linked</span>'}</span>
+    </button>`;
+  function renderComplaints() {
+    if (!cpCache) return;
+    $('cp-new').classList.toggle('hidden', !cpCache.canManage);
+    $('cp-csv').classList.toggle('hidden', !cpCache.seesAll);
+    $('cp-pat').classList.toggle('hidden', !cpCache.seesAll);
+    const all = cpCache.complaints, uniq = (arr) => [...new Map(arr.filter((x) => x[0])).entries()].sort((a, b) => a[1].localeCompare(b[1], undefined, { numeric: true }));
+    const opt = (k, label, items) => `<label class="cpf"><span>${label}</span><select data-cpf="${k}"><option value="">All</option>${items.map(([v, w]) => `<option value="${esc(v)}" ${cpF[k] === v ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></label>`;
+    $('cp-filters').innerHTML = `
+      <label class="cpf"><span>When</span><select data-cpf="period">${[['30', 'Last 30 days'], ['90', 'Last 90 days'], ['365', 'Last 12 months'], ['all', 'All time']].map(([v, w]) => `<option value="${v}" ${cpF.period === v ? 'selected' : ''}>${w}</option>`).join('')}</select></label>
+      ${opt('cat', 'Category', cpCache.categories.map((x) => [x, x]))}
+      ${opt('building', 'Building', uniq(all.map((c) => [c.building, c.building])))}
+      ${opt('flat', 'Flat', uniq(all.filter((c) => !cpF.building || c.building === cpF.building).map((c) => [c.listingId, `${c.label} · ${c.building}`])))}
+      ${cpCache.seesAll ? opt('cleaner', 'Cleaner', uniq(all.flatMap((c) => (c.cleaning ? [[c.cleaning.cleanerId, c.cleaning.cleanerName], [c.cleaning.assignedId, c.cleaning.assignedName]] : [])))) : ''}
+      <label class="cpf grow"><span>Search</span><input data-cpf="q" type="search" value="${esc(cpF.q)}" placeholder="Words, flat, booking…"></label>`;
+    $('cp-filters').querySelectorAll('[data-cpf]').forEach((el) => el[el.tagName === 'INPUT' ? 'oninput' : 'onchange'] = () => {
+      cpF[el.dataset.cpf] = el.value; if (el.dataset.cpf === 'building') cpF.flat = '';
+      if (el.tagName === 'INPUT') { drawCpList(); drawPatterns(); } else renderComplaints();
+    });
+    const open = all.filter((c) => ['open', 'investigating'].includes(c.status)).length;
+    $('cp-tabn').textContent = open || ''; $('cp-tabn').classList.toggle('hidden', !open);
+    drawCpList(); drawPatterns();
+  }
+  function drawCpList() {
+    const list = cpFiltered(false);
+    const inPeriod = cpFiltered(true);
+    const upheld = inPeriod.filter((c) => c.upheld === true).length;
+    $('cp-sum').innerHTML = [`<span class="mt-chip"><b>${list.length}</b> shown</span>`, `<span class="mt-chip ${inPeriod.length ? 'warn' : ''}"><b>${inPeriod.length}</b> in this period</span>`, upheld && `<span class="mt-chip bad"><b>${upheld}</b> upheld</span>`].filter(Boolean).join('');
+    $('cp-list').innerHTML = list.length ? list.map(cpCard).join('') : `<div class="card empty"><b>No complaints${cpStatus === 'open' ? ' open' : ''}</b>${cpCache.seesAll ? 'Nothing matches these filters.' : 'Complaints about cleanings you did or were assigned to show here.'}</div>`;
+  }
+  // Patterns over time, from the same filters (ignoring Open / Resolved).
+  function drawPatterns() {
+    const box = $('cp-patterns');
+    box.classList.toggle('hidden', !cpPatterns);
+    if (!cpPatterns) return;
+    const list = cpFiltered(true);
+    const count = (keyOf) => { const m = new Map(); for (const c of list) for (const k of [].concat(keyOf(c)).filter(Boolean)) m.set(k, (m.get(k) || 0) + 1); return [...m.entries()].sort((a, b) => b[1] - a[1]); };
+    const bars = (title, rows, limit = 8) => { const max = Math.max(1, ...rows.map((r) => r[1])); return `<div class="card pcard2"><h3>${title}</h3>${rows.length ? rows.slice(0, limit).map(([k, n]) => `<div class="cpbar"><span class="pl" title="${esc(k)}">${esc(k)}</span><span class="pt"><i style="width:${(n / max) * 100}%"></i></span><b>${n}</b></div>`).join('') : '<p class="muted">Nothing yet.</p>'}${rows.length > limit ? `<p class="muted pmore">+ ${rows.length - limit} more</p>` : ''}</div>`; };
+    const months = []; for (let i = 11; i >= 0; i--) { const d = D(todayStr()); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - i); months.push(d.toISOString().slice(0, 7)); }
+    const byMonth = months.map((m) => [m, list.filter((c) => c.date.startsWith(m)).length]), maxM = Math.max(1, ...byMonth.map((x) => x[1]));
+    const upheld = list.filter((c) => c.upheld === true).length, decided = list.filter((c) => c.upheld !== null).length;
+    const comp = list.reduce((s, c) => s + (Number(c.compensation) || 0), 0);
+    const repeat = count((c) => `${c.label} · ${c.building}`).filter(([, n]) => n >= 3);
+    box.innerHTML = `<div class="ptotals card">
+        <div><b>${list.length}</b><span>complaints</span></div><div><b>${decided ? Math.round((upheld / decided) * 100) + '%' : '–'}</b><span>upheld (${upheld} of ${decided} decided)</span></div>
+        <div><b>£${comp.toLocaleString('en-GB', { maximumFractionDigits: 2 })}</b><span>compensation</span></div><div><b>${repeat.length}</b><span>flat${repeat.length === 1 ? '' : 's'} with 3 or more</span></div></div>
+      <div class="card pcard2 pmonths"><h3>By month</h3><div class="pcols">${byMonth.map(([m, n]) => `<div class="pcol" title="${n} in ${esc(m)}"><b>${n || ''}</b><i style="height:${(n / maxM) * 100}%"></i><span>${esc(MON_S.format(D(m + '-01')))}</span></div>`).join('')}</div></div>
+      <div class="pgrid">
+        ${bars('By category', count((c) => c.categories && c.categories.length ? c.categories : ['Not categorised']))}
+        ${bars('By flat', count((c) => `${c.label} · ${c.building}`))}
+        ${bars('By cleaner', count((c) => (c.cleaning ? c.cleaning.cleanerName : 'No cleaning linked')))}
+        ${bars('Upheld, by cleaner', count((c) => (c.upheld === true && c.cleaning ? c.cleaning.cleanerName : null)))}
+        ${bars('By building', count((c) => c.building))}
+        ${bars('By source', count((c) => (cpCache.sources[c.source] || c.source)))}
+      </div>`;
+  }
+  document.querySelectorAll('[data-cps]').forEach((b) => b.onclick = () => { cpStatus = b.dataset.cps; document.querySelectorAll('[data-cps]').forEach((x) => x.setAttribute('aria-selected', x === b)); drawCpList(); });
+  $('cp-pat').onclick = () => { cpPatterns = !cpPatterns; $('cp-pat').setAttribute('aria-pressed', cpPatterns); drawPatterns(); };
+  $('cp-new').onclick = () => complaintForm({});
+  $('cp-list').addEventListener('click', (e) => { const b = e.target.closest('[data-cp]'); if (b) openComplaint(b.dataset.cp); });
+
+  async function openComplaint(id) {
+    try {
+      const { complaint: c, sources } = await getJSON(`/api/complaints/${encodeURIComponent(id)}`);
+      const rec = c.cleaningRecord, cl = c.cleaning, mineToo = cl && (cl.cleanerId === me.id || cl.assignedId === me.id);
+      const moves = !c.canManage ? [] : ['resolved', 'dismissed'].includes(c.status) ? [['open', 'Reopen']] : [...(c.status !== 'investigating' ? [['investigating', 'Investigating']] : []), ['resolved', 'Resolved'], ['dismissed', 'Dismiss']];
+      const span = (a, b) => (a && b ? `${fmtClock(a)}–${fmtClock(b)} · ${durWords(Date.parse(b) - Date.parse(a))}` : '');
+      openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Complaint · ${esc(c.label)} · ${esc(c.building)}</span><h2 class="fp-h">${esc(c.title)}</h2>
+          <div class="sh-sub">${esc(sources[c.source] || c.source)} · ${esc(longDate(c.date))} · logged by ${esc(c.createdByName)}</div></div><div class="sh-right"><span class="mst">${esc(CP_ST[c.status])}</span>${CLOSE_BTN}</div></div>
+        ${mineToo && !c.canManage ? `<p class="stepin-note cp-yours">This complaint is about the cleaning on ${esc(longDate(cl.date))}${cl.cleanerId === me.id ? ' that you did' : ' you were assigned to'}. You can add your side below.</p>` : ''}
+        ${moves.length ? `<div class="mt-moves">${moves.map(([s, w]) => `<button class="btn ${s === 'resolved' ? 'primary' : ''}" data-cpmove="${s}">${esc(w)}</button>`).join('')}<span class="spacer"></span><button class="btn" id="cp-edit">Edit</button></div>` : ''}
+        ${c.details ? `<p class="cp-details">${esc(c.details)}</p>` : ''}
+        <dl class="mt-facts">
+          <div><dt>Categories</dt><dd>${(c.categories || []).map((x) => `<span class="fk">${esc(x)}</span>`).join(' ') || '—'}</dd></div>
+          <div><dt>Severity</dt><dd>${esc(CP_SEV[c.severity] || '—')}</dd></div>
+          <div><dt>Booking</dt><dd>${c.stay ? `${esc(c.stay.code || 'No code')} · ${esc(shortDate(c.stay.checkIn))}–${esc(shortDate(c.stay.checkOut))}${c.stay.guests ? ` · ${c.stay.guests} guest${c.stay.guests > 1 ? 's' : ''}` : ''}` : '—'}</dd></div>
+          <div><dt>Upheld</dt><dd>${c.upheld === true ? 'Yes, the guest was right' : c.upheld === false ? 'No' : 'Not decided'}</dd></div>
+          ${c.compensation !== null && c.compensation !== undefined ? `<div><dt>Compensation</dt><dd>£${esc(Number(c.compensation).toFixed(2))}</dd></div>` : ''}
+          ${c.resolution ? `<div class="wide"><dt>Resolution${c.resolvedBy ? ` · ${esc(c.resolvedBy)}` : ''}</dt><dd>${esc(c.resolution)}</dd></div>` : ''}
+        </dl>
+        <h3 class="sh-h3">Cleaning tagged</h3>
+        ${cl ? `<div class="card cp-clean">
+            <div class="cp-cl-h"><span class="avatar">${esc(initials(cl.cleanerName))}</span><div><b>Cleaned by ${cl.cleanerId === me.id ? 'you' : esc(cl.cleanerName)}</b><span>${esc(longDate(cl.date))}${span(cl.startedAt, cl.endedAt) ? ' · ' + esc(span(cl.startedAt, cl.endedAt)) : ''}</span></div></div>
+            <div class="cp-cl-s">Assigned to: <b>${cl.assignedName ? esc(cl.assignedName) : 'nobody'}</b>${rec ? ` · checklist ${rec.checklist ? rec.checklist.length : 0}/${checklistDef.length || 5}${keyNote(rec)}${rec.completedBy ? ` · finished by ${esc(rec.completedBy)}` : ''}` : ''}</div>
+            ${rec && (rec.media || []).length ? mediaTiles(rec.media) : '<p class="muted">No videos from this cleaning.</p>'}
+            <a class="linkbtn" href="/?view=day&date=${esc(cl.date)}&flat=${esc(c.listingId)}">Open the flat on that day</a>
+          </div>` : '<div class="card empty"><b>No cleaning linked</b>Edit the complaint to pick the cleaning it was about.</div>'}
+        ${(c.media || []).length ? `<h3 class="sh-h3">Guest’s photos</h3>${mediaTiles(c.media)}` : ''}
+        ${(c.tasks || []).length || (c.canManage && can('manage_maintenance')) ? `<h3 class="sh-h3">Maintenance</h3>
+          ${(c.tasks || []).map((t) => `<button class="rrow link" data-cptask="${esc(t.id)}"><span class="rtxt"><b>${esc(t.title)}</b><span>${esc(MT_ST[t.status] || t.status)}</span></span></button>`).join('')}
+          ${c.canManage && can('manage_maintenance') ? '<button class="btn" id="cp-mt">Create maintenance task</button>' : ''}` : ''}
+        <h3 class="sh-h3">Notes & history</h3>
+        <ol class="mt-log">${(c.log || []).slice().reverse().map((l) => `<li class="${esc(l.kind)}"><span class="mt-lt">${l.kind === 'note' ? `<b>${esc(l.byName)}</b> ${esc(l.text)}` : `${esc(l.text)} <span class="muted">· ${esc(l.byName)}</span>`}</span><em>${esc(fmtWhen(l.at))}</em></li>`).join('')}</ol>
+        ${c.canManage || mineToo ? `<form class="pe-form" id="cp-note"><textarea id="cp-note-t" rows="2" maxlength="2000" placeholder="${mineToo && !c.canManage ? 'Your side: what happened at this cleaning?' : 'Add a note'}"></textarea><div class="form-actions"><span class="spacer"></span><button class="btn primary" type="submit">Add note</button></div></form>` : ''}
+        ${c.canManage ? '<div class="form-actions"><span class="spacer"></span><button class="btn danger" id="cp-del">Delete complaint</button></div>' : ''}`);
+      const after = (msg) => { toast(msg); loadComplaints(); openComplaint(id); };
+      $('detail-body').querySelectorAll('[data-cpmove]').forEach((b) => b.onclick = async () => {
+        const to = b.dataset.cpmove;
+        let extra = {};
+        if (to === 'resolved' || to === 'dismissed') {
+          const r = await askConfirm({ title: to === 'resolved' ? 'Mark resolved?' : 'Dismiss this complaint?', text: 'Say what was done or decided. It’s kept with the complaint.', yes: to === 'resolved' ? 'Mark resolved' : 'Dismiss', note: 'Resolution (optional)' });
+          if (!r) return; extra = r.note ? { resolution: r.note } : {};
+        }
+        try { await send('PUT', `/api/complaints/${encodeURIComponent(id)}`, { status: to, ...extra }); after(`Marked ${CP_ST[to].toLowerCase()}`); } catch (e) { toast(e.message); }
+      });
+      if ($('cp-edit')) $('cp-edit').onclick = () => complaintForm(c);
+      if ($('cp-mt')) $('cp-mt').onclick = () => taskForm({ listingId: c.listingId, title: c.title, complaintId: c.id, mediaIds: (c.media || []).map((m) => m.id) });
+      $('detail-body').querySelectorAll('[data-cptask]').forEach((b) => b.onclick = () => openTask(b.dataset.cptask));
+      if ($('cp-note')) $('cp-note').onsubmit = async (e) => { e.preventDefault(); try { await send('POST', `/api/complaints/${encodeURIComponent(id)}/notes`, { text: $('cp-note-t').value }); after('Note added'); } catch (err) { toast(err.message); } };
+      if ($('cp-del')) $('cp-del').onclick = async () => {
+        if (!(await askConfirm({ title: 'Delete this complaint?', text: 'It’s removed from the records and the patterns. This can’t be undone.', yes: 'Delete', danger: true }))) return;
+        try { await send('DELETE', `/api/complaints/${encodeURIComponent(id)}`); toast('Complaint deleted'); closeDetail(); loadComplaints(); } catch (e) { toast(e.message); }
+      };
+    } catch (e) { toast(e.message); }
+  }
+
+  // Logging (or editing) a complaint: flat and date find the stay and the cleaning that prepared it.
+  async function complaintForm(c0) {
+    const edit = Boolean(c0.id), c = { date: todayStr(), severity: 'medium', source: 'guest_message', categories: [], ...c0 };
+    const flats = edit ? null : await flatsForForm();
+    const cats = (cpCache && cpCache.categories) || (await getJSON('/api/complaints/categories')).categories;
+    const sources = (cpCache && cpCache.sources) || {};
+    const picker = edit ? null : mediaPicker(() => $('cp-flat').value, (busy) => { $('cp-go').disabled = busy; }, 'complaint');
+    openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Complaints</span><h2>${edit ? 'Edit complaint' : 'Log a complaint'}</h2><div class="sh-sub">${edit ? esc(`${c.label} · ${c.building}`) : 'Pick the flat and the day the guest complained. The stay and the cleaning before it are found for you.'}</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
+      <form class="pe-form" id="cp-form" autocomplete="off">
+        <div class="pe-row">
+          ${flats ? `<div class="pe-f"><label for="cp-flat">Flat</label><select id="cp-flat" required><option value="">Pick a flat…</option>${flats.map((f) => `<option value="${esc(f.id)}" ${c.listingId === f.id ? 'selected' : ''}>${esc(f.label)} · ${esc(f.building)}</option>`).join('')}</select></div>` : ''}
+          <div class="pe-f"><label for="cp-date">Date of the complaint</label><input id="cp-date" type="date" value="${esc(c.date)}" max="${esc(todayStr())}" required></div>
+        </div>
+        <div id="cp-link">${edit ? '' : '<p class="muted">Pick the flat to find the stay and the cleaning.</p>'}</div>
+        <div class="pe-f"><label for="cp-title">What did the guest complain about?</label><input id="cp-title" maxlength="160" required value="${esc(c.title || '')}" placeholder="e.g. Hair in the shower, no towels in the bathroom"></div>
+        <div class="pe-f"><label for="cp-details">Details <span class="muted">(optional)</span></label><textarea id="cp-details" rows="3" maxlength="4000" placeholder="What they said, where exactly, anything else useful">${esc(c.details || '')}</textarea></div>
+        <div class="pe-f"><span class="pe-l">Categories <span class="muted">(pick all that apply)</span></span><div class="cp-cats" id="cp-cats">${cats.map((x) => `<label class="cp-cat"><input type="checkbox" value="${esc(x)}" ${(c.categories || []).includes(x) ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('')}</div>
+          <button type="button" class="linkbtn" id="cp-cats-edit">Edit categories</button></div>
+        <div class="pe-row">
+          <div class="pe-f"><span class="pe-l">Severity</span><div class="range fkinds" role="radiogroup" aria-label="Severity">${Object.entries(CP_SEV).reverse().map(([k, w]) => `<button type="button" role="radio" data-sev="${k}" aria-checked="${c.severity === k}" aria-selected="${c.severity === k}">${w}</button>`).join('')}</div></div>
+          <div class="pe-f"><label for="cp-source">Where it came from</label><select id="cp-source">${Object.entries(sources).map(([k, w]) => `<option value="${k}" ${c.source === k ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></div>
+        </div>
+        ${edit ? `<div class="pe-row">
+            <div class="pe-f"><label for="cp-upheld">Was the guest right?</label><select id="cp-upheld"><option value="" ${c.upheld === null ? 'selected' : ''}>Not decided</option><option value="yes" ${c.upheld === true ? 'selected' : ''}>Yes, upheld</option><option value="no" ${c.upheld === false ? 'selected' : ''}>No</option></select></div>
+            <div class="pe-f"><label for="cp-comp">Compensation (£) <span class="muted">(optional)</span></label><input id="cp-comp" type="number" min="0" step="0.01" value="${c.compensation ?? ''}" placeholder="0"></div>
+          </div>
+          <div class="pe-f"><label for="cp-res">Resolution <span class="muted">(optional)</span></label><textarea id="cp-res" rows="2" maxlength="2000">${esc(c.resolution || '')}</textarea></div>` : `<div class="pe-f"><span class="pe-l">Guest’s photos <span class="muted">(optional)</span></span>${picker.html}</div>`}
+        <div class="form-msg" id="cp-msg"></div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="cp-go">${edit ? 'Save' : 'Log complaint'}</button></div>
+      </form>`);
+    if (picker) picker.wire($('cp-form'));
+    let sev = c.severity, look = null;
+    $('cp-form').querySelectorAll('[data-sev]').forEach((b) => b.onclick = () => { sev = b.dataset.sev; $('cp-form').querySelectorAll('[data-sev]').forEach((x) => { x.setAttribute('aria-checked', x === b); x.setAttribute('aria-selected', x === b); }); });
+    const flatId = () => (edit ? c.listingId : $('cp-flat').value);
+    const drawLink = () => {
+      const box = $('cp-link');
+      if (!look) return;
+      const stays = look.stays, cls = look.cleanings;
+      const curStay = edit ? (c.stay && c.stay.code) || '' : (look.stay && look.stay.code) || '';
+      const curClean = edit ? (c.cleaning && c.cleaning.id) || '' : look.suggestedCleaningId || '';
+      box.innerHTML = `<div class="pe-row">
+        <div class="pe-f"><label for="cp-stay">Booking</label><select id="cp-stay"><option value="">No booking / not sure</option>${stays.map((s, i) => `<option value="${i}" ${s.code === curStay ? 'selected' : ''}>${esc(s.code || 'Booking')} · ${esc(shortDate(s.checkIn))}–${esc(shortDate(s.checkOut))}</option>`).join('')}</select></div>
+        <div class="pe-f"><label for="cp-clean">Cleaning it’s about</label><select id="cp-clean"><option value="">No cleaning / not sure</option>${cls.map((x) => `<option value="${esc(x.id)}" ${x.id === curClean ? 'selected' : ''}>${esc(WD_SHORT.format(D(x.date)))} ${esc(shortDate(x.date))} · ${esc(x.cleanerName)}${x.assignedName && x.assignedName !== x.cleanerName ? ` (assigned ${esc(x.assignedName)})` : ''}</option>`).join('')}</select>
+          <span class="pe-g">${cls.length ? 'The person who cleaned it, and whoever was assigned, are told “Complaint detected”.' : 'No finished cleanings found at this flat before this date.'}</span></div></div>`;
+    };
+    const lookup = async () => {
+      const id = flatId(), date = $('cp-date').value;
+      if (!id || !date) return;
+      $('cp-link').innerHTML = '<p class="muted">Finding the stay and the cleaning…</p>';
+      try { look = await getJSON(`/api/complaints/lookup?listingId=${encodeURIComponent(id)}&date=${encodeURIComponent(date)}`); drawLink(); }
+      catch (e) { $('cp-link').innerHTML = `<p class="form-msg err">${esc(e.message)}</p>`; }
+    };
+    if (!edit) $('cp-flat').onchange = lookup;
+    $('cp-date').onchange = lookup;
+    if (edit || c.listingId) lookup();
+    $('cp-cats-edit').onclick = async () => {
+      const now = [...$('cp-cats').querySelectorAll('input')].map((i) => i.value);
+      const ticked = new Set([...$('cp-cats').querySelectorAll('input:checked')].map((i) => i.value));
+      const box = document.createElement('div'); box.className = 'modal';
+      box.innerHTML = `<form class="modal-card" role="dialog" aria-modal="true" aria-labelledby="md-t"><h3 id="md-t">Complaint categories</h3><p>One per line. Renaming a category doesn’t change complaints already logged.</p>
+        <textarea id="md-cats" rows="10">${esc(now.join('\n'))}</textarea><p class="md-err" id="md-err" role="alert"></p>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary">Save categories</button></div></form>`;
+      document.body.appendChild(box);
+      box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) box.remove(); });
+      box.querySelector('form').onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          const r = await send('PUT', '/api/complaints/categories', { categories: $('md-cats').value.split('\n') });
+          box.remove(); if (cpCache) cpCache.categories = r.categories;
+          $('cp-cats').innerHTML = r.categories.map((x) => `<label class="cp-cat"><input type="checkbox" value="${esc(x)}" ${ticked.has(x) ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('');
+          toast('Categories saved');
+        } catch (err) { $('md-err').textContent = err.message; }
+      };
+    };
+    $('cp-form').onsubmit = async (e) => {
+      e.preventDefault();
+      if (picker && picker.busy()) return toast('Wait for the upload to finish');
+      const b = { date: $('cp-date').value, title: $('cp-title').value, details: $('cp-details').value, severity: sev, source: $('cp-source').value,
+        categories: [...$('cp-cats').querySelectorAll('input:checked')].map((i) => i.value) };
+      if (look && $('cp-stay')) { const s = look.stays[Number($('cp-stay').value)]; b.stay = $('cp-stay').value === '' ? null : s; b.cleaningId = $('cp-clean').value || null; }
+      if (edit) { const u = $('cp-upheld').value; b.upheld = u === 'yes' ? true : u === 'no' ? false : null; b.compensation = $('cp-comp').value; b.resolution = $('cp-res').value; }
+      else { b.listingId = flatId(); b.mediaIds = picker.ids(); }
+      $('cp-go').disabled = true;
+      try {
+        const r = edit ? await send('PUT', `/api/complaints/${encodeURIComponent(c.id)}`, b) : await send('POST', '/api/complaints', b);
+        if (picker) picker.clear();
+        toast(edit ? 'Saved' : r.complaint.cleaning ? `Complaint logged · ${r.complaint.cleaning.cleanerName} has been told` : 'Complaint logged');
+        loadComplaints(); openComplaint(r.complaint.id);
+      } catch (err) { $('cp-msg').className = 'form-msg err'; $('cp-msg').textContent = err.message; $('cp-go').disabled = false; }
+    };
+  }
+
   // Photos and videos for a task: uploaded as soon as they're picked (same resumable uploads as cleanings).
-  function mediaPicker(listingId, onChange) {
+  function mediaPicker(listingId, onChange, purpose = 'maintenance') {
     const keys = [];
     const html = `<div class="ev-btns"><label class="btn file"><input type="file" accept="image/*" capture="environment" data-mp="cam">Take photo</label><label class="btn file"><input type="file" accept="video/*,image/*" multiple data-mp="pick">Choose photos/videos</label></div><div class="mp-list"></div>`;
     const busy = () => keys.some((k) => { const x = uploads.get(k); return x && !x.done && !x.error; });
@@ -454,7 +694,7 @@
         onChange && onChange(busy());
       };
       root.querySelectorAll('[data-mp]').forEach((inp) => inp.onchange = (e) => {
-        for (const f of e.target.files) { const key = Math.random().toString(36).slice(2); uploads.set(key, { file: f, kind: (f.type || '').startsWith('image') ? 'photo' : 'video', progress: 0, done: false, error: null, purpose: 'maintenance', listingId: listingId() }); keys.push(key); runUpload(key, draw); }
+        for (const f of e.target.files) { const key = Math.random().toString(36).slice(2); uploads.set(key, { file: f, kind: (f.type || '').startsWith('image') ? 'photo' : 'video', progress: 0, done: false, error: null, purpose, listingId: listingId() }); keys.push(key); runUpload(key, draw); }
         e.target.value = ''; draw();
       });
     };
@@ -527,7 +767,7 @@
       e.preventDefault();
       if (picker && picker.busy()) return toast('Wait for the upload to finish');
       const b = { title: $('mt-title').value, details: $('mt-details').value, priority: prio };
-      if (!t) Object.assign(b, { listingId: flatId(), mediaIds: [...(pre.mediaIds || []), ...(picker ? picker.ids() : [])], damageId: pre.damageId || null });
+      if (!t) Object.assign(b, { listingId: flatId(), mediaIds: [...(pre.mediaIds || []), ...(picker ? picker.ids() : [])], damageId: pre.damageId || null, complaintId: pre.complaintId || null });
       if (mgr) {
         const w = $('mt-who').value;
         b.assignee = !w ? null : w === 'c' ? { type: 'contractor', name: $('mt-cname').value, phone: $('mt-cphone').value, trade: $('mt-ctrade').value } : { type: 'user', id: w.slice(2) };
@@ -847,7 +1087,7 @@
     if (v === 'settings') loadSettings();
     if (v === 'damage') loadDamageView();
     if (v === 'forum') loadForum();
-    if (v === 'maintenance') loadMaintenance();
+    if (v === 'maintenance') { if (mtTab === 'complaints') loadComplaints(); else loadMaintenance(); }
   }
 
   // ---------- who's signed in ----------
@@ -2157,7 +2397,7 @@
     const v = q.get('view'), date = q.get('date'), flat = q.get('flat');
     const okDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '');
     if (v === 'forum') { if (view !== 'forum') setView('forum'); if (q.get('post')) openPost(q.get('post')); return; }
-    if (v === 'maintenance') { if (view !== 'maintenance') setView('maintenance'); if (q.get('task')) openTask(q.get('task')); return; }
+    if (v === 'maintenance') { if (view !== 'maintenance') setView('maintenance'); if (q.get('tab') === 'complaints' || q.get('complaint')) setMtTab('complaints'); if (q.get('task')) openTask(q.get('task')); if (q.get('complaint')) openComplaint(q.get('complaint')); return; }
     if (v === 'cleaning' && allowed('cleaning')) { if (okDate) cvDate = date; if (view === 'cleaning') loadCleaningView(); else setView('cleaning'); return; }
     if (v === 'day' && allowed('day')) {
       if (view !== 'day') setView('day');

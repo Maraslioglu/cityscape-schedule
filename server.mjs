@@ -70,8 +70,8 @@ function writeNow() {
     const tmp = FILE + '.tmp';
     const fd = fs.openSync(tmp, 'w');
     try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    if (fs.existsSync(FILE)) fs.renameSync(FILE, FILE + '.bak');
-    fs.renameSync(tmp, FILE);
+    if (fs.existsSync(FILE)) fs.copyFileSync(FILE, FILE + '.bak'); // keep the last good copy, and never leave a moment with no store.json
+    fs.renameSync(tmp, FILE); // atomic swap
     lastSaveError = null; lastSavedAt = Date.now();
     dailyBackup();
   } catch (e) { lastSaveError = e.message; console.log('[store] could not save', e.message); } // e.g. disk full: keep running, retry on next change
@@ -257,7 +257,7 @@ async function processMedia(id) {
 // playback copy exists (so the cleaning still has a video).
 const freeBytes = () => { try { const s = fs.statfsSync(MEDIA); return s.bavail * s.bsize; } catch (_) { return Infinity; } };
 function originalDeletable(m) {
-  return m && m.uploaded && m.status === 'ready' && m.purpose !== 'damage' && m.purpose !== 'maintenance' && m.file && m.file !== `${m.id}.orig`
+  return m && m.uploaded && m.status === 'ready' && m.purpose !== 'damage' && m.purpose !== 'maintenance' && m.purpose !== 'complaint' && m.file && m.file !== `${m.id}.orig`
     && fs.existsSync(path.join(MEDIA, m.file)) && fs.existsSync(path.join(MEDIA, `${m.id}.orig`));
 }
 async function dropOriginal(m, why) {
