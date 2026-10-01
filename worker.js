@@ -2198,8 +2198,10 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
 // Two task titles for the same thing: identical once a bracketed note at the end (the guest's name, "(details unknown)")
 // is ignored. Deliberately strict: rewording is matched by the guest assistant itself, which sees the open tasks; a
 // loose match here would merge different problems ("Kitchen tap leaking" / "Kitchen ceiling leaking").
-const coreTitle = (t) => normName(String(t || '').replace(/\s*\([^()]*\)\s*$/, ''));
-const similarTitles = (a, b) => { const x = coreTitle(a), y = coreTitle(b); return x.length >= 3 && x === y; };
+const splitTitle = (t) => { const m = String(t || '').match(/^(.*?)\s*\(([^()]*)\)\s*$/); return m ? { core: normName(m[1]), note: normName(m[2]) } : { core: normName(t), note: '' }; };
+// The bracketed notes must match too, unless one title has none: "Radiator not working (bedroom)" and "(living room)"
+// are different radiators.
+const similarTitles = (a, b) => { const x = splitTitle(a), y = splitTitle(b); return x.core.length >= 3 && x.core === y.core && (!x.note || !y.note || x.note === y.note); };
 const MT_OPEN = (t) => !['done', 'cancelled'].includes(t.status);
 // The open tasks at a flat, so the guest assistant can tell a problem that's already reported from a new one.
 async function assistantOpenTasks(req, env, ctx, url) {
@@ -2250,11 +2252,8 @@ async function assistantMaintenanceApi(req, env, ctx) {
       same.messageIds = [...new Set([...(same.messageIds || []), ...messageIds])];
       same.notedKeys = [...new Set([...(same.notedKeys || []), ...keys])].slice(-200);
     }
-    // Only raised to urgent: a manager's own triage (e.g. "fix after checkout") isn't undone by a routine mention.
-    if (body.priority === 'urgent' && same.priority !== 'urgent') {
-      same.log.push({ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: 'Priority raised to urgent (the guest reported it as urgent)' });
-      same.priority = 'urgent';
-    }
+    // A repeat never changes the priority: every new draft for the guest re-sends their earlier problems, so this would
+    // undo a manager's own triage. The note shows what the guest said; a manager decides.
     // The guest changed the day: the task moves to it.
     const dueChanged = Boolean(due && due !== same.due);
     if (dueChanged) {
