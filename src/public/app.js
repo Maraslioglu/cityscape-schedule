@@ -16,15 +16,15 @@
   let view = store.get('cs_view') || 'day';
   let me = null;            // signed-in person and their permissions
   const can = (perm) => Boolean(me && me.perms && me.perms[perm]);
-  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null };
+  const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null, complaints: null };
   // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
   const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
   const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? can('manage_settings') || can('download_backups') : v === 'users' ? can('manage_users') || Boolean(me && me.role === 'supervisor') // supervisors manage the people they add
     : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
   // Sidebar: Schedule holds the Day and Week views; each other entry is one view.
-  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum', maintenance: 'maintenance' };
+  const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum', maintenance: 'maintenance', complaints: 'complaints' };
   const navAllowed = (n) => (n === 'schedule' ? allowed('day') || allowed('board') : allowed(n));
-  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account', forum: 'Forum', maintenance: 'Maintenance' };
+  const TITLES = { day: 'Schedule', board: 'Schedule', cleaning: 'Cleaning log', damage: 'Damage reports', props: 'Properties', users: 'Users', settings: 'Settings', account: 'My account', forum: 'Forum', maintenance: 'Maintenance', complaints: 'Complaints' };
   let lastSched = store.get('cs_sched') || 'day';
   let selected = null;      // selected date in day view
   let version = null;       // bookings version from the server
@@ -160,10 +160,10 @@
   const linePos = (hm) => { const m = /^(\d{1,2}):(\d\d)/.exec(hm || ''); return m ? Math.min(100, Math.max(0, ((Number(m[1]) + Number(m[2]) / 60 - 7) / 14) * 100)) : null; };
   const TICKS = ['07', '09', '11', '13', '15', '17', '19', '21'];
   function timeline(u) {
-    const o = u.checkOut ? linePos(u.checkOut.timeRaw) : null, n = u.checkIn ? linePos(u.checkIn.timeRaw) : null;
+    const o = u.checkOut ? (u.checkOut.movedFrom ? 0 : linePos(u.checkOut.timeRaw)) : null, n = u.checkIn ? linePos(u.checkIn.timeRaw) : null;
     const from = o === null ? (n === null ? 0 : n) : o, to = n === null ? (o === null ? 0 : 100) : n;
     const mark = (cls, pos, e) => (pos === null ? '' : `<span class="r-m ${cls}" style="left:${pos}%"><em>${esc(e.time || '')}${e.planned ? '*' : ''}</em><i></i></span>`);
-    return `<span class="r-line" aria-hidden="true"><i class="r-track"></i>${o !== null ? `<i class="r-win${n !== null ? ' turn' : ''}" style="left:${from}%;width:${Math.max(0, to - from)}%"></i>` : ''}${mark('o', o, u.checkOut || {})}${mark('n', n, u.checkIn || {})}</span>`;
+    return `<span class="r-line" aria-hidden="true"><i class="r-track"></i>${o !== null ? `<i class="r-win${n !== null ? ' turn' : ''}" style="left:${from}%;width:${Math.max(0, to - from)}%"></i>` : ''}${u.checkOut && u.checkOut.movedFrom ? '' : mark('o', o, u.checkOut || {})}${mark('n', n, u.checkIn || {})}</span>`;
   }
   function section(kind, title, hint, units) {
     if (!units.length) return '';
@@ -173,13 +173,14 @@
         ${g.units.map((u) => {
           const isNew = (u.checkIn && u.checkIn.isNew) || (u.checkOut && u.checkOut.isNew);
           const guests = u.checkIn && u.checkIn.guests ? `${u.checkIn.guests} guest${u.checkIn.guests > 1 ? 's' : ''}` : '';
-          const said = [u.label, u.checkOut && `out ${u.checkOut.time}`, u.checkIn && `in ${u.checkIn.time}`].filter(Boolean).join(', ');
+          const said = [u.label, u.checkOut && (u.checkOut.movedFrom ? 'clean moved here' : `out ${u.checkOut.time}`), u.checkIn && `in ${u.checkIn.time}`, u.movedOut && 'clean moved to another day'].filter(Boolean).join(', ');
+          const mv = u.checkOut && u.checkOut.movedFrom ? `<span class="r-mv" title="${esc(`Moved by ${u.checkOut.movedBy}${u.checkOut.movedNote ? ` · ${u.checkOut.movedNote}` : ''}`)}">Moved from ${esc(WD_SHORT.format(D(u.checkOut.movedFrom)))} ${esc(shortDate(u.checkOut.movedFrom))}</span>` : '';
           return `<div class="row tap" data-listing="${esc(u.listingId)}" role="button" tabindex="0" aria-label="Open ${esc(said)}">
             <span class="r-flat"><span class="r-l"><span class="u">${esc(u.label)}</span>${KEY_ICON[u.keyMode] || ''}${isNew ? '<span class="new">New</span>' : ''}</span>
-              <span class="t">${esc(shortType(u.unitType))}${guests ? ` · ${guests}` : ''}</span></span>
+              <span class="t">${esc(shortType(u.unitType))}${guests ? ` · ${guests}` : ''}</span>${mv}</span>
             ${timeline(u)}
             <span class="r-who" data-achip="${esc(u.listingId)}" data-needs="${u.checkOut ? '1' : ''}"></span>
-            <span class="r-st" data-cbadge="${esc(u.listingId)}" data-kind="${kind}"></span>
+            <span class="r-st" data-cbadge="${esc(u.listingId)}" data-kind="${kind}"${u.movedOut && !u.checkOut ? ` data-moved="${esc(u.movedOut.to)}"` : ''}></span>
           </div>`;
         }).join('')}
       </div>`).join('');
@@ -195,13 +196,15 @@
     const turn = day.units.filter((u) => u.checkOut && u.checkIn);
     const outs = day.units.filter((u) => u.checkOut && !u.checkIn);
     const ins = day.units.filter((u) => !u.checkOut && u.checkIn);
+    const movedAway = day.units.filter((u) => !u.checkOut && !u.checkIn && u.movedOut);
     const linenBits = can('view_linen') ? Object.entries(day.linen).map(([t, n]) => `${esc(shortType(t))} <b>${n}</b>`).join(' · ') : '';
     $('daypanel').innerHTML = `
       ${linenBits ? `<div class="dlinen">Linen for this day: ${linenBits}</div>` : ''}
-      ${day.units.length ? '' : data.cleansOnly ? '<div class="card empty"><b>Nothing to clean</b>No check-outs on this day.</div>' : '<div class="card empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
+      ${day.units.some((u) => u.checkOut || u.checkIn) ? '' : data.cleansOnly ? '<div class="card empty"><b>Nothing to clean</b>No check-outs on this day.</div>' : '<div class="card empty"><b>Nothing scheduled</b>No check-ins or check-outs on this day.</div>'}
       ${section('turn', 'Same-day turnovers', 'Guests leave and arrive the same day', turn)}
       ${section('out', 'Check-outs', 'Clean once the guest leaves', outs)}
-      ${section('in', 'Arrivals', 'Make sure the flat is ready', ins)}`;
+      ${section('in', 'Arrivals', 'Make sure the flat is ready', ins)}
+      ${section('moved', 'Moved to another day', 'Guests leave today, but the clean is on another day', movedAway)}`;
     decorateDay();
   }
 
@@ -216,14 +219,16 @@
       ${b.units.map((u) => `<tr>
         <td class="first-col unit"><span class="u">${esc(u.label)}</span><span class="t">${esc(shortType(u.unitType))}</span></td>
         ${u.cells.map((c, i) => {
-          const morning = Boolean(c.out) || (c.occ && !c.in);
+          const morning = Boolean(c.out && !c.out.movedFrom) || Boolean(c.movedOut) || (c.occ && !c.in);
           const night = c.occ;
           let h = '';
           if (morning) h += `<div class="half l${c.out ? ' end' : ''}"></div>`;
           if (night) h += `<div class="half r${c.in ? ' start' : ''}${c.in && c.in.isNew ? ' isnew' : ''}"></div>`;
-          if (c.out && c.in) h += `<span class="mark turn" title="Out ${esc(c.out.time)} → In ${esc(c.in.time)}">${esc(compact(c.out.time).replace(/am|pm/, ''))}→${esc(compact(c.in.time).replace(/am|pm/, ''))}</span>`;
+          if (c.out && c.out.movedFrom) h += `<span class="mark out moved" title="Clean moved here from ${esc(longDate(c.out.movedFrom))}${c.out.movedBy ? ` by ${esc(c.out.movedBy)}` : ''}">⇄ Clean</span>`;
+          else if (c.out && c.in) h += `<span class="mark turn" title="Out ${esc(c.out.time)} → In ${esc(c.in.time)}">${esc(compact(c.out.time).replace(/am|pm/, ''))}→${esc(compact(c.in.time).replace(/am|pm/, ''))}</span>`;
           else if (c.out) h += `<span class="mark out" title="Check-out ${esc(c.out.time)}">${esc(compact(c.out.time))}</span>`;
           else if (c.in) h += `<span class="mark in" title="Check-in ${esc(c.in.time)}">${esc(compact(c.in.time))}</span>`;
+          if (c.movedOut && !c.out) h += `<span class="mark moved-away" title="Clean moved to ${esc(longDate(c.movedOut.to))}">→ ${esc(WD_SHORT.format(D(c.movedOut.to)))}</span>`;
           return `<td class="cell${dates[i] === today ? ' today' : ''}">${h}</td>`;
         }).join('')}
       </tr>`).join('')}`).join('');
@@ -441,8 +446,240 @@
       box.querySelectorAll('[data-task]').forEach((b) => b.onclick = () => openTask(b.dataset.task));
     } catch (_) {}
   }
+  // ---------- Complaints (own page, under Maintenance in the menu): logged against the stay and the cleaning that prepared it ----------
+  let cpCache = null, cpStatus = 'open', cpPatterns = false;
+  const cpF = { cat: '', building: '', flat: '', cleaner: '', period: '90', q: '' };
+  const CP_ST = { open: 'Open', investigating: 'Investigating', resolved: 'Resolved', dismissed: 'Dismissed' };
+  const CP_SEV = { high: 'High', medium: 'Medium', low: 'Low' };
+  const cpBadge = (n) => { $('nb-cp').textContent = n > 9 ? '9+' : String(n); $('nb-cp').classList.toggle('hidden', !n); };
+  async function loadComplaints() {
+    if (!cpCache) $('cp-list').innerHTML = '<div class="card"><div class="loading">Loading…</div></div>';
+    try { cpCache = await getJSON('/api/complaints'); renderComplaints(); }
+    catch (e) { if (e.message !== 'signed out') $('cp-list').innerHTML = `<div class="banner error">${esc(e.message)}</div>`; }
+  }
+  const cpWho = (c) => (c.cleaning ? c.cleaning.cleanerName : '');
+  function cpFiltered(ignoreStatus) {
+    const since = cpF.period === 'all' ? '' : addDaysStr(todayStr(), -Number(cpF.period));
+    const q = cpF.q.trim().toLowerCase();
+    return cpCache.complaints.filter((c) => (ignoreStatus || cpStatus === 'all' || (cpStatus === 'open' ? ['open', 'investigating'] : ['resolved', 'dismissed']).includes(c.status))
+      && (!since || c.date >= since) && (!cpF.cat || (c.categories || []).includes(cpF.cat)) && (!cpF.building || c.building === cpF.building)
+      && (!cpF.flat || c.listingId === cpF.flat) && (!cpF.cleaner || (c.cleaning && (c.cleaning.cleanerId === cpF.cleaner || c.cleaning.assignedId === cpF.cleaner)))
+      && (!q || `${c.title} ${c.details} ${c.label} ${c.building} ${cpWho(c)} ${(c.categories || []).join(' ')} ${c.stay ? c.stay.code : ''}`.toLowerCase().includes(q)));
+  }
+  function addDaysStr(d, n) { const x = D(d); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+  const cpCard = (c) => `<button class="card mtask cpcard sev-${esc(c.severity)}" data-cp="${esc(c.id)}">
+      <span class="mt-top"><span class="prio ${c.severity === 'high' ? 'urgent' : c.severity === 'medium' ? 'high' : ''}">${esc(CP_SEV[c.severity] || '')}</span><span class="mst ${c.status === 'investigating' ? 'in_progress' : ['resolved', 'dismissed'].includes(c.status) ? 'done' : ''}">${esc(CP_ST[c.status])}</span>${c.upheld === true ? '<span class="mst cp-up">Upheld</span>' : ''}<span class="mt-flat">${esc(c.label)} · ${esc(c.building)}</span><span class="mt-n">${esc(WD_SHORT.format(D(c.date)))} ${esc(shortDate(c.date))}</span></span>
+      <span class="mt-title">${esc(c.title)}</span>
+      <span class="mt-bot">${(c.categories || []).map((x) => `<span class="fk">${esc(x)}</span>`).join('')}${c.cleaning ? `<span class="mt-who"><span class="avatar sm">${esc(initials(c.cleaning.cleanerName))}</span>Cleaned by ${c.cleaning.cleanerId === me.id ? 'you' : esc(c.cleaning.cleanerName)} · ${esc(shortDate(c.cleaning.date))}</span>` : '<span class="mt-who none">No cleaning linked</span>'}</span>
+    </button>`;
+  function renderComplaints() {
+    if (!cpCache) return;
+    $('cp-new').classList.toggle('hidden', !cpCache.canManage);
+    $('cp-csv').classList.toggle('hidden', !cpCache.seesAll);
+    $('cp-pat').classList.toggle('hidden', !cpCache.seesAll);
+    const all = cpCache.complaints, uniq = (arr) => [...new Map(arr.filter((x) => x[0])).entries()].sort((a, b) => a[1].localeCompare(b[1], undefined, { numeric: true }));
+    const opt = (k, label, items) => `<label class="cpf"><span>${label}</span><select data-cpf="${k}"><option value="">All</option>${items.map(([v, w]) => `<option value="${esc(v)}" ${cpF[k] === v ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></label>`;
+    $('cp-filters').innerHTML = `
+      <label class="cpf"><span>When</span><select data-cpf="period">${[['30', 'Last 30 days'], ['90', 'Last 90 days'], ['365', 'Last 12 months'], ['all', 'All time']].map(([v, w]) => `<option value="${v}" ${cpF.period === v ? 'selected' : ''}>${w}</option>`).join('')}</select></label>
+      ${opt('cat', 'Category', cpCache.categories.map((x) => [x, x]))}
+      ${opt('building', 'Building', uniq(all.map((c) => [c.building, c.building])))}
+      ${opt('flat', 'Flat', uniq(all.filter((c) => !cpF.building || c.building === cpF.building).map((c) => [c.listingId, `${c.label} · ${c.building}`])))}
+      ${cpCache.seesAll ? opt('cleaner', 'Cleaner', uniq(all.flatMap((c) => (c.cleaning ? [[c.cleaning.cleanerId, c.cleaning.cleanerName], [c.cleaning.assignedId, c.cleaning.assignedName]] : [])))) : ''}
+      <label class="cpf grow"><span>Search</span><input data-cpf="q" type="search" value="${esc(cpF.q)}" placeholder="Words, flat, booking…"></label>`;
+    $('cp-filters').querySelectorAll('[data-cpf]').forEach((el) => el[el.tagName === 'INPUT' ? 'oninput' : 'onchange'] = () => {
+      cpF[el.dataset.cpf] = el.value; if (el.dataset.cpf === 'building') cpF.flat = '';
+      if (el.tagName === 'INPUT') { drawCpList(); drawPatterns(); } else renderComplaints();
+    });
+    cpBadge(all.filter((c) => ['open', 'investigating'].includes(c.status)).length);
+    drawCpList(); drawPatterns();
+  }
+  function drawCpList() {
+    const list = cpFiltered(false);
+    const inPeriod = cpFiltered(true);
+    const upheld = inPeriod.filter((c) => c.upheld === true).length;
+    $('cp-sum').innerHTML = [`<span class="mt-chip"><b>${list.length}</b> shown</span>`, `<span class="mt-chip ${inPeriod.length ? 'warn' : ''}"><b>${inPeriod.length}</b> in this period</span>`, upheld && `<span class="mt-chip bad"><b>${upheld}</b> upheld</span>`].filter(Boolean).join('');
+    $('cp-list').innerHTML = list.length ? list.map(cpCard).join('') : `<div class="card empty"><b>No complaints${cpStatus === 'open' ? ' open' : ''}</b>${cpCache.seesAll ? 'Nothing matches these filters.' : 'Complaints about cleanings you did or were assigned to show here.'}</div>`;
+  }
+  // Patterns over time, from the same filters (ignoring Open / Resolved).
+  function drawPatterns() {
+    const box = $('cp-patterns');
+    box.classList.toggle('hidden', !cpPatterns);
+    if (!cpPatterns) return;
+    const list = cpFiltered(true);
+    const count = (keyOf) => { const m = new Map(); for (const c of list) for (const k of [].concat(keyOf(c)).filter(Boolean)) m.set(k, (m.get(k) || 0) + 1); return [...m.entries()].sort((a, b) => b[1] - a[1]); };
+    const bars = (title, rows, limit = 8) => { const max = Math.max(1, ...rows.map((r) => r[1])); return `<div class="card pcard2"><h3>${title}</h3>${rows.length ? rows.slice(0, limit).map(([k, n]) => `<div class="cpbar"><span class="pl" title="${esc(k)}">${esc(k)}</span><span class="pt"><i style="width:${(n / max) * 100}%"></i></span><b>${n}</b></div>`).join('') : '<p class="muted">Nothing yet.</p>'}${rows.length > limit ? `<p class="muted pmore">+ ${rows.length - limit} more</p>` : ''}</div>`; };
+    const months = []; for (let i = 11; i >= 0; i--) { const d = D(todayStr()); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - i); months.push(d.toISOString().slice(0, 7)); }
+    const byMonth = months.map((m) => [m, list.filter((c) => c.date.startsWith(m)).length]), maxM = Math.max(1, ...byMonth.map((x) => x[1]));
+    const upheld = list.filter((c) => c.upheld === true).length, decided = list.filter((c) => c.upheld !== null).length;
+    const comp = list.reduce((s, c) => s + (Number(c.compensation) || 0), 0);
+    const repeat = count((c) => `${c.label} · ${c.building}`).filter(([, n]) => n >= 3);
+    box.innerHTML = `<div class="ptotals card">
+        <div><b>${list.length}</b><span>complaints</span></div><div><b>${decided ? Math.round((upheld / decided) * 100) + '%' : '–'}</b><span>upheld (${upheld} of ${decided} decided)</span></div>
+        <div><b>£${comp.toLocaleString('en-GB', { maximumFractionDigits: 2 })}</b><span>compensation</span></div><div><b>${repeat.length}</b><span>flat${repeat.length === 1 ? '' : 's'} with 3 or more</span></div></div>
+      <div class="card pcard2 pmonths"><h3>By month</h3><div class="pcols">${byMonth.map(([m, n]) => `<div class="pcol" title="${n} in ${esc(m)}"><b>${n || ''}</b><i style="height:${(n / maxM) * 100}%"></i><span>${esc(MON_S.format(D(m + '-01')))}</span></div>`).join('')}</div></div>
+      <div class="pgrid">
+        ${bars('By category', count((c) => c.categories && c.categories.length ? c.categories : ['Not categorised']))}
+        ${bars('By flat', count((c) => `${c.label} · ${c.building}`))}
+        ${bars('By cleaner', count((c) => (c.cleaning ? c.cleaning.cleanerName : 'No cleaning linked')))}
+        ${bars('Upheld, by cleaner', count((c) => (c.upheld === true && c.cleaning ? c.cleaning.cleanerName : null)))}
+        ${bars('By building', count((c) => c.building))}
+        ${bars('By source', count((c) => (cpCache.sources[c.source] || c.source)))}
+      </div>`;
+  }
+  document.querySelectorAll('[data-cps]').forEach((b) => b.onclick = () => { cpStatus = b.dataset.cps; document.querySelectorAll('[data-cps]').forEach((x) => x.setAttribute('aria-selected', x === b)); drawCpList(); });
+  $('cp-pat').onclick = () => { cpPatterns = !cpPatterns; $('cp-pat').setAttribute('aria-pressed', cpPatterns); drawPatterns(); };
+  $('cp-new').onclick = () => complaintForm({});
+  $('cp-list').addEventListener('click', (e) => { const b = e.target.closest('[data-cp]'); if (b) openComplaint(b.dataset.cp); });
+
+  async function openComplaint(id) {
+    try {
+      const { complaint: c, sources } = await getJSON(`/api/complaints/${encodeURIComponent(id)}`);
+      const rec = c.cleaningRecord, cl = c.cleaning, mineToo = cl && (cl.cleanerId === me.id || cl.assignedId === me.id);
+      const moves = !c.canManage ? [] : ['resolved', 'dismissed'].includes(c.status) ? [['open', 'Reopen']] : [...(c.status !== 'investigating' ? [['investigating', 'Investigating']] : []), ['resolved', 'Resolved'], ['dismissed', 'Dismiss']];
+      const span = (a, b) => (cl && cl.manual ? cleanedWhen(cl) : a && b ? `${fmtClock(a)}–${fmtClock(b)} · ${durWords(Date.parse(b) - Date.parse(a))}` : '');
+      openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Complaint · ${esc(c.label)} · ${esc(c.building)}</span><h2 class="fp-h">${esc(c.title)}</h2>
+          <div class="sh-sub">${esc(sources[c.source] || c.source)} · ${esc(longDate(c.date))} · logged by ${esc(c.createdByName)}</div></div><div class="sh-right"><span class="mst">${esc(CP_ST[c.status])}</span>${CLOSE_BTN}</div></div>
+        ${mineToo && !c.canManage ? `<p class="stepin-note cp-yours">This complaint is about the cleaning on ${esc(longDate(cl.date))}${cl.cleanerId === me.id ? ' that you did' : ' you were assigned to'}. You can add your side below.</p>` : ''}
+        ${moves.length ? `<div class="mt-moves">${moves.map(([s, w]) => `<button class="btn ${s === 'resolved' ? 'primary' : ''}" data-cpmove="${s}">${esc(w)}</button>`).join('')}<span class="spacer"></span><button class="btn" id="cp-edit">Edit</button></div>` : ''}
+        ${c.details ? `<p class="cp-details">${esc(c.details)}</p>` : ''}
+        <dl class="mt-facts">
+          <div><dt>Categories</dt><dd>${(c.categories || []).map((x) => `<span class="fk">${esc(x)}</span>`).join(' ') || '—'}</dd></div>
+          <div><dt>Severity</dt><dd>${esc(CP_SEV[c.severity] || '—')}</dd></div>
+          <div><dt>Booking</dt><dd>${c.stay ? `${esc(c.stay.code || 'No code')} · ${esc(shortDate(c.stay.checkIn))}–${esc(shortDate(c.stay.checkOut))}${c.stay.guests ? ` · ${c.stay.guests} guest${c.stay.guests > 1 ? 's' : ''}` : ''}` : '—'}</dd></div>
+          <div><dt>Upheld</dt><dd>${c.upheld === true ? 'Yes, the guest was right' : c.upheld === false ? 'No' : 'Not decided'}</dd></div>
+          ${c.compensation !== null && c.compensation !== undefined ? `<div><dt>Compensation</dt><dd>£${esc(Number(c.compensation).toFixed(2))}</dd></div>` : ''}
+          ${c.resolution ? `<div class="wide"><dt>Resolution${c.resolvedBy ? ` · ${esc(c.resolvedBy)}` : ''}</dt><dd>${esc(c.resolution)}</dd></div>` : ''}
+        </dl>
+        <h3 class="sh-h3">Cleaning tagged</h3>
+        ${cl ? `<div class="card cp-clean">
+            <div class="cp-cl-h"><span class="avatar">${esc(initials(cl.cleanerName))}</span><div><b>Cleaned by ${cl.cleanerId === me.id ? 'you' : esc(cl.cleanerName)}</b><span>${esc(longDate(cl.date))}${span(cl.startedAt, cl.endedAt) ? ' · ' + esc(span(cl.startedAt, cl.endedAt)) : ''}</span></div></div>
+            <div class="cp-cl-s">Assigned to: <b>${cl.assignedName ? esc(cl.assignedName) : 'nobody'}</b>${rec && rec.manual ? ` · marked cleaned by ${esc(rec.manual.byName)}` : rec ? ` · checklist ${rec.checklist ? rec.checklist.length : 0}/${checklistDef.length || 5}${keyNote(rec)}${rec.completedBy ? ` · finished by ${esc(rec.completedBy)}` : ''}` : ''}${rec && rec.reset ? ` · <span class="warn">later reset by ${esc(rec.reset.byName)}</span>` : ''}</div>
+            ${rec && (rec.media || []).length ? mediaTiles(rec.media) : '<p class="muted">No videos from this cleaning.</p>'}
+            <a class="linkbtn" href="/?view=day&date=${esc(cl.forDate || cl.date)}&flat=${esc(c.listingId)}">Open the flat on that day</a>
+          </div>` : '<div class="card empty"><b>No cleaning linked</b>Edit the complaint to pick the cleaning it was about.</div>'}
+        ${(c.media || []).length ? `<h3 class="sh-h3">Guest’s photos</h3>${mediaTiles(c.media)}` : ''}
+        ${(c.tasks || []).length || (c.canManage && can('manage_maintenance')) ? `<h3 class="sh-h3">Maintenance</h3>
+          ${(c.tasks || []).map((t) => `<button class="rrow link" data-cptask="${esc(t.id)}"><span class="rtxt"><b>${esc(t.title)}</b><span>${esc(MT_ST[t.status] || t.status)}</span></span></button>`).join('')}
+          ${c.canManage && can('manage_maintenance') ? '<button class="btn" id="cp-mt">Create maintenance task</button>' : ''}` : ''}
+        <h3 class="sh-h3">Notes & history</h3>
+        <ol class="mt-log">${(c.log || []).slice().reverse().map((l) => `<li class="${esc(l.kind)}"><span class="mt-lt">${l.kind === 'note' ? `<b>${esc(l.byName)}</b> ${esc(l.text)}` : `${esc(l.text)} <span class="muted">· ${esc(l.byName)}</span>`}</span><em>${esc(fmtWhen(l.at))}</em></li>`).join('')}</ol>
+        ${c.canManage || mineToo ? `<form class="pe-form" id="cp-note"><textarea id="cp-note-t" rows="2" maxlength="2000" placeholder="${mineToo && !c.canManage ? 'Your side: what happened at this cleaning?' : 'Add a note'}"></textarea><div class="form-actions"><span class="spacer"></span><button class="btn primary" type="submit">Add note</button></div></form>` : ''}
+        ${c.canManage ? '<div class="form-actions"><span class="spacer"></span><button class="btn danger" id="cp-del">Delete complaint</button></div>' : ''}`);
+      const after = (msg) => { toast(msg); loadComplaints(); openComplaint(id); };
+      $('detail-body').querySelectorAll('[data-cpmove]').forEach((b) => b.onclick = async () => {
+        const to = b.dataset.cpmove;
+        let extra = {};
+        if (to === 'resolved' || to === 'dismissed') {
+          const r = await askConfirm({ title: to === 'resolved' ? 'Mark resolved?' : 'Dismiss this complaint?', text: 'Say what was done or decided. It’s kept with the complaint.', yes: to === 'resolved' ? 'Mark resolved' : 'Dismiss', note: 'Resolution (optional)' });
+          if (!r) return; extra = r.note ? { resolution: r.note } : {};
+        }
+        try { await send('PUT', `/api/complaints/${encodeURIComponent(id)}`, { status: to, ...extra }); after(`Marked ${CP_ST[to].toLowerCase()}`); } catch (e) { toast(e.message); }
+      });
+      if ($('cp-edit')) $('cp-edit').onclick = () => complaintForm(c);
+      if ($('cp-mt')) $('cp-mt').onclick = () => taskForm({ listingId: c.listingId, title: c.title, complaintId: c.id, mediaIds: (c.media || []).map((m) => m.id) });
+      $('detail-body').querySelectorAll('[data-cptask]').forEach((b) => b.onclick = () => openTask(b.dataset.cptask));
+      if ($('cp-note')) $('cp-note').onsubmit = async (e) => { e.preventDefault(); try { await send('POST', `/api/complaints/${encodeURIComponent(id)}/notes`, { text: $('cp-note-t').value }); after('Note added'); } catch (err) { toast(err.message); } };
+      if ($('cp-del')) $('cp-del').onclick = async () => {
+        if (!(await askConfirm({ title: 'Delete this complaint?', text: 'It’s removed from the records and the patterns. This can’t be undone.', yes: 'Delete', danger: true }))) return;
+        try { await send('DELETE', `/api/complaints/${encodeURIComponent(id)}`); toast('Complaint deleted'); closeDetail(); loadComplaints(); } catch (e) { toast(e.message); }
+      };
+    } catch (e) { toast(e.message); }
+  }
+
+  // Logging (or editing) a complaint: flat and date find the stay and the cleaning that prepared it.
+  async function complaintForm(c0) {
+    const edit = Boolean(c0.id), c = { date: todayStr(), severity: 'medium', source: 'guest_message', categories: [], ...c0 };
+    const flats = edit ? null : await flatsForForm();
+    const cats = (cpCache && cpCache.categories) || (await getJSON('/api/complaints/categories')).categories;
+    const sources = (cpCache && cpCache.sources) || {};
+    const picker = edit ? null : mediaPicker(() => $('cp-flat').value, (busy) => { $('cp-go').disabled = busy; }, 'complaint');
+    openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Complaints</span><h2>${edit ? 'Edit complaint' : 'Log a complaint'}</h2><div class="sh-sub">${edit ? esc(`${c.label} · ${c.building}`) : 'Pick the flat and the day the guest complained. The stay and the cleaning before it are found for you.'}</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
+      <form class="pe-form" id="cp-form" autocomplete="off">
+        <div class="pe-row">
+          ${flats ? `<div class="pe-f"><label for="cp-flat">Flat</label><select id="cp-flat" required><option value="">Pick a flat…</option>${flats.map((f) => `<option value="${esc(f.id)}" ${c.listingId === f.id ? 'selected' : ''}>${esc(f.label)} · ${esc(f.building)}</option>`).join('')}</select></div>` : ''}
+          <div class="pe-f"><label for="cp-date">Date of the complaint</label><input id="cp-date" type="date" value="${esc(c.date)}" max="${esc(todayStr())}" required></div>
+        </div>
+        <div id="cp-link">${edit ? '' : '<p class="muted">Pick the flat to find the stay and the cleaning.</p>'}</div>
+        <div class="pe-f"><label for="cp-title">What did the guest complain about?</label><input id="cp-title" maxlength="160" required value="${esc(c.title || '')}" placeholder="e.g. Hair in the shower, no towels in the bathroom"></div>
+        <div class="pe-f"><label for="cp-details">Details <span class="muted">(optional)</span></label><textarea id="cp-details" rows="3" maxlength="4000" placeholder="What they said, where exactly, anything else useful">${esc(c.details || '')}</textarea></div>
+        <div class="pe-f"><span class="pe-l">Categories <span class="muted">(pick all that apply)</span></span><div class="cp-cats" id="cp-cats">${cats.map((x) => `<label class="cp-cat"><input type="checkbox" value="${esc(x)}" ${(c.categories || []).includes(x) ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('')}</div>
+          <button type="button" class="linkbtn" id="cp-cats-edit">Edit categories</button></div>
+        <div class="pe-row">
+          <div class="pe-f"><span class="pe-l">Severity</span><div class="range fkinds" role="radiogroup" aria-label="Severity">${Object.entries(CP_SEV).reverse().map(([k, w]) => `<button type="button" role="radio" data-sev="${k}" aria-checked="${c.severity === k}" aria-selected="${c.severity === k}">${w}</button>`).join('')}</div></div>
+          <div class="pe-f"><label for="cp-source">Where it came from</label><select id="cp-source">${Object.entries(sources).map(([k, w]) => `<option value="${k}" ${c.source === k ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></div>
+        </div>
+        ${edit ? `<div class="pe-row">
+            <div class="pe-f"><label for="cp-upheld">Was the guest right?</label><select id="cp-upheld"><option value="" ${c.upheld === null ? 'selected' : ''}>Not decided</option><option value="yes" ${c.upheld === true ? 'selected' : ''}>Yes, upheld</option><option value="no" ${c.upheld === false ? 'selected' : ''}>No</option></select></div>
+            <div class="pe-f"><label for="cp-comp">Compensation (£) <span class="muted">(optional)</span></label><input id="cp-comp" type="number" min="0" step="0.01" value="${c.compensation ?? ''}" placeholder="0"></div>
+          </div>
+          <div class="pe-f"><label for="cp-res">Resolution <span class="muted">(optional)</span></label><textarea id="cp-res" rows="2" maxlength="2000">${esc(c.resolution || '')}</textarea></div>` : `<div class="pe-f"><span class="pe-l">Guest’s photos <span class="muted">(optional)</span></span>${picker.html}</div>`}
+        <div class="form-msg" id="cp-msg"></div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="cp-go">${edit ? 'Save' : 'Log complaint'}</button></div>
+      </form>`);
+    if (picker) picker.wire($('cp-form'));
+    let sev = c.severity, look = null;
+    $('cp-form').querySelectorAll('[data-sev]').forEach((b) => b.onclick = () => { sev = b.dataset.sev; $('cp-form').querySelectorAll('[data-sev]').forEach((x) => { x.setAttribute('aria-checked', x === b); x.setAttribute('aria-selected', x === b); }); });
+    const flatId = () => (edit ? c.listingId : $('cp-flat').value);
+    const drawLink = () => {
+      const box = $('cp-link');
+      if (!look) return;
+      const stays = look.stays, cls = look.cleanings;
+      const curStay = edit ? (c.stay && c.stay.code) || '' : (look.stay && look.stay.code) || '';
+      const curClean = edit ? (c.cleaning && c.cleaning.id) || '' : look.suggestedCleaningId || '';
+      box.innerHTML = `<div class="pe-row">
+        <div class="pe-f"><label for="cp-stay">Booking</label><select id="cp-stay"><option value="">No booking / not sure</option>${stays.map((s, i) => `<option value="${i}" ${s.code === curStay ? 'selected' : ''}>${esc(s.code || 'Booking')} · ${esc(shortDate(s.checkIn))}–${esc(shortDate(s.checkOut))}</option>`).join('')}</select></div>
+        <div class="pe-f"><label for="cp-clean">Cleaning it’s about</label><select id="cp-clean"><option value="">No cleaning / not sure</option>${cls.map((x) => `<option value="${esc(x.id)}" ${x.id === curClean ? 'selected' : ''}>${esc(WD_SHORT.format(D(x.date)))} ${esc(shortDate(x.date))} · ${esc(x.cleanerName)}${x.assignedName && x.assignedName !== x.cleanerName ? ` (assigned ${esc(x.assignedName)})` : ''}</option>`).join('')}</select>
+          <span class="pe-g">${cls.length ? 'The person who cleaned it, and whoever was assigned, are told “Complaint detected”.' : 'No finished cleanings found at this flat before this date.'}</span></div></div>`;
+    };
+    const lookup = async () => {
+      const id = flatId(), date = $('cp-date').value;
+      if (!id || !date) return;
+      $('cp-link').innerHTML = '<p class="muted">Finding the stay and the cleaning…</p>';
+      try { look = await getJSON(`/api/complaints/lookup?listingId=${encodeURIComponent(id)}&date=${encodeURIComponent(date)}`); drawLink(); }
+      catch (e) { $('cp-link').innerHTML = `<p class="form-msg err">${esc(e.message)}</p>`; }
+    };
+    if (!edit) $('cp-flat').onchange = lookup;
+    $('cp-date').onchange = lookup;
+    if (edit || c.listingId) lookup();
+    $('cp-cats-edit').onclick = async () => {
+      const now = [...$('cp-cats').querySelectorAll('input')].map((i) => i.value);
+      const ticked = new Set([...$('cp-cats').querySelectorAll('input:checked')].map((i) => i.value));
+      const box = document.createElement('div'); box.className = 'modal';
+      box.innerHTML = `<form class="modal-card" role="dialog" aria-modal="true" aria-labelledby="md-t"><h3 id="md-t">Complaint categories</h3><p>One per line. Renaming a category doesn’t change complaints already logged.</p>
+        <textarea id="md-cats" rows="10">${esc(now.join('\n'))}</textarea><p class="md-err" id="md-err" role="alert"></p>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary">Save categories</button></div></form>`;
+      document.body.appendChild(box);
+      box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) box.remove(); });
+      box.querySelector('form').onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          const r = await send('PUT', '/api/complaints/categories', { categories: $('md-cats').value.split('\n') });
+          box.remove(); if (cpCache) cpCache.categories = r.categories;
+          $('cp-cats').innerHTML = r.categories.map((x) => `<label class="cp-cat"><input type="checkbox" value="${esc(x)}" ${ticked.has(x) ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('');
+          toast('Categories saved');
+        } catch (err) { $('md-err').textContent = err.message; }
+      };
+    };
+    $('cp-form').onsubmit = async (e) => {
+      e.preventDefault();
+      if (picker && picker.busy()) return toast('Wait for the upload to finish');
+      const b = { date: $('cp-date').value, title: $('cp-title').value, details: $('cp-details').value, severity: sev, source: $('cp-source').value,
+        categories: [...$('cp-cats').querySelectorAll('input:checked')].map((i) => i.value) };
+      if (look && $('cp-stay')) { const s = look.stays[Number($('cp-stay').value)]; b.stay = $('cp-stay').value === '' ? null : s; b.cleaningId = $('cp-clean').value || null; }
+      if (edit) { const u = $('cp-upheld').value; b.upheld = u === 'yes' ? true : u === 'no' ? false : null; b.compensation = $('cp-comp').value; b.resolution = $('cp-res').value; }
+      else { b.listingId = flatId(); b.mediaIds = picker.ids(); }
+      $('cp-go').disabled = true;
+      try {
+        const r = edit ? await send('PUT', `/api/complaints/${encodeURIComponent(c.id)}`, b) : await send('POST', '/api/complaints', b);
+        if (picker) picker.clear();
+        toast(edit ? 'Saved' : r.complaint.cleaning ? `Complaint logged · ${r.complaint.cleaning.cleanerName} has been told` : 'Complaint logged');
+        loadComplaints(); openComplaint(r.complaint.id);
+      } catch (err) { $('cp-msg').className = 'form-msg err'; $('cp-msg').textContent = err.message; $('cp-go').disabled = false; }
+    };
+  }
+
   // Photos and videos for a task: uploaded as soon as they're picked (same resumable uploads as cleanings).
-  function mediaPicker(listingId, onChange) {
+  function mediaPicker(listingId, onChange, purpose = 'maintenance') {
     const keys = [];
     const html = `<div class="ev-btns"><label class="btn file"><input type="file" accept="image/*" capture="environment" data-mp="cam">Take photo</label><label class="btn file"><input type="file" accept="video/*,image/*" multiple data-mp="pick">Choose photos/videos</label></div><div class="mp-list"></div>`;
     const busy = () => keys.some((k) => { const x = uploads.get(k); return x && !x.done && !x.error; });
@@ -454,7 +691,7 @@
         onChange && onChange(busy());
       };
       root.querySelectorAll('[data-mp]').forEach((inp) => inp.onchange = (e) => {
-        for (const f of e.target.files) { const key = Math.random().toString(36).slice(2); uploads.set(key, { file: f, kind: (f.type || '').startsWith('image') ? 'photo' : 'video', progress: 0, done: false, error: null, purpose: 'maintenance', listingId: listingId() }); keys.push(key); runUpload(key, draw); }
+        for (const f of e.target.files) { const key = Math.random().toString(36).slice(2); uploads.set(key, { file: f, kind: (f.type || '').startsWith('image') ? 'photo' : 'video', progress: 0, done: false, error: null, purpose, listingId: listingId() }); keys.push(key); runUpload(key, draw); }
         e.target.value = ''; draw();
       });
     };
@@ -527,7 +764,7 @@
       e.preventDefault();
       if (picker && picker.busy()) return toast('Wait for the upload to finish');
       const b = { title: $('mt-title').value, details: $('mt-details').value, priority: prio };
-      if (!t) Object.assign(b, { listingId: flatId(), mediaIds: [...(pre.mediaIds || []), ...(picker ? picker.ids() : [])], damageId: pre.damageId || null });
+      if (!t) Object.assign(b, { listingId: flatId(), mediaIds: [...(pre.mediaIds || []), ...(picker ? picker.ids() : [])], damageId: pre.damageId || null, complaintId: pre.complaintId || null });
       if (mgr) {
         const w = $('mt-who').value;
         b.assignee = !w ? null : w === 'c' ? { type: 'contractor', name: $('mt-cname').value, phone: $('mt-cphone').value, trade: $('mt-ctrade').value } : { type: 'user', id: w.slice(2) };
@@ -779,7 +1016,9 @@
     for (const g of groupByBuilding(day.units)) {
       for (const u of g.units) {
         const parts = [];
-        if (u.checkOut) parts.push(`Check-out at ${u.checkOut.time}`);
+        if (u.checkOut && u.checkOut.movedFrom) parts.push(`Clean (moved from ${WD_SHORT.format(D(u.checkOut.movedFrom))} ${shortDate(u.checkOut.movedFrom)})`);
+        else if (u.checkOut) parts.push(`Check-out at ${u.checkOut.time}`);
+        if (u.movedOut && !u.checkOut) parts.push(`Clean moved to ${WD_SHORT.format(D(u.movedOut.to))} ${shortDate(u.movedOut.to)}`);
         if (u.checkIn) parts.push(`Check-in at ${u.checkIn.time}`);
         lines.push(`- *${u.name}* - ${parts.join(' | ')}${(u.checkIn && u.checkIn.isNew) ? ' (NEW)' : ''}`);
       }
@@ -803,7 +1042,7 @@
     return 1 + Math.round(((d - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
   };
   const weekNo = () => isoWeek(data.dates.find((x) => D(x).getUTCDay() === 1) || data.weekStart);
-  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account', forum: 'Team', maintenance: 'Day to day' };
+  const GROUP = { cleaning: 'Day to day', damage: 'Day to day', props: 'Portfolio', users: 'Admin', settings: 'Admin', account: 'Your account', forum: 'Team', maintenance: 'Day to day', complaints: 'Day to day' };
   function setPageHead() {
     const eb = $('page-eyebrow'), h = $('page-title');
     if ((view === 'day' || view === 'board') && data) {
@@ -838,6 +1077,7 @@
     $('view-damage').classList.toggle('hidden', v !== 'damage');
     $('view-forum').classList.toggle('hidden', v !== 'forum');
     $('view-maintenance').classList.toggle('hidden', v !== 'maintenance');
+    $('view-complaints').classList.toggle('hidden', v !== 'complaints');
     $('foot').classList.toggle('hidden', !(v === 'day' || v === 'board'));
     if (v === 'board' && data && boardDirty) renderBoard();
     if (v === 'props') loadProps();
@@ -848,6 +1088,7 @@
     if (v === 'damage') loadDamageView();
     if (v === 'forum') loadForum();
     if (v === 'maintenance') loadMaintenance();
+    if (v === 'complaints') loadComplaints();
   }
 
   // ---------- who's signed in ----------
@@ -877,6 +1118,9 @@
     $('acct-users').classList.toggle('hidden', !navAllowed('users'));
     $('acct-settings').classList.toggle('hidden', !navAllowed('settings'));
     $('acct-admin').classList.toggle('hidden', !navAllowed('users') && !navAllowed('settings'));
+    $('acct-props').classList.toggle('hidden', !navAllowed('props'));
+    $('acct-forum').classList.toggle('hidden', !navAllowed('forum'));
+    $('acct-more').classList.toggle('hidden', !navAllowed('props') && !navAllowed('forum'));
   }
   $('pw-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -892,7 +1136,7 @@
     const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
     if (r.status === 401) { location.href = '/login'; throw new Error('signed out'); }
     const out = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(out.error || 'Something went wrong');
+    if (!r.ok) { const err = new Error(out.error || 'Something went wrong'); err.status = r.status; err.data = out; throw err; }
     return out;
   }
 
@@ -1071,6 +1315,15 @@
   $('me-btn').onclick = () => setView('account');
   $('acct-users').onclick = () => setView('users');
   $('acct-settings').onclick = () => setView('settings');
+  // On phones Properties and Forum sit under My account › More (not in the bottom bar): their dots follow them there,
+  // and the profile button shows a dot when either has something new.
+  $('acct-props').onclick = () => setView('props');
+  $('acct-forum').onclick = () => setView('forum');
+  const syncMoreDots = () => {
+    const props = !$('nd-props').classList.contains('hidden') && navAllowed('props'), forum = !$('nd-forum').classList.contains('hidden') && navAllowed('forum');
+    $('nd-props2').classList.toggle('hidden', !props); $('nd-forum2').classList.toggle('hidden', !forum); $('nd-me').classList.toggle('hidden', !props && !forum);
+  };
+  for (const id of ['nd-props', 'nd-forum']) new MutationObserver(syncMoreDots).observe($(id), { attributes: true, attributeFilter: ['class'] });
   $('me-btn2').onclick = () => setView('account');
   (async () => {
     const q0 = new URLSearchParams(location.search);
@@ -1109,6 +1362,10 @@
   };
   const durWords = (ms) => { const m = Math.round(ms / 60000); return m < 1 ? 'under 1 min' : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
   const myActive = () => cleanings.find((c) => c.cleanerId === me.id && ACTIVE.includes(c.status));
+  // A finished cleaning's times: one marked by hand may have no times, or only a start.
+  const cleanedWhen = (c) => (c.manual && !c.manual.timeKnown ? 'time not recorded'
+    : c.manual && !c.manual.durationKnown ? `from ${fmtClock(c.startedAt)}` : `${fmtClock(c.startedAt)}–${fmtClock(c.endedAt)} · ${durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt))}`);
+  const hasDuration = (c) => !c.manual || c.manual.durationKnown;
   // A cleaning counts towards the check-out it follows, not just the day it happened: e.g. a flat checked out
   // Sunday and cleaned Monday morning shows as cleaned on Sunday. It belongs to the latest check-out at or
   // before the time it started (up to 2 hours early, in case the guest left early), unless a new guest has
@@ -1120,6 +1377,12 @@
   const cleaningRange = () => `from=${data.dates[0]}&to=${nextDay(data.dates[data.dates.length - 1])}`;
   const unitOn = (listingId, date) => { const day = data.days.find((d) => d.date === date); return day && day.units.find((u) => u.listingId === listingId); };
   function cleanFor(c) {
+    if (c.forDate) { // counted for one guest's check-out: that day, or the day its clean was moved to
+      if (!data) return c.forDate;
+      const d = data.dates.find((x) => { const u = unitOn(c.listingId, x); return u && u.checkOut && (u.checkOut.movedFrom || x) === c.forDate; });
+      const u0 = d ? null : unitOn(c.listingId, c.forDate);
+      return d || (u0 && u0.movedOut ? u0.movedOut.to : c.forDate);
+    }
     if (!data || !c.startedAt) return c.date;
     // Left over from another week while the new one loads: it can't belong to a check-out on screen.
     if (c.date < data.dates[0] || c.date > nextDay(data.dates[data.dates.length - 1])) return c.date;
@@ -1129,7 +1392,7 @@
       if (d > c.date) break;
       const u = unitOn(c.listingId, d);
       const o = u && u.checkOut;
-      if (o && (d < c.date || !o.timeRaw || hm >= minus2h(o.timeRaw))) best = d;
+      if (o && (o.movedFrom || d < c.date || !o.timeRaw || hm >= minus2h(o.timeRaw))) best = d;
       if (u && u.checkIn && d < c.date) best = null; // a new guest arrived since, so that check-out was cleaned already
     }
     return best || c.date;
@@ -1148,7 +1411,17 @@
       const range = data ? cleaningRange() : '';
       const [r, a] = await Promise.all([getJSON('/api/cleanings?' + range), getJSON('/api/assignments?' + range).catch(() => null)]);
       cRange = range;
+      const wasMine = myActive();
       cleanings = r.cleanings; checklistDef = r.checklist; holdMs = r.holdMs;
+      let gone = wasMine && cleanings.find((c) => c.id === wasMine.id && c.status === 'cancelled' && c.reset);
+      if (wasMine && !gone && !cleanings.some((c) => c.id === wasMine.id)) { // not in this week's list any more: ask about it directly
+        try { const x = (await getJSON('/api/cleanings/' + encodeURIComponent(wasMine.id))).cleaning; if (x && x.status === 'cancelled' && x.reset) gone = x; } catch (_) {}
+      }
+      if (gone) {
+        for (const [k, x] of uploads) if (x.ownerId === gone.id) { x.cancelled = true; uploads.delete(k); }
+        releaseWake(); clearInterval(keyPoll); keyPoll = null;
+        toast(`${gone.reset.byName} reset your cleaning of ${gone.label}${gone.reset.reason ? ` · “${gone.reset.reason}”` : ''}`);
+      }
       if (a) assignments = Object.fromEntries(a.assignments.map((x) => [`${x.date}|${x.listingId}`, x]));
       decorateDay();
       renderActiveBar();
@@ -1168,7 +1441,8 @@
     document.querySelectorAll('[data-cbadge]').forEach((el) => {
       const { active, done } = cleanState(el.dataset.cbadge);
       if (active) el.innerHTML = `<span class="cb running"><i></i>${active.status === 'in_progress' ? 'Cleaning' : esc(STEP_WORD[active.status] || 'Cleaning')}${active.status === 'in_progress' ? ` · <b data-since="${esc(active.startedAt)}" data-until="${esc(active.endedAt || '')}">${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</b>` : ''}</span>`;
-      else if (done) el.innerHTML = `<span class="cb done">✓ Cleaned · ${durWords(Date.parse(done.endedAt) - Date.parse(done.startedAt))}</span>`;
+      else if (done) el.innerHTML = `<span class="cb done">✓ ${done.manual ? 'Marked cleaned' : 'Cleaned'}${hasDuration(done) ? ` · ${durWords(Date.parse(done.endedAt) - Date.parse(done.startedAt))}` : ''}</span>`;
+      else if (el.dataset.moved) el.innerHTML = `<span class="cb moved">Clean moved → ${esc(WD_SHORT.format(D(el.dataset.moved)))} ${esc(shortDate(el.dataset.moved))}</span>`;
       else el.innerHTML = el.dataset.kind === 'in' ? '<span class="cb arr">Arriving</span>' : '<span class="cb todo">To clean</span>';
     });
     // Who's assigned to each flat that day.
@@ -1247,6 +1521,10 @@
       cards.push(`<div class="card rcard"><div class="rc-h"><h3>Team ${esc(dayWord)}</h3></div>${rows}</div>`);
     }
     const att = [];
+    if (stepsIn()) {
+      const stuck = cleanings.filter((c) => (c.status === 'awaiting_video' || c.status === 'awaiting_key') && Date.now() - Date.parse(c.checksConfirmedAt || c.videoAt || c.endedAt || c.startedAt) > 30 * 60e3);
+      for (const c of stuck) att.push(`<button class="rrow link" data-flat="${esc(c.listingId)}" data-fday="${esc(cleanFor(c))}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${esc(c.label)}: ${c.status === 'awaiting_video' ? 'video not uploaded' : 'key not returned'}</b><span>${esc(c.cleanerName)} · stuck for ${esc(durWords(Date.now() - Date.parse(c.checksConfirmedAt || c.videoAt || c.endedAt || c.startedAt)))}</span></span>${CHEV}</button>`);
+    }
     if (openDamage) att.push(`<button class="rrow link" data-go="damage"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${openDamage} open damage report${openDamage === 1 ? '' : 's'}</b><span>Review and resolve</span></span>${CHEV}</button>`);
     if (knUnlinked.length) att.push(`<button class="rrow link" data-go="${can('manage_settings') ? 'settings' : 'props'}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${knUnlinked.length} KeyNest flat${knUnlinked.length === 1 ? '' : 's'} not linked</b><span>${esc(knUnlinked.map((f) => f.label).join(' · '))}</span></span>${CHEV}</button>`);
     for (const u of s.units.filter((x) => x.checkIn && x.checkIn.isNew)) att.push(`<button class="rrow link" data-flat="${esc(u.listingId)}"><span class="ric new">${ICONS.star}</span><span class="rtxt"><b>${esc(u.label)} is a new booking</b><span>Arrives ${esc(u.checkIn.time)}${u.checkIn.guests ? ` · ${u.checkIn.guests} guest${u.checkIn.guests > 1 ? 's' : ''}` : ''}</span></span>${CHEV}</button>`);
@@ -1381,6 +1659,7 @@
     const active = list.find((c) => ACTIVE.includes(c.status));
     const done = list.filter((c) => c.status === 'completed');
     const mine = active && active.cleanerId === me.id;
+    const duNow = data && unitOn(sheetListing, selected);
     let body = '';
 
     if (sheetMode === 'damage') return renderDamageForm(u);
@@ -1403,28 +1682,42 @@
       body = `<div class="timer-card other"><div class="tc-label">${esc(active.cleanerName)} started at ${fmtClock(active.startedAt)}</div>
         <div class="tc-time" ${active.endedAt ? '' : `data-since="${esc(active.startedAt)}"`}>${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</div>
         <div class="tc-step">${active.status === 'in_progress' ? 'Cleaning now' : active.status === 'checklist' ? 'Doing final checks' : active.status === 'awaiting_key' ? 'Returning the key' : 'Uploading video'}</div>
-        ${can('manage_users') ? '<button class="linkbtn" id="cancel-clean">Cancel this cleaning</button>' : ''}</div>`
-        + (active.status === 'awaiting_key' && stepsIn() ? `<p class="stepin-note">You can finish ${esc(active.cleanerName.split(' ')[0])}’s cleaning here.</p>${keyStep(active)}` : '');
-    } else if (can('do_cleaning') && me.role !== 'user') { // Users don't clean; Admins are asked first
+        ${can('reset_cleanings') ? '<button class="linkbtn" id="reset-active">Reset this cleaning</button>' : ''}</div>`
+        + (active.status === 'awaiting_key' && stepsIn() ? `<p class="stepin-note">You can finish ${esc(active.cleanerName.split(' ')[0])}’s cleaning here.</p>${keyStep(active)}` : '')
+        + (active.status === 'awaiting_video' && stepsIn() ? `<p class="stepin-note">${esc(active.cleanerName.split(' ')[0])} hasn’t uploaded the video yet${active.checksConfirmedAt ? ` (checks done at ${fmtClock(active.checksConfirmedAt)})` : ''}. If their phone won’t upload it, you can finish without it.</p><button class="btn wide" id="no-video">Finish without the video</button>` : '');
+    } else if (can('do_cleaning') && me.role !== 'user' && !(duNow && duNow.movedOut && !duNow.checkOut) && !(duNow && duNow.checkOut && done.length) && !(data && selected > nextDay(data.today))) {
+      // Users don't clean; Admins are asked first. Not when this check-out is already cleaned (reset it to clean again),
+      // nor on a day whose clean was moved to another day, nor further ahead than tomorrow.
       body = `<button class="btn big primary" id="begin-clean"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 5v14l11-7z"/></svg>Begin cleaning</button>`;
     }
 
     const history = done.map((c) => `<div class="hist">
-        <div class="hist-h"><b>✓ Cleaned by ${esc(c.cleanerName)}</b><span>${c.date !== selected ? esc(`${WD_SHORT.format(D(c.date))} ${shortDate(c.date)}`) + ', ' : ''}${fmtClock(c.startedAt)}–${fmtClock(c.endedAt)} · ${durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt))}</span></div>
-        <div class="hist-s">Checklist confirmed ${c.checklist.length}/${checklistDef.length || 5}${keyNote(c)}${c.guesty === 'updated' ? ' · marked clean in Guesty' : c.guesty === 'failed' ? ' · <span class="warn">Guesty not updated</span>' : ''}</div>
+        <div class="hist-h"><b>✓ ${c.manual ? `Marked cleaned by ${esc(c.manual.byName)}` : `Cleaned by ${esc(c.cleanerName)}`}</b><span>${c.date !== selected ? esc(`${WD_SHORT.format(D(c.date))} ${shortDate(c.date)}`) + ', ' : ''}${esc(cleanedWhen(c))}</span></div>
+        <div class="hist-s">${c.manual ? `Cleaned by ${esc(c.cleanerName)}${c.manual.note ? ` · “${esc(c.manual.note)}”` : ''}` : `Checklist confirmed ${c.checklist.length}/${checklistDef.length || 5}${keyNote(c)}`}${c.videoSkipped ? ` · <span class="warn">no video (${esc(c.videoSkipped.byName)})</span>` : ''}${c.forBy ? ` · counted for this check-out by ${esc(c.forBy.byName)}` : ''}${c.guesty === 'updated' ? ' · marked clean in Guesty' : c.guesty === 'failed' ? ' · <span class="warn">Guesty not updated</span>' : ''}</div>
         ${(can('view_cleaning') || c.cleanerId === me.id) ? mediaTiles(c.media) : ''}
+        ${can('reset_cleanings') ? `<button class="linkbtn danger-link" data-reset="${esc(c.id)}">Reset (not cleaned)</button>` : ''}
       </div>`).join('');
+    // Cleanings for this day that were reset, so it's clear why it shows as not cleaned.
+    const resets = can('view_cleaning') ? cleanings.filter((c) => c.listingId === sheetListing && c.status === 'cancelled' && c.reset && cleanFor(c) === selected) : [];
+    const resetNotes = resets.map((c) => `<p class="reset-note">↺ ${c.manual ? 'Marked-cleaned record' : `${esc(c.cleanerName)}’s cleaning`}${c.reset.from === 'completed' && !(c.manual && !c.manual.timeKnown) ? ` (${esc(fmtClock(c.startedAt))})` : ''} was reset by ${esc(c.reset.byName)}${c.reset.reason ? ` · “${esc(c.reset.reason)}”` : ''}</p>`).join('');
+    // Tools for the job on this day: mark it cleaned (another date, no video), move it, or see where it was moved.
+    const job = duNow && duNow.checkOut ? { from: duNow.checkOut.movedFrom || selected, moved: Boolean(duNow.checkOut.movedFrom), out: duNow.checkOut } : null;
+    const tools = [];
+    if (job && job.moved) tools.push(`<p class="moved-note">⇄ Clean moved here from ${esc(longDate(job.from))}${job.out.movedBy ? ` by ${esc(job.out.movedBy)}` : ''}${job.out.movedNote ? ` · “${esc(job.out.movedNote)}”` : ''}${can('move_cleanings') ? ` <button class="linkbtn" id="move-back">Move back</button>` : ''}</p>`);
+    if (duNow && duNow.movedOut && !duNow.checkOut) tools.push(`<p class="moved-note">⇄ The clean after these guests leave was moved to ${esc(longDate(duNow.movedOut.to))}${duNow.movedOut.by ? ` by ${esc(duNow.movedOut.by)}` : ''}. <button class="linkbtn" id="moved-open">Open that day</button>${can('move_cleanings') ? ` · <button class="linkbtn" id="move-back">Move back</button>` : ''}</p>`);
+    if (job && !active && !done.length && can('mark_cleaned') && data && selected <= data.today) tools.push('<button class="btn wide" id="mark-cleaned">Mark as cleaned…</button>');
+    if (job && !done.length && can('move_cleanings')) tools.push('<button class="btn wide" id="move-job">Move to another day</button>');
 
     // This flat on the selected day: check-out, check-in and the window between them.
     const du = (data && unitOn(sheetListing, selected)) || u;
     const o = du.checkOut, n = du.checkIn;
     const hrs = (a, b) => { const m = (x) => { const r = /^(\d{1,2}):(\d\d)/.exec(x || ''); return r ? Number(r[1]) * 60 + Number(r[2]) : null; }; const d = m(b) - m(a); return m(a) === null || m(b) === null || d <= 0 ? null : d; };
-    const win = o && n ? hrs(o.timeRaw, n.timeRaw) : null;
+    const win = o && n && !o.movedFrom ? hrs(o.timeRaw, n.timeRaw) : null;
     const stay = (e) => (e ? [e.nights && `${e.nights} night${e.nights > 1 ? 's' : ''}`, e.guests && `${e.guests} guest${e.guests > 1 ? 's' : ''}`, e.planned && 'planned time', e.isNew && 'new booking'].filter(Boolean).join(' · ') : '');
     const times = (o || n) ? `<div class="sh-times">
-        <div><span>Check-out</span><b class="o">${o ? esc(o.time) : '—'}</b><em>${esc(stay(o))}</em></div>
+        <div><span>${o && o.movedFrom ? 'Guests left' : 'Check-out'}</span><b class="o">${o ? esc(o.movedFrom ? `${WD_SHORT.format(D(o.movedFrom))} ${shortDate(o.movedFrom)}` : o.time) : '—'}</b><em>${esc(o && o.movedFrom ? `${o.time} · clean moved to today` : stay(o))}</em></div>
         <div><span>Check-in</span><b class="n">${n ? esc(n.time) : '—'}</b><em>${esc(stay(n))}</em></div>
-        <div class="w"><span>Cleaning window</span><b>${win ? (win % 60 ? `${Math.floor(win / 60)} h ${win % 60} min` : `${win / 60} h`) : o ? 'Open' : '—'}</b><em>${o && !n ? 'No arrival this day' : n && !o ? 'Arrival only' : ''}</em></div>
+        <div class="w"><span>Cleaning window</span><b>${win ? (win % 60 ? `${Math.floor(win / 60)} h ${win % 60} min` : `${win / 60} h`) : o && o.movedFrom && n ? `Before ${esc(n.time)}` : o ? 'Open' : '—'}</b><em>${o && !n ? 'No arrival this day' : n && !o ? 'Arrival only' : ''}</em></div>
       </div>` : '';
     const pill = active ? `<span class="cb running"><i></i>${esc(STEP_WORD[active.status] || 'Cleaning')}</span>` : done.length ? '<span class="cb done">✓ Cleaned</span>' : o ? '<span class="cb todo">To clean</span>' : '';
     $('sheet-body').innerHTML = `
@@ -1436,6 +1729,8 @@
       ${active ? milestones(active) : ''}
       ${body}
       ${history ? `<h3 class="sh-h3">${done.some((c) => c.date !== selected) ? 'Cleaned' : `Cleaned ${selected === (data && data.today) ? 'today' : esc(longDate(selected))}`}</h3>${history}` : ''}
+      ${resetNotes}
+      ${tools.length ? `<div class="job-tools">${tools.join('')}</div>` : ''}
       <div id="sheet-damages"></div>
       <div id="sheet-maint"></div>
       ${can('report_damage') ? '<button class="btn wide" id="report-damage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Report damage</button>' : ''}
@@ -1450,8 +1745,13 @@
     if (!can('report_maintenance') && !can('manage_maintenance') && $('report-maint')) $('report-maint').remove();
     on('begin-clean', async () => {
       const admin = me.role === 'admin';
-      if (admin && !(await askConfirm({ title: 'You’re not a cleaner', text: 'Are you sure you want to start this cleaning yourself? It will be recorded under your name.', yes: 'Yes, start cleaning', no: 'Cancel' }))) return;
-      try { await send('POST', '/api/cleanings/start', { listingId: sheetListing, ...(admin ? { notCleanerConfirmed: true } : {}) }); toast('Cleaning started'); await refreshCleanings(); }
+      const forDate = job ? job.from : null, otherDay = forDate && data && selected !== data.today;
+      if (admin || otherDay) {
+        const text = [admin ? 'You’re not a cleaner. Are you sure you want to start this cleaning yourself? It will be recorded under your name.' : '',
+          otherDay ? `It will count for the guests who ${job.from <= data.today ? 'left' : 'leave'} on ${longDate(job.from)}${job.moved ? ` (clean moved to ${longDate(selected)})` : ''}${selected < data.today && can('mark_cleaned') ? '. To record a cleaning that’s already done, use “Mark as cleaned” instead' : ''}.` : ''].filter(Boolean).join(' ');
+        if (!(await askConfirm({ title: admin ? 'You’re not a cleaner' : `Clean for ${WD_LONG.format(D(selected))}?`, text, yes: 'Yes, start cleaning', no: 'Cancel' }))) return;
+      }
+      try { await send('POST', '/api/cleanings/start', { listingId: sheetListing, forDate, ...(admin ? { notCleanerConfirmed: true } : {}) }); toast('Cleaning started'); await refreshCleanings(); }
       catch (e) { toast(e.message); refreshCleanings(); }
     });
     on('end-clean', async () => {
@@ -1468,12 +1768,132 @@
       } catch (e) { toast(e.message); }
     }));
     on('open-checklist', openChecklist);
+    on('reset-active', () => resetCleaning(active));
+    on('no-video', async () => {
+      const r = await askConfirm({ title: 'Finish without the video?', text: `${active.cleanerName}’s cleaning of ${u.label} will go on without a walkthrough video. This is recorded with your name.`, yes: 'Finish without video', no: 'Cancel', note: 'Why? (optional)' });
+      if (!r) return;
+      try { await send('POST', `/api/cleanings/${active.id}/no-video`, { reason: r.note }); toast('Video step finished'); await refreshCleanings(); } catch (e) { toast(e.message); }
+    });
+    $('sheet-body').querySelectorAll('[data-reset]').forEach((b) => b.onclick = () => resetCleaning(done.find((c) => c.id === b.dataset.reset)));
+    on('mark-cleaned', () => markCleanedForm(u, job.from));
+    on('move-job', () => moveJobForm(u, job.from, selected, duNow.checkOut));
+    on('move-back', () => moveBack(u, job ? job.from : selected, job ? selected : duNow.movedOut.to));
+    on('moved-open', () => { const to = duNow.movedOut.to, id = sheetListing; closeSheet(); openLink(`/?view=day&date=${to}&flat=${encodeURIComponent(id)}`); });
     on('report-damage', () => { sheetMode = 'damage'; renderSheet(); });
     on('report-maint', () => taskForm({ listingId: sheetListing, label: u.label, building: u.building }));
     loadSheetMaint(sheetListing);
     if (active && mine && active.status === 'awaiting_video') wireEvidence(active);
     if (active && (mine || stepsIn()) && active.status === 'awaiting_key') wireKey(active);
     loadSheetDamages(sheetListing);
+  }
+
+
+  // ---------- job tools: reset a cleaning, mark a flat cleaned on another date, move a clean to another day ----------
+  async function resetCleaning(c) {
+    if (!c) return;
+    const first = (c.cleanerName || '').split(' ')[0] || 'the cleaner';
+    let info = {};
+    if (c.status === 'completed') { try { info = (await getJSON('/api/cleanings/' + encodeURIComponent(c.id))).resetInfo || {}; } catch (_) {} }
+    const day = cleanFor(c);
+    const r = c.status === 'completed'
+      ? await askConfirm({ title: `Reset ${c.label}?`, text: `${c.label} will show as not cleaned for ${longDate(day)}. ${c.manual ? `The record “Marked cleaned by ${c.manual.byName}”` : `${c.cleanerName}’s cleaning (${cleanedWhen(c)})`} stays in the Cleaning log marked “Reset”${c.manual ? '' : ', with its videos and photos'}.${c.cleanerId && c.cleanerId !== me.id ? ` ${first} will be told.` : ''}${info.linkedComplaints ? ` ${info.linkedComplaints} complaint${info.linkedComplaints === 1 ? ' is' : 's are'} linked to this cleaning and will stay linked.` : ''} Are you sure?`,
+        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Why? (optional, the cleaner sees this)', check: info.guestyEligible ? { label: 'Also set it back to dirty in Guesty', checked: true } : null })
+      : await askConfirm({ title: `Stop ${first}’s cleaning?`, text: `${c.cleanerName} started ${c.label} at ${fmtClock(c.startedAt)} and is at “${STEP_WORD[c.status] || c.status}”. Resetting stops it: it won’t count as cleaned and ${first} will be told. Anything already uploaded is kept. Are you sure?`,
+        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Why? (optional)' });
+    if (!r) return;
+    try {
+      await send('POST', `/api/cleanings/${encodeURIComponent(c.id)}/reset`, { reason: r.note, guesty: Boolean(r.checked) });
+      toast(`Reset: ${c.label} shows as not cleaned`);
+      await refreshCleanings();
+      if (view === 'cleaning') loadCleaningView();
+      if (detailId === c.id) openDetail(c.id);
+    } catch (e) { toast(e.message); }
+  }
+  // A small form in a pop-up. fill(box) wires it; submit(form) returns true to close, or throws to show the error.
+  function formModal(title, html, submit, fill) {
+    const box = document.createElement('div');
+    box.className = 'modal';
+    box.innerHTML = `<form class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="md-t" novalidate><h3 id="md-t">${esc(title)}</h3>${html}<p class="md-err" id="md-err" role="alert"></p></form>`;
+    document.body.appendChild(box);
+    const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) close(); });
+    const form = box.querySelector('form');
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const go = form.querySelector('[type=submit]'); if (go) go.disabled = true;
+      try { if (await submit(form, e.submitter)) close(); } catch (err) { box.querySelector('#md-err').textContent = err.message; }
+      if (go) go.disabled = false;
+    };
+    if (fill) fill(box, close);
+    return { box, close };
+  }
+  async function markCleanedForm(u, forDate) {
+    let c;
+    try { c = await getJSON(`/api/cleanings/candidates?listingId=${encodeURIComponent(u.id || sheetListing)}&forDate=${encodeURIComponent(forDate)}`); } catch (e) { return toast(e.message); }
+    const listingId = u.id || sheetListing, j = c.job, today = data ? data.today : new Date().toISOString().slice(0, 10);
+    if (c.counted) return toast(`Already cleaned for ${longDate(j.displayDay)} (${c.counted.manual ? 'marked by ' + c.counted.manual.byName : c.counted.cleanerName}). Reset it first if it’s wrong.`);
+    const last = [today, j.nextIn ? j.nextIn.date : today].sort()[0];
+    let people = [];
+    try { people = (await getJSON('/api/assignees?listingId=' + encodeURIComponent(listingId))).people; } catch (_) {}
+    const cand = c.candidates.map((x) => `<div class="cand"><span><b>${esc(x.cleanerName)}</b> · ${esc(WD_SHORT.format(D(x.date)))} ${esc(shortDate(x.date))}, ${esc(cleanedWhen(x))}${x.videos ? ` · ${x.videos} video${x.videos === 1 ? '' : 's'}` : ''}</span><button type="button" class="btn" data-count="${esc(x.id)}">Count for this check-out</button></div>`).join('');
+    const ampm = (hm) => { const [h, m] = hm.split(':').map(Number); return `${h % 12 || 12}${m ? ':' + String(m).padStart(2, '0') : ''} ${h < 12 ? 'am' : 'pm'}`; };
+    const html = `<p>${esc(u.label)} · guests left ${esc(longDate(j.date))}${j.moved ? ` (clean moved to ${esc(longDate(j.displayDay))})` : ''}${j.nextIn ? ` · next guests ${esc(longDate(j.nextIn.date))}${j.nextIn.time ? ' at ' + esc(ampm(j.nextIn.time)) : ''}` : ''}.</p>
+      ${cand ? `<div class="md-sec"><b>Already in the Cleaning log</b><p class="muted">Started on another day, so it isn’t counted here yet.</p>${cand}</div><p class="md-or">Or record a cleaning that isn’t in the log:</p>` : ''}
+      <div class="md-grid">
+        <label><span>When was it cleaned?</span><input type="date" id="mc-date" value="${esc([j.displayDay, last].sort()[0])}" min="${esc([j.date, j.displayDay].sort()[0])}" max="${esc(last)}" required></label>
+        <label><span>Who cleaned it?</span><select id="mc-who"><option value="">Not recorded</option>${people.map((p) => `<option value="${esc(p.id)}" ${c.assigned && c.assigned.cleanerId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+        <label><span>Started <span class="muted">(optional)</span></span><input type="time" id="mc-start"></label>
+        <label><span>Finished <span class="muted">(optional)</span></span><input type="time" id="mc-end"></label>
+      </div>
+      <label class="md-l" for="mc-note">Note <span class="muted">(optional)</span></label><textarea id="mc-note" rows="2" maxlength="300" placeholder="e.g. Done yesterday evening, the cleaner’s phone was flat"></textarea>
+      ${c.guestyEligible ? '<label class="md-check"><input type="checkbox" id="mc-guesty" checked> Also mark it clean in Guesty</label>' : ''}
+      <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary">Mark cleaned</button></div>`;
+    formModal(`Mark ${u.label} as cleaned`, html, async () => {
+      await send('POST', '/api/cleanings/manual', { listingId, forDate, date: $('mc-date').value, start: $('mc-start').value || null, end: $('mc-end').value || null,
+        cleanerId: $('mc-who').value || null, note: $('mc-note').value, guesty: Boolean($('mc-guesty') && $('mc-guesty').checked), newRecord: true });
+      toast(`${u.label} marked as cleaned`); await refreshCleanings(); return true;
+    }, (box, close) => box.querySelectorAll('[data-count]').forEach((b) => b.onclick = async () => {
+      b.disabled = true;
+      try { await send('POST', `/api/cleanings/${encodeURIComponent(b.dataset.count)}/for`, { forDate }); close(); toast(`Counted for ${longDate(j.displayDay)}`); await refreshCleanings(); }
+      catch (e) { box.querySelector('#md-err').textContent = e.message; b.disabled = false; }
+    }));
+  }
+  async function sendMove(body, done) {
+    try { await send('PUT', '/api/job-moves', body); }
+    catch (e) {
+      if (!e.data || !e.data.needsForce) throw e;
+      if (!(await askConfirm({ title: 'Move it anyway?', text: e.message, yes: 'Move anyway', no: 'Pick another day', danger: true }))) return false;
+      await send('PUT', '/api/job-moves', { ...body, force: true });
+    }
+    toast(done); weeks.clear(); await showWeek(data.weekStart, { quiet: true }); await refreshCleanings();
+    if (sheetListing && sheetMode === 'main') renderSheet(); // the open panel shows the day as it is now
+    return true;
+  }
+  function moveJobForm(u, from, shownOn, out) {
+    const listingId = u.id || sheetListing;
+    const html = `<p>Guests leave ${esc(u.label)} on ${esc(longDate(from))}${out.nextIn ? `; the next guests arrive ${esc(longDate(out.nextIn))}` : ''}. Whoever is assigned moves with it and is told.</p>
+      <label class="md-l" for="mv-to">Clean on</label><input type="date" id="mv-to" value="${esc(nextDay(shownOn))}">
+      <p class="muted" id="mv-hint"></p>
+      <label class="md-l" for="mv-note">Why? <span class="muted">(optional)</span></label><textarea id="mv-note" rows="2" maxlength="300" placeholder="e.g. Guests asked for a late check-out"></textarea>
+      <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary">Move clean</button></div>`;
+    formModal(`Move the clean of ${u.label}`, html, async () => {
+      const to = $('mv-to').value;
+      if (!to) throw new Error('Pick a day.');
+      return sendMove({ listingId, from, to, note: $('mv-note').value }, `${u.label}: clean moved to ${longDate(to)}`);
+    }, (box) => {
+      const hint = () => { const to = $('mv-to').value; $('mv-hint').innerHTML = !to || !out.nextIn ? '' : to > out.nextIn ? '<span class="warn">That’s after the next guests arrive.</span>' : to === out.nextIn ? 'That makes it a same-day turnover.' : ''; };
+      box.querySelector('#mv-to').oninput = hint; hint();
+    });
+  }
+  async function moveBack(u, from, now) {
+    if (!(await askConfirm({ title: `Move ${u.label} back to ${longDate(from)}?`, text: `The clean goes back to the day the guests leave. Whoever is assigned moves with it and is told.`, yes: 'Move back', no: 'Cancel' }))) return;
+    try {
+      await send('DELETE', '/api/job-moves', { listingId: u.id || sheetListing, from });
+      toast(`${u.label}: clean back on ${longDate(from)}`); weeks.clear(); await showWeek(data.weekStart, { quiet: true }); await refreshCleanings();
+      if (sheetListing && sheetMode === 'main') renderSheet();
+    } catch (e) { toast(e.message); }
   }
 
   // A cleaning's milestones: started → cleaned → checklist → video → key back, each ticked with its time.
@@ -1495,16 +1915,17 @@
   // Admin, User and supervisor roles can finish someone else's cleaning at the key step and override KeyNest.
   const stepsIn = () => can('step_in');
   // A pop-up asking to confirm something. Resolves to { note } when confirmed, or null.
-  function askConfirm({ title, text, yes = 'Yes', no = 'Cancel', danger = false, note = null }) {
+  function askConfirm({ title, text, yes = 'Yes', no = 'Cancel', danger = false, note = null, check = null }) {
     return new Promise((resolve) => {
       const box = document.createElement('div');
       box.className = 'modal';
       box.innerHTML = `<div class="modal-card" role="alertdialog" aria-modal="true" aria-labelledby="md-t" aria-describedby="md-x">
         <h3 id="md-t">${esc(title)}</h3><p id="md-x">${esc(text)}</p>
         ${note ? `<label class="md-l" for="md-note">${esc(note)}</label><textarea id="md-note" rows="2" maxlength="300"></textarea>` : ''}
+        ${check ? `<label class="md-check"><input type="checkbox" id="md-check" ${check.checked ? 'checked' : ''}> ${esc(check.label)}</label>` : ''}
         <div class="form-actions"><span class="spacer"></span><button class="btn" data-md="no">${esc(no)}</button><button class="btn ${danger ? 'danger-solid' : 'primary'}" data-md="yes">${esc(yes)}</button></div></div>`;
       document.body.appendChild(box);
-      const done = (ok) => { const n = box.querySelector('#md-note'); box.remove(); document.removeEventListener('keydown', esc_); resolve(ok ? { note: n ? n.value.trim() : '' } : null); };
+      const done = (ok) => { const n = box.querySelector('#md-note'), c = box.querySelector('#md-check'); box.remove(); document.removeEventListener('keydown', esc_); resolve(ok ? { note: n ? n.value.trim() : '', checked: c ? c.checked : false } : null); };
       const esc_ = (e) => { if (e.key === 'Escape') done(false); };
       document.addEventListener('keydown', esc_);
       box.addEventListener('click', (e) => { if (e.target === box) done(false); const b = e.target.closest('[data-md]'); if (b) done(b.dataset.md === 'yes'); });
@@ -1968,23 +2389,27 @@
     try {
       const [c, d] = await Promise.all([getJSON('/api/cleanings?date=' + cvDate), getJSON('/api/damages?status=open').catch(() => ({ damages: [] }))]);
       checklistDef = c.checklist || checklistDef;
-      const cls = c.cleanings.filter((x) => x.status !== 'cancelled' && x.date === cvDate);
+      // Done that day; cleanings that were reset stay listed (muted, at the bottom) so the history is complete.
+      const cls = c.cleanings.filter((x) => x.date === cvDate && (x.status !== 'cancelled' || x.reset)).sort((a, b) => (a.status === 'cancelled') - (b.status === 'cancelled'));
       const active = cls.filter((x) => ACTIVE.includes(x.status));
       const done = cls.filter((x) => x.status === 'completed');
-      const totalMin = done.reduce((s, x) => s + (Date.parse(x.endedAt) - Date.parse(x.startedAt)), 0);
+      const timed = done.filter(hasDuration);
+      const totalMin = timed.reduce((s, x) => s + (Date.parse(x.endedAt) - Date.parse(x.startedAt)), 0);
       const openDmg = d.damages.length;
       $('cv-summary').innerHTML = `<div class="metric"><div class="k">In progress</div><div class="v">${active.length}</div></div>
         <div class="metric"><div class="k">Completed</div><div class="v">${done.length}</div></div>
-        <div class="metric"><div class="k">Average time</div><div class="v">${done.length ? durWords(totalMin / done.length) : '–'}</div></div>
+        <div class="metric"><div class="k">Average time</div><div class="v">${timed.length ? durWords(totalMin / timed.length) : '–'}</div></div>
         <button class="metric metric-link" id="cv-dmg" ${allowed('damage') ? '' : 'disabled'}><div class="k">Open damage</div><div class="v">${openDmg}</div></button>`;
       if ($('cv-dmg')) $('cv-dmg').onclick = () => setView('damage');
       // One line per cleaning; tap it to see everything (checklist, key, videos and photos, damage).
-      $('cv-list').innerHTML = cls.length ? cls.map((x) => `<button class="card cv-item cv-open" data-cid="${esc(x.id)}">
+      $('cv-list').innerHTML = cls.length ? cls.map((x) => `<button class="card cv-item cv-open${x.status === 'cancelled' ? ' was-reset' : ''}" data-cid="${esc(x.id)}">
           <div class="hist-h"><b>${esc(x.label)} <span class="muted">· ${esc(x.building)}</span></b>
-            <span class="${ACTIVE.includes(x.status) ? 'cb running' : 'cb done'}">${ACTIVE.includes(x.status) ? `<i></i>${STEP[x.status]}` : '✓ Completed'}</span></div>
-          <div class="cv-meta"><span>${esc(x.cleanerName)}</span><span>Start ${fmtClock(x.startedAt)}</span><span>End ${x.endedAt ? fmtClock(x.endedAt) : '—'}</span>
-            <span>Time <b ${x.endedAt ? '' : `data-since="${esc(x.startedAt)}"`}>${fmtDur((x.endedAt ? Date.parse(x.endedAt) : Date.now()) - Date.parse(x.startedAt))}</b></span>
-            ${x.status === 'completed' ? `<span>Checks ${x.checklist.length}/${c.checklist.length}</span>` : ''}
+            <span class="${ACTIVE.includes(x.status) ? 'cb running' : x.status === 'cancelled' ? 'cb todo' : 'cb done'}">${ACTIVE.includes(x.status) ? `<i></i>${STEP[x.status]}` : x.status === 'cancelled' ? `↺ Reset by ${esc(x.reset.byName)}` : x.manual ? `✓ Marked cleaned by ${esc(x.manual.byName)}` : '✓ Completed'}</span></div>
+          <div class="cv-meta"><span>${esc(x.cleanerName)}</span>${x.manual && !x.manual.timeKnown ? '<span>Time not recorded</span>' : `<span>Start ${fmtClock(x.startedAt)}</span>${hasDuration(x) ? `<span>End ${x.endedAt ? fmtClock(x.endedAt) : '—'}</span>
+            <span>Time <b ${x.endedAt ? '' : `data-since="${esc(x.startedAt)}"`}>${fmtDur((x.endedAt ? Date.parse(x.endedAt) : Date.now()) - Date.parse(x.startedAt))}</b></span>` : ''}`}
+            ${x.forDate && x.forDate !== x.date ? `<span>For the check-out on ${esc(WD_SHORT.format(D(x.forDate)))} ${esc(shortDate(x.forDate))}</span>` : ''}
+            ${x.status === 'completed' && !x.manual ? `<span>Checks ${x.checklist.length}/${c.checklist.length}</span>` : ''}
+            ${x.videoSkipped ? `<span class="warn">No video · ${esc(x.videoSkipped.byName)}</span>` : ''}
             ${(x.media || []).length ? `<span>${x.media.filter((m) => m.kind === 'video').length} video${x.media.filter((m) => m.kind === 'video').length === 1 ? '' : 's'}${x.media.some((m) => m.kind === 'photo') ? ` · ${x.media.filter((m) => m.kind === 'photo').length} photos` : ''}</span>` : ''}
             ${x.key && x.key.mode === 'lockbox' ? `<span>Lockbox code <b>${esc(x.key.code)}</b></span>` : x.key && x.key.mode === 'keynest' ? (x.key.overridden ? `<span class="warn">KeyNest overridden by ${esc(x.key.overriddenBy || '')}</span>` : '<span>Key at KeyNest ✓</span>') : ''}
             ${x.guesty === 'updated' ? '<span>Guesty ✓</span>' : x.guesty === 'failed' ? '<span class="warn">Guesty not updated</span>' : ''}</div>
@@ -2009,8 +2434,8 @@
       try { dmg = (await getJSON('/api/damages?listingId=' + encodeURIComponent(c.listingId))).damages.filter((d) => d.cleaningId === c.id); } catch (_) {}
       if (detailId !== id) return;
       const t = (iso) => (iso ? fmtClock(iso) : '—');
-      const took = c.endedAt ? durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt)) : `${fmtDur(Date.now() - Date.parse(c.startedAt))} so far`;
-      const state = c.status === 'completed' ? '<span class="pill ok">Completed</span>' : c.status === 'cancelled' ? '<span class="pill off">Cancelled</span>' : `<span class="pill">${esc(STEP[c.status] || c.status)}</span>`;
+      const took = !hasDuration(c) ? 'Not recorded' : c.endedAt ? durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt)) : `${fmtDur(Date.now() - Date.parse(c.startedAt))} so far`;
+      const state = c.status === 'completed' ? `<span class="pill ok">${c.manual ? 'Marked cleaned' : 'Completed'}</span>` : c.status === 'cancelled' ? `<span class="pill off">${c.reset ? 'Reset' : 'Cancelled'}</span>` : `<span class="pill">${esc(STEP[c.status] || c.status)}</span>`;
       const checks = defs.map((d) => { const got = (c.checklist || []).find((x) => x.key === d.key); return `<li class="${got ? 'ok' : 'no'}"><span class="dt-tick" aria-hidden="true">${got ? '✓' : '–'}</span><span><b>${esc(d.title)}</b> ${esc(d.text)}</span><em>${got ? t(got.confirmedAt) : 'Not confirmed'}</em></li>`; }).join('');
       const key = !c.keyMode && !c.key ? '<p class="muted">No key step for this flat.</p>'
         : c.key && c.key.mode === 'lockbox' ? (c.key.code ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>` : `<p>${c.key.note ? `Key returned: ${esc(c.key.note)}` : 'Key back in the lockbox (no new code needed)'} · ${t(c.key.returnedAt)}</p>`)
@@ -2023,21 +2448,27 @@
       const moves = !r.keyMoves ? '' : r.keyMoves.length
         ? `<ul class="dt-moves">${r.keyMoves.map((m) => `<li><b>${esc(KN_EV[m.event] || m.event.charAt(0) + m.event.slice(1).toLowerCase())}</b><span>${esc(moveWhen(m.at))}</span><span class="muted">${esc([m.who, m.store].filter(Boolean).join(' · '))}</span></li>`).join('')}</ul>`
         : '<p class="muted">KeyNest recorded no movements of this key around the cleaning (perhaps a spare key was used).</p>';
-      const guesty = c.guesty === 'updated' ? 'Marked clean ✓' : c.guesty === 'failed' ? '<span class="warn">Couldn’t update Guesty</span>' : c.guesty === 'preview' ? 'Sample data (not sent)' : c.guesty === 'off' ? 'Turned off' : c.status === 'completed' ? 'Sending…' : '—';
+      const GW = { updated: 'Marked clean ✓', failed: '<span class="warn">Couldn’t update Guesty</span>', preview: 'Sample data (not sent)', off: 'Turned off', sent: 'Sent (not confirmed)', skipped: 'Not changed' };
+      const guesty = GW[c.guesty] || (c.status === 'completed' ? 'Sending…' : '—');
+      const RG = { updated: 'set back to dirty ✓', sent: 'sent “dirty” (not confirmed)', failed: '<span class="warn">couldn’t set it back to dirty</span>', pending: 'setting it back to dirty…', skipped: 'not changed', preview: 'sample data', off: 'turned off' };
       $('detail-body').innerHTML = `
         <div class="sh-head"><div><h2>${esc(c.label)} <span class="muted dt-bld">· ${esc(c.building)}</span></h2><div class="sh-sub">${esc(fmtDay(c.date))} · ${esc(c.cleanerName)}</div></div><button class="btn sq" data-close-detail aria-label="Close">✕</button></div>
         <div class="dt-state">${state}</div>
         <dl class="dt-grid">
           <dt>Cleaner</dt><dd>${esc(c.cleanerName)}</dd>
-          <dt>Started</dt><dd>${t(c.startedAt)}</dd>
-          <dt>Ended</dt><dd>${t(c.endedAt)}</dd>
+          ${c.manual ? `<dt>Marked cleaned</dt><dd>by ${esc(c.manual.byName)} · ${esc(fmtWhen(c.manual.at))}${c.manual.note ? ` — “${esc(c.manual.note)}”` : ''}</dd>` : ''}
+          ${c.forDate ? `<dt>Counts for</dt><dd>The check-out on ${esc(longDate(c.forDate))}${c.forBy ? ` · set by ${esc(c.forBy.byName)}` : ''}</dd>` : ''}
+          <dt>Started</dt><dd>${c.manual && !c.manual.timeKnown ? 'Not recorded' : t(c.startedAt)}</dd>
+          <dt>Ended</dt><dd>${hasDuration(c) ? t(c.endedAt) : 'Not recorded'}</dd>
           <dt>Time taken</dt><dd>${esc(took)}</dd>
           <dt>Checks confirmed</dt><dd>${c.checksConfirmedAt ? `${t(c.checksConfirmedAt)} · held ${Math.round((c.checksHeldMs || 0) / 1000)} s` : '—'}</dd>
-          <dt>Video uploaded</dt><dd>${t(c.videoAt)}</dd>
+          <dt>Video uploaded</dt><dd>${c.videoSkipped ? `<span class="warn">Skipped by ${esc(c.videoSkipped.byName)} · ${t(c.videoSkipped.at)}${c.videoSkipped.reason ? ` — “${esc(c.videoSkipped.reason)}”` : ''}</span>` : c.manual ? 'None (marked by hand)' : t(c.videoAt)}</dd>
           <dt>Completed</dt><dd>${t(c.completedAt)}${c.completedBy ? ` · finished by ${esc(c.completedBy)}` : ''}</dd>
           <dt>Guesty</dt><dd>${guesty}</dd>
-          ${c.status === 'cancelled' ? `<dt>Cancelled</dt><dd>${t(c.cancelledAt)}${c.cancelledBy ? ' by ' + esc(c.cancelledBy) : ''}</dd>` : ''}
+          ${c.status === 'cancelled' && c.reset ? `<dt>Reset</dt><dd>${esc(fmtWhen(c.reset.at))} by ${esc(c.reset.byName)}${c.reset.reason ? ` — “${esc(c.reset.reason)}”` : ''}${c.reset.guesty ? ` · Guesty ${RG[c.reset.guesty] || esc(c.reset.guesty)}` : ''}</dd>`
+            : c.status === 'cancelled' ? `<dt>Cancelled</dt><dd>${t(c.cancelledAt)}${c.cancelledBy ? ' by ' + esc(c.cancelledBy) : ''}</dd>` : ''}
         </dl>
+        ${c.status !== 'cancelled' && can('reset_cleanings') ? '<div class="form-actions"><span class="spacer"></span><button class="btn danger" id="dt-reset">Reset this cleaning</button></div>' : ''}
         <h3 class="sh-h3">Checklist · ${(c.checklist || []).length}/${defs.length}</h3>
         <ul class="dt-checks">${checks}</ul>
         <h3 class="sh-h3">Key</h3>
@@ -2047,6 +2478,7 @@
         <h3 class="sh-h3">Damage reported during this clean</h3>
         <div id="dt-dmg">${dmg.length ? dmg.map(damageCard).join('') : '<p class="muted">None.</p>'}</div>`;
       wireDamageCards($('dt-dmg'), () => openDetail(id));
+      if ($('dt-reset')) $('dt-reset').onclick = () => resetCleaning(c);
     } catch (e) { if (e.message !== 'signed out') $('detail-body').innerHTML = `<div class="sh-head"><h2>Cleaning</h2><button class="btn sq" data-close-detail aria-label="Close">✕</button></div><div class="banner error">${esc(e.message)}</div>`; }
   }
   function closeDetail() { detailId = null; postId = null; $('detail').classList.add('hidden'); if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll'); }
@@ -2084,6 +2516,7 @@
       $('nb-maint').textContent = n > 9 ? '9+' : String(n);
       $('nb-maint').classList.toggle('hidden', !n);
     } catch (_) {}
+    try { cpBadge((await getJSON('/api/complaints?summary=1')).open); } catch (_) {}
     try {
       const f = await getJSON('/api/forum');
       forumCache = f;
@@ -2110,7 +2543,7 @@
     if (m < 24 * 60) return `${Math.round(m / 60)} h ago`;
     return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   };
-  const NICON = { cleaned: '✓', damage: '!', assigned: '→', unassigned: '×', forum: '“', maintenance: '⚒' };
+  const NICON = { cleaned: '✓', damage: '!', assigned: '→', unassigned: '×', forum: '“', maintenance: '⚒', complaint: '!', reset: '↺', moved: '⇄' };
   async function loadNotifs() {
     if (!me) return;
     try {
@@ -2157,12 +2590,14 @@
     const v = q.get('view'), date = q.get('date'), flat = q.get('flat');
     const okDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '');
     if (v === 'forum') { if (view !== 'forum') setView('forum'); if (q.get('post')) openPost(q.get('post')); return; }
+    // Complaints used to be a tab of Maintenance: links from then (?view=maintenance&tab=complaints) still land on Complaints.
+    if (v === 'complaints' || (v === 'maintenance' && (q.get('tab') === 'complaints' || q.get('complaint')))) { if (view !== 'complaints') setView('complaints'); if (q.get('complaint')) openComplaint(q.get('complaint')); return; }
     if (v === 'maintenance') { if (view !== 'maintenance') setView('maintenance'); if (q.get('task')) openTask(q.get('task')); return; }
     if (v === 'cleaning' && allowed('cleaning')) { if (okDate) cvDate = date; if (view === 'cleaning') loadCleaningView(); else setView('cleaning'); return; }
     if (v === 'day' && allowed('day')) {
       if (view !== 'day') setView('day');
       if (okDate && (!data || !data.dates.includes(date))) await showWeek(date);
-      if (okDate && data && data.dates.includes(date)) { selected = date; renderStrip(); renderDay(); }
+      if (okDate && data && data.dates.includes(date)) { selected = date; renderStrip(); renderDay(); setPageHead(); }
       if (flat) { if (unitFor(flat)) openSheet(flat); else toast('That flat isn’t on the schedule for this day any more'); }
     }
   }
