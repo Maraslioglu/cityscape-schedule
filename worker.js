@@ -2271,7 +2271,10 @@ async function cpStayForBooking(env, ctx, l, reservationId, hint, date) {
   if (r) { stay = asStay(r); id = r._id; }
   if (!stay && hint && realDate(hint.checkIn)) stay = { code: String(hint.code || '').slice(0, 40), checkIn: hint.checkIn, checkOut: realDate(hint.checkOut) ? hint.checkOut : null, guests: Number(hint.guests) || null };
   // A booking that hadn't started when the guest complained isn't the stay they're complaining about.
-  if (stay && stay.checkIn > date) { stay = null; id = null; }
+  const notStarted = Boolean(stay && stay.checkIn > date);
+  if (notStarted) { stay = null; id = null; }
+  // A booking that isn't in the bookings list was too long ago: anyone staying on that date is another guest.
+  if (!stay && reservationId && !notStarted) return { stay: null, cleaning: null, why: 'The booking isn’t in the bookings list (it was too long ago), so no cleaning is tagged.' };
   if (!stay) {
     const touching = stays.filter((x) => x.checkInDateLocalized <= date && x.checkOutDateLocalized >= date);
     if (touching.length > 1) {
@@ -2308,7 +2311,7 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
   const log = (c, kind, txt) => { c.log = [...(c.log || []), { at: nowIso(), byId: ASSISTANT.id, byName: ASSISTANT.name, kind, text: txt }]; c.updatedAt = nowIso(); };
   const managers = async (c) => recipients(env, ['admin', 'user'], c.building, null);
   const cleanerIds = (c) => (c.cleaning ? [c.cleaning.cleanerId, c.cleaning.assignedId].filter(Boolean) : []);
-  const reply = (c, duplicate, status = 200) => json({ complaint: { id: c.id, url: link(c), duplicate, status: c.status, severity: c.severity, categories: c.categories,
+  const reply = (c, duplicate, status = 200, changed = !duplicate) => json({ complaint: { id: c.id, url: link(c), duplicate, changed, status: c.status, upheld: c.upheld === true, severity: c.severity, categories: c.categories,
     stay: c.stay, cleaning: c.cleaning ? { date: c.cleaning.date, cleanerName: c.cleaning.cleanerName, assignedName: c.cleaning.assignedName, noOneRecorded: noOneRecorded(c.cleaning) } : null,
     aboutCleaning: c.aboutCleaning !== false, cleanerTold: Boolean(c.cleanerTold), noCleaningRecorded: Boolean(c.noCleaningRecorded), why: c.untaggedWhy || null } }, status);
   const tellCleaner = async (c) => {
@@ -2331,25 +2334,35 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
     const details = text(body.details, 4000);
     const messageIds = [...new Set((Array.isArray(body.messageIds) ? body.messageIds : []).map((x) => text(x, 60)).filter(Boolean))].slice(0, 50);
     const mine = list.filter((c) => c.createdById === ASSISTANT.id && c.listingId === l.id);
+    const isOpen = (c) => ['open', 'investigating'].includes(c.status);
+    // Asked for by a team member in Slack: their request always counts, even for a message already on it.
+    const fromSlack = body.source === 'slack';
     // The same guest message again (a follow-up drafted together with it): never logged twice, and a complaint the
-    // team said isn't one stays dismissed.
-    const sameMessage = messageIds.length && mine.find((c) => (c.messageIds || []).some((m) => messageIds.includes(m)));
-    if (sameMessage && !['open', 'investigating'].includes(sameMessage.status)) return reply(sameMessage, true);
+    // team said isn't one stays dismissed. An open complaint with the message is used before a closed one.
+    const sharing = messageIds.length ? mine.filter((c) => (c.messageIds || []).some((m) => messageIds.includes(m))) : [];
+    const sameMessage = sharing.find(isOpen) || sharing[0];
+    if (sameMessage && !isOpen(sameMessage)) return reply(sameMessage, true, 200, false);
     // The same guest complaining again about the same thing while it's open: added to it, not logged again.
     const overlaps = (c) => normName(c.title) === normName(title) || (categories.length && (c.categories || []).some((x) => categories.includes(x)));
-    const same = sameMessage || mine.find((c) => ['open', 'investigating'].includes(c.status) && overlaps(c)
+    const same = sameMessage || mine.find((c) => isOpen(c) && overlaps(c)
       && (reservationId ? c.reservationId === reservationId : !c.reservationId && Math.abs(Date.parse(c.date) - Date.parse(date)) <= 2 * 864e5));
     if (same) {
       const fresh = messageIds.filter((m) => !(same.messageIds || []).includes(m));
-      if (fresh.length || !messageIds.length) {
+      const changed = Boolean(fresh.length || !messageIds.length || fromSlack);
+      if (changed) {
         log(same, 'note', details || title);
         same.messageIds = [...new Set([...(same.messageIds || []), ...messageIds])];
         same.categories = [...new Set([...(same.categories || []), ...categories])];
         if (CP_SEVERITY.indexOf(severity) > CP_SEVERITY.indexOf(same.severity)) { log(same, 'event', `Severity raised to ${severity}`); same.severity = severity; }
-        if (aboutCleaning && !same.aboutCleaning && same.cleaningIfAbout) { same.aboutCleaning = true; same.cleaning = same.cleaningIfAbout; same.cleaningIfAbout = null; await tellCleaner(same); }
+        if (aboutCleaning && !same.aboutCleaning) {
+          same.aboutCleaning = true;
+          // Only if nothing is tagged yet: a cleaning a manager picked is never replaced.
+          if (!same.cleaning && same.cleaningIfAbout) { same.cleaning = same.cleaningIfAbout; await tellCleaner(same); }
+          same.cleaningIfAbout = null;
+        }
         await saveList(env, 'complaints', list);
       }
-      return reply(same, true);
+      return reply(same, true, 200, changed);
     }
     const found = await cpStayForBooking(env, ctx, l, reservationId, body.stay, date);
     // Only a complaint about the clean is put on the cleaning (so it shows as that cleaner's and counts in their
@@ -2445,6 +2458,7 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
     if (body.compensation !== undefined) { const n = body.compensation === '' || body.compensation === null ? null : Math.round(Number(body.compensation) * 100) / 100; if (n !== null && !(n >= 0 && n < 100000)) throw userError('Compensation is an amount in pounds, like 25 or 40.50.', 400); c.compensation = n; }
     if (body.stay !== undefined) c.stay = body.stay && typeof body.stay === 'object' ? { code: text(body.stay.code, 40), checkIn: realDate(body.stay.checkIn) ? body.stay.checkIn : null, checkOut: realDate(body.stay.checkOut) ? body.stay.checkOut : null, guests: Number(body.stay.guests) || null } : null;
     if (body.cleaningId !== undefined) {
+      c.cleaningIfAbout = null; // a cleaning chosen here replaces the one the guest assistant noted for reference
       if (!body.cleaningId) c.cleaning = null;
       else {
         const found = (await cpLookup(env, ctx, l, addDays(c.date, 60))).cleanings; // any recent cleaning at this flat may be picked
