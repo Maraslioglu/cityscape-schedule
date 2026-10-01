@@ -2358,6 +2358,7 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
           same.aboutCleaning = true;
           // Only if nothing is tagged yet: a cleaning a manager picked is never replaced.
           if (!same.cleaning && same.cleaningIfAbout) { same.cleaning = same.cleaningIfAbout; await tellCleaner(same); }
+          else if (!same.cleaning) { same.untaggedWhy = same.untaggedWhy || 'Now about the clean, but no cleaning is tagged (a manager chose none, or none was found). Pick it when you edit the complaint.'; log(same, 'event', same.untaggedWhy); }
           same.cleaningIfAbout = null;
         }
         await saveList(env, 'complaints', list);
@@ -2458,7 +2459,9 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
     if (body.compensation !== undefined) { const n = body.compensation === '' || body.compensation === null ? null : Math.round(Number(body.compensation) * 100) / 100; if (n !== null && !(n >= 0 && n < 100000)) throw userError('Compensation is an amount in pounds, like 25 or 40.50.', 400); c.compensation = n; }
     if (body.stay !== undefined) c.stay = body.stay && typeof body.stay === 'object' ? { code: text(body.stay.code, 40), checkIn: realDate(body.stay.checkIn) ? body.stay.checkIn : null, checkOut: realDate(body.stay.checkOut) ? body.stay.checkOut : null, guests: Number(body.stay.guests) || null } : null;
     if (body.cleaningId !== undefined) {
-      c.cleaningIfAbout = null; // a cleaning chosen here replaces the one the guest assistant noted for reference
+      // A cleaning chosen here replaces the one the guest assistant noted for reference (only if it changed: the
+      // form sends the cleaning on every save).
+      if ((body.cleaningId || null) !== (c.cleaning ? c.cleaning.id : null)) c.cleaningIfAbout = null;
       if (!body.cleaningId) c.cleaning = null;
       else {
         const found = (await cpLookup(env, ctx, l, addDays(c.date, 60))).cleanings; // any recent cleaning at this flat may be picked
