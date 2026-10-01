@@ -19,7 +19,7 @@
   const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null };
   // Admin and User roles run the operation: Settings/integrations and assigning cleanings (checked again on the server).
   const isManager = () => Boolean(me && (me.role === 'admin' || me.role === 'user'));
-  const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? isManager() : v === 'users' ? can('manage_users') || Boolean(me && me.role === 'supervisor') // supervisors manage the people they add
+  const allowed = (v) => v in VIEW_PERM && (v === 'settings' ? can('manage_settings') || can('download_backups') : v === 'users' ? can('manage_users') || Boolean(me && me.role === 'supervisor') // supervisors manage the people they add
     : (!VIEW_PERM[v] || can(VIEW_PERM[v]) || ((v === 'cleaning' || v === 'damage') && can('manage_damage'))));
   // Sidebar: Schedule holds the Day and Week views; each other entry is one view.
   const NAV_OF = { day: 'schedule', board: 'schedule', cleaning: 'cleaning', damage: 'damage', props: 'props', users: 'users', settings: 'settings', forum: 'forum', maintenance: 'maintenance' };
@@ -419,6 +419,7 @@
     catch (e) { if (e.message !== 'signed out') $('mt-list').innerHTML = `<div class="banner error">${esc(e.message)}</div>`; }
   }
   function renderMaintenance() {
+    $('mt-new').classList.toggle('hidden', !can('report_maintenance') && !can('manage_maintenance'));
     if (!mtCache) return;
     const list = mtCache.tasks.filter((t) => !mtMine || (t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id) || t.reporterId === me.id)
       .sort((a, b) => (mtFilter === 'done' ? (b.doneAt || '').localeCompare(a.doneAt || '') : (b.overdue - a.overdue) || (MT_ORDER[a.priority] - MT_ORDER[b.priority]) || (a.due || '9999').localeCompare(b.due || '9999') || b.createdAt.localeCompare(a.createdAt)));
@@ -469,7 +470,7 @@
   const UNITS = [['days', 'days'], ['weeks', 'weeks'], ['months', 'months'], ['years', 'years']];
   // New task (anyone) or editing one (Admin/User). Triage fields — who, due, repeat, cost — are for Admins and Users.
   async function taskForm(pre) {
-    const t = pre.id ? pre : null, mgr = isManager();
+    const t = pre.id ? pre : null, mgr = can('manage_maintenance');
     const flats = pre.listingId ? null : await flatsForForm();
     openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Maintenance</span><h2>${t ? 'Edit task' : mgr ? 'New task' : 'Report an issue'}</h2><div class="sh-sub">${pre.listingId ? `${esc(pre.label || '')} · ${esc(pre.building || '')}` : 'Pick the flat, then say what needs doing.'}</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
       <form class="pe-form" id="mt-form" autocomplete="off">
@@ -705,7 +706,7 @@
   let kn = null, knEdit = false, knDraft = {};
   // Backups (Admins): the app keeps a copy of its data every day for 14 days; any of them, or the live data, can be downloaded.
   async function loadBackups() {
-    const box = $('settings-backups'), admin = me && me.role === 'admin';
+    const box = $('settings-backups'), admin = can('download_backups');
     $('set-data-h').classList.toggle('hidden', !admin); box.classList.toggle('hidden', !admin);
     if (!admin) return;
     try {
@@ -720,6 +721,8 @@
   async function loadSettings() {
     loadBackups();
     const box = $('settings-keynest');
+    box.classList.toggle('hidden', !can('manage_settings')); $('set-int-h').classList.toggle('hidden', !can('manage_settings'));
+    if (!can('manage_settings')) return;
     try {
       kn = await getJSON('/api/keynest');
       knEdit = false; knDraft = {};
@@ -942,9 +945,12 @@
       <label for="uf-pw">${isNew ? 'Password' : 'Reset password'}</label>
       <div class="pwrow"><input id="uf-pw" type="text" autocomplete="new-password" placeholder="${isNew ? 'At least 8 characters' : 'Leave blank to keep their password'}" ${isNew ? 'required' : ''}><button class="btn" type="button" id="uf-gen">Generate</button></div>
       <div class="hint">${isNew ? 'Share it with them privately. They can change it under My account.' : 'Setting a new password signs them out everywhere.'}</div>
-      <fieldset><legend>Permissions</legend><div class="checks">
-        ${U.perms.map(([k, label]) => `<label><input type="checkbox" data-perm="${k}" ${u.perms && u.perms[k] ? 'checked' : ''}>${esc(label)}</label>`).join('')}
-      </div></fieldset>
+      <fieldset><legend>Permissions</legend>
+        <div class="perm-top"><span class="hint">Picking a role ticks that role’s usual permissions. You can change any of them.</span><button class="linkbtn" type="button" id="uf-reset-perms">Reset to <span id="uf-role-name">${esc(ROLE_LABEL[u.role])}</span> defaults</button></div>
+        ${[...new Set(U.perms.map((x) => x[2] || 'Other'))].map((g) => `<div class="perm-group"><h4>${esc(g)}</h4><div class="checks">
+          ${U.perms.filter((x) => (x[2] || 'Other') === g).map(([k, label]) => `<label><input type="checkbox" data-perm="${k}" ${u.perms && u.perms[k] ? 'checked' : ''}>${esc(label)}</label>`).join('')}
+        </div></div>`).join('')}
+      </fieldset>
       <fieldset><legend>Buildings they can see</legend>
         <div class="radio"><label class="${U.canAllBuildings === false ? 'hidden' : ''}"><input type="radio" name="uf-bmode" value="all" ${allB ? 'checked' : ''}>All buildings</label><label><input type="radio" name="uf-bmode" value="some" ${allB ? '' : 'checked'}>Only these</label></div>
         <div class="checks ${allB ? 'hidden' : ''}" id="uf-blist">${U.buildings.map((b) => `<label><input type="checkbox" data-b="${esc(b)}" ${!allB && u.buildings.includes(b) ? 'checked' : ''}>${esc(b)}</label>`).join('')}</div>
@@ -964,9 +970,11 @@
     $('uf-cancel').onclick = () => { editing = null; renderUsers(); };
     f.querySelectorAll('[name=uf-bmode]').forEach((r) => r.onchange = () => $('uf-blist').classList.toggle('hidden', f.querySelector('[name=uf-bmode]:checked').value === 'all'));
     // Picking a role fills in that role's usual settings; everything stays editable.
+    const rolePerms = () => { const d = U.defaults[$('uf-role').value]; f.querySelectorAll('[data-perm]').forEach((c) => { c.checked = !!d.perms[c.dataset.perm]; }); return d; };
+    $('uf-reset-perms').onclick = rolePerms;
     $('uf-role').onchange = () => {
-      const d = U.defaults[$('uf-role').value];
-      f.querySelectorAll('[data-perm]').forEach((c) => { c.checked = !!d.perms[c.dataset.perm]; });
+      const d = rolePerms();
+      $('uf-role-name').textContent = ROLE_LABEL[$('uf-role').value];
       const all = d.buildings === 'all';
       f.querySelector(`[name=uf-bmode][value=${all ? 'all' : 'some'}]`).checked = true;
       $('uf-blist').classList.toggle('hidden', all);
@@ -1167,7 +1175,7 @@
     document.querySelectorAll('[data-achip]').forEach((el) => {
       const a = assignments[`${selected}|${el.dataset.achip}`];
       el.innerHTML = a ? `<span class="achip${a.cleanerId === me.id ? ' mine' : ''}" title="Assigned to ${esc(a.cleanerName)}"><span class="avatar sm">${esc(initials(a.cleanerName))}</span>${a.cleanerId === me.id ? 'You' : esc(a.cleanerName.split(' ')[0])}</span>`
-        : el.dataset.needs && isManager() ? '<span class="achip none"><span class="avatar sm dash" aria-hidden="true">+</span>Assign</span>' : '';
+        : el.dataset.needs && can('assign_cleanings') ? '<span class="achip none"><span class="avatar sm dash" aria-hidden="true">+</span>Assign</span>' : '';
     });
     renderSummary();
     renderRail();
@@ -1240,7 +1248,7 @@
     }
     const att = [];
     if (openDamage) att.push(`<button class="rrow link" data-go="damage"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${openDamage} open damage report${openDamage === 1 ? '' : 's'}</b><span>Review and resolve</span></span>${CHEV}</button>`);
-    if (knUnlinked.length) att.push(`<button class="rrow link" data-go="${isManager() ? 'settings' : 'props'}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${knUnlinked.length} KeyNest flat${knUnlinked.length === 1 ? '' : 's'} not linked</b><span>${esc(knUnlinked.map((f) => f.label).join(' · '))}</span></span>${CHEV}</button>`);
+    if (knUnlinked.length) att.push(`<button class="rrow link" data-go="${can('manage_settings') ? 'settings' : 'props'}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${knUnlinked.length} KeyNest flat${knUnlinked.length === 1 ? '' : 's'} not linked</b><span>${esc(knUnlinked.map((f) => f.label).join(' · '))}</span></span>${CHEV}</button>`);
     for (const u of s.units.filter((x) => x.checkIn && x.checkIn.isNew)) att.push(`<button class="rrow link" data-flat="${esc(u.listingId)}"><span class="ric new">${ICONS.star}</span><span class="rtxt"><b>${esc(u.label)} is a new booking</b><span>Arrives ${esc(u.checkIn.time)}${u.checkIn.guests ? ` · ${u.checkIn.guests} guest${u.checkIn.guests > 1 ? 's' : ''}` : ''}</span></span>${CHEV}</button>`);
     cards.push(`<div class="card rcard"><div class="rc-h"><h3>Needs attention</h3></div>${att.join('') || '<p class="muted rnone">Nothing right now.</p>'}</div>`);
     const t = data.totals;
@@ -1337,7 +1345,7 @@
   function assignBlock() {
     const a = assignments[`${selected}|${sheetListing}`];
     const day = selected === (data && data.today) ? 'today' : esc(longDate(selected));
-    if (!isManager()) return a ? `<div class="assign-row ro">${PERSON_ICON}<span>${a.cleanerId === me.id ? '<b>Assigned to you</b>' : `Assigned to <b>${esc(a.cleanerName)}</b>`} ${day}</span></div>` : '';
+    if (!can('assign_cleanings')) return a ? `<div class="assign-row ro">${PERSON_ICON}<span>${a.cleanerId === me.id ? '<b>Assigned to you</b>' : `Assigned to <b>${esc(a.cleanerName)}</b>`} ${day}</span></div>` : '';
     return `<div class="assign-row">${PERSON_ICON}<label for="as-sel">Cleaner ${day}</label>
       <select id="as-sel" data-cur="${esc(a ? a.cleanerId : '')}"><option value="">${a ? esc(a.cleanerName) : 'Not assigned'}</option></select></div>`;
   }
@@ -1439,6 +1447,7 @@
       getJSON(`/api/lockbox/${encodeURIComponent(id)}`).then((r) => { if ($('sh-lbx') === box && sheetListing === id) box.innerHTML = r.noCode ? noCodeBlock(r.instruction) : lockboxBlock(r.lockbox); }).catch(() => {});
     }
     wireAssign();
+    if (!can('report_maintenance') && !can('manage_maintenance') && $('report-maint')) $('report-maint').remove();
     on('begin-clean', async () => {
       const admin = me.role === 'admin';
       if (admin && !(await askConfirm({ title: 'You’re not a cleaner', text: 'Are you sure you want to start this cleaning yourself? It will be recorded under your name.', yes: 'Yes, start cleaning', no: 'Cancel' }))) return;
@@ -1484,7 +1493,7 @@
   }
 
   // Admin, User and supervisor roles can finish someone else's cleaning at the key step and override KeyNest.
-  const stepsIn = () => Boolean(me && ['admin', 'user', 'supervisor'].includes(me.role));
+  const stepsIn = () => can('step_in');
   // A pop-up asking to confirm something. Resolves to { note } when confirmed, or null.
   function askConfirm({ title, text, yes = 'Yes', no = 'Cancel', danger = false, note = null }) {
     return new Promise((resolve) => {
@@ -1936,7 +1945,7 @@
       <p class="dmg-desc">${esc(d.description)}</p>
       ${mediaTiles(d.media)}
       ${d.status === 'resolved' ? `<div class="hist-s">Resolved by ${esc(d.resolvedBy || '')}${d.note ? ' — ' + esc(d.note) : ''}</div>` : ''}
-      ${can('manage_damage') || isManager() ? `<div class="form-actions">${can('manage_damage') ? `<button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button>` : ''}${isManager() ? `<button class="btn" data-dmg-mt="${esc(d.id)}">Create maintenance task</button>` : ''}</div>` : ''}
+      ${can('manage_damage') || can('manage_maintenance') ? `<div class="form-actions">${can('manage_damage') ? `<button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button>` : ''}${can('manage_maintenance') ? `<button class="btn" data-dmg-mt="${esc(d.id)}">Create maintenance task</button>` : ''}</div>` : ''}
     </div>`;
   }
   const dmgSeen = new Map(); // damage reports on screen, for "Create maintenance task"

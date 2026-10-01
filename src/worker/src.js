@@ -93,26 +93,36 @@ function asset(req, name) {
 // ---------------------------------------------------------------- users, roles & permissions
 // Each person has their own username + password. Permissions are ticked per person on the Users page.
 // "owner" + the APP_PASSWORD secret is a recovery login that always has full access.
-const PERMS = [
-  ['view_day', 'Day view'],
-  ['view_board', 'Board (whole week)'],
-  ['view_properties', 'Properties list'],
-  ['view_linen', 'Linen totals'],
-  ['view_guests', 'Guest numbers'],
-  ['copy_print', 'Copy for WhatsApp & Print'],
-  ['refresh', 'Refresh from Guesty'],
-  ['do_cleaning', 'Begin & end cleanings'],
-  ['view_cleaning', 'See cleaning times & videos'],
-  ['report_damage', 'Report damage'],
-  ['manage_damage', 'Resolve damage reports'],
-  ['manage_users', 'Manage users'],
+// [key, label, group, roles that have it by default]. A permission added later falls back to these
+// defaults for existing accounts (effectivePerms), so each new one matches what that role could already do.
+const ALL4 = ['admin', 'user', 'supervisor', 'cleaner'], RUNS = ['admin', 'user'], LEADS = ['admin', 'user', 'supervisor'];
+const PERM_DEFS = [
+  ['view_day', 'Day view', 'Schedule', ALL4],
+  ['view_board', 'Board (whole week)', 'Schedule', ALL4],
+  ['view_linen', 'Linen totals', 'Schedule', ALL4],
+  ['view_guests', 'Guest numbers', 'Schedule', ALL4],
+  ['copy_print', 'Copy for WhatsApp & Print', 'Schedule', LEADS],
+  ['refresh', 'Refresh from Guesty', 'Schedule', LEADS],
+  ['do_cleaning', 'Begin & end cleanings', 'Cleaning', ['admin', 'supervisor', 'cleaner']],
+  ['view_cleaning', 'See cleaning times, videos & lockbox codes', 'Cleaning', ALL4],
+  ['assign_cleanings', 'Assign cleanings to people', 'Cleaning', RUNS],
+  ['step_in', 'Finish others’ cleanings & override KeyNest', 'Cleaning', LEADS],
+  ['view_properties', 'Properties list', 'Properties', ALL4],
+  ['edit_properties', 'Edit property details', 'Properties', LEADS],
+  ['edit_lockbox', 'Change lockbox codes', 'Properties', ALL4],
+  ['report_damage', 'Report damage', 'Damage & maintenance', ALL4],
+  ['manage_damage', 'Resolve damage reports', 'Damage & maintenance', LEADS],
+  ['report_maintenance', 'Report maintenance issues', 'Damage & maintenance', ALL4],
+  ['manage_maintenance', 'Assign & manage maintenance tasks', 'Damage & maintenance', RUNS],
+  ['moderate_forum', 'Moderate the forum (status, delete posts)', 'Team', RUNS],
+  ['manage_users', 'Manage users', 'Team', ['admin']],
+  ['manage_settings', 'Settings & integrations (KeyNest)', 'Admin', RUNS],
+  ['download_backups', 'Download data backups', 'Admin', ['admin']],
 ];
+const PERMS = PERM_DEFS.map(([k, label, group]) => [k, label, group]);
 const ROLES = ['admin', 'supervisor', 'user', 'cleaner'];
 function roleDefaults(role) {
-  // For now everyone gets everything; only admins manage users unless it's ticked for them.
-  const perms = Object.fromEntries(PERMS.map(([k]) => [k, true]));
-  perms.manage_users = role === 'admin';
-  if (role === 'cleaner') { perms.manage_damage = false; perms.refresh = false; } // new cleaners only; existing accounts keep their ticks
+  const perms = Object.fromEntries(PERM_DEFS.map(([k, , , roles]) => [k, roles.includes(role)]));
   return { perms, buildings: role === 'cleaner' ? [] : 'all' };
 }
 const PBKDF2_ITER = typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers' ? 100000 : 600000;
@@ -556,9 +566,9 @@ function listingMap(raw, cfg, allow, { all = false } = {}) {
 
 const UNIT_TYPES = ['Studio', '1 Bedroom', '2 Bedroom', '3 Bedroom', '4 Bedroom', '5 Bedroom'];
 // Admins, Users and supervisors edit flats' details; cleaners only change lockbox codes (lockboxCodeApi).
-const editsProps = (u) => Boolean(u && (isManager(u) || u.role === 'supervisor'));
+const editsProps = (u) => can(u, 'edit_properties');
 async function propertyEditApi(req, env, ctx, me, id) {
-  if (!editsProps(me)) return json({ error: 'Only Admins, Users and supervisors can edit properties.' }, 403);
+  if (!editsProps(me)) return json({ error: 'You don’t have permission to edit properties. Ask an admin.' }, 403);
   const snap = await getSnapshot(env, ctx);
   await loadPropOverrides(env, true);
   const l = listingMap(snap.listings, config(env), null, { all: true }).get(id);
@@ -700,7 +710,7 @@ async function weekDataRaw(env, ctx, dateParam, fresh, allow, user) {
 async function propertiesData(env, ctx, user) {
   const cfg = config(env);
   const snap = await getSnapshot(env, ctx);
-  const manage = isManager(user), edit = editsProps(user);
+  const manage = can(user, 'manage_settings'), edit = editsProps(user);
   const every = listingMap(snap.listings, cfg, allowBuildingFor(user), { all: edit });
   const listings = new Map([...every].filter(([, l]) => !l.hidden));
   const codes = can(user, 'view_cleaning') ? ((await env.STORE.get('lockboxCodes', 'json')) || {}) : {};
@@ -715,7 +725,7 @@ async function propertiesData(env, ctx, user) {
   for (const b of buildings) b.units.sort((x, y) => natural(x.label, y.label));
   const counts = {};
   for (const l of listings.values()) counts[l.unitType] = (counts[l.unitType] || 0) + 1;
-  return { buildings, total: listings.size, counts, mock: cfg.mock, keynest: await keynestStatus(env, listings), canManage: manage, canEdit: edit, canEditCode: can(user, 'view_cleaning'), unitTypes: UNIT_TYPES };
+  return { buildings, total: listings.size, counts, mock: cfg.mock, keynest: await keynestStatus(env, listings), canManage: manage, canEdit: edit, canEditCode: can(user, 'view_cleaning') && can(user, 'edit_lockbox'), unitTypes: UNIT_TYPES };
 }
 
 // ---------------------------------------------------------------- Guesty webhook (instant updates)
@@ -784,7 +794,7 @@ async function listingInfo(env, ctx, listingId) {
 // Changing a flat's lockbox code by hand (from Properties): anyone who can see codes, cleaners included, in their buildings.
 async function lockboxCodeApi(req, env, ctx, me, id) {
   const l = await listingInfo(env, ctx, id);
-  if (!l || !inScope(me, l.building) || !can(me, 'view_cleaning')) return json({ error: 'You don’t have permission for that. Ask an admin.' }, 403);
+  if (!l || !inScope(me, l.building) || !can(me, 'edit_lockbox')) return json({ error: 'You don’t have permission for that. Ask an admin.' }, 403);
   if (l.keyMode !== 'lockbox' || l.lockboxNoCode) return json({ error: `${l.label} doesn’t use a lockbox code.` }, 400);
   const body = await req.json().catch(() => ({}));
   const code = String(body.code || '').trim();
@@ -1062,7 +1072,7 @@ async function keynestStatus(env, listings) {
 }
 
 async function keynestAdminApi(req, env, ctx, me, parts) {
-  if (!isManager(me)) return json({ error: 'Only Admins and Users can change KeyNest settings.' }, 403);
+  if (!can(me, 'manage_settings')) return json({ error: 'You don’t have permission to change Settings. Ask an admin.' }, 403);
   const links = (await env.STORE.get('keynestLinks', 'json')) || {};
   if (req.method === 'GET') {
     const base = (env.PUBLIC_URL || '').replace(/\/$/, '');
@@ -1141,7 +1151,7 @@ async function forumApi(req, env, ctx, me, parts) {
   const save = () => env.STORE.put('forum', JSON.stringify(posts.slice(-500)));
   const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
   const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await req.json().catch(() => ({}));
-  const mod = isManager(me);
+  const mod = can(me, 'moderate_forum');
   const link = (pid) => `/?view=forum&post=${pid}`;
   if (!id) {
     if (req.method === 'GET') return json({ posts: posts.map((p) => forumSummary(p, me)).reverse(), canModerate: mod });
@@ -1322,7 +1332,7 @@ const ASSIGNABLE = ['cleaner', 'supervisor']; // Admins and Users run the operat
 async function assignmentsApi(req, env, ctx, me, url) {
   const all = (await env.STORE.get('assignments', 'json')) || {};
   if (req.method === 'GET' && url.pathname === '/api/assignees') {
-    if (!isManager(me)) return json({ error: 'Only Admins and Users can assign cleanings.' }, 403);
+    if (!can(me, 'assign_cleanings')) return json({ error: 'You don’t have permission to assign cleanings. Ask an admin.' }, 403);
     const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
     if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
@@ -1334,7 +1344,7 @@ async function assignmentsApi(req, env, ctx, me, url) {
     return json({ assignments: Object.values(all).filter((a) => a.date >= from && a.date <= to && inScope(me, a.building)) });
   }
   if (req.method === 'PUT') {
-    if (!isManager(me)) return json({ error: 'Only Admins and Users can assign cleanings.' }, 403);
+    if (!can(me, 'assign_cleanings')) return json({ error: 'You don’t have permission to assign cleanings. Ask an admin.' }, 403);
     const body = await req.json().catch(() => ({}));
     const date = String(body.date || '');
     const realDay = /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(date + 'T00:00:00Z')) && new Date(date + 'T00:00:00Z').toISOString().slice(0, 10) === date;
@@ -1385,7 +1395,7 @@ async function keyPrecheck(req, env, ctx, parts) {
   try { return { link, chk: await keynestCheck(env, link.keyId) }; } catch (e) { return { link, error: e.userMessage || 'KeyNest isn’t answering right now. Try again in a minute.' }; }
 }
 // Admin, User and supervisor roles can finish someone else's cleaning at the key step, and override the KeyNest check.
-const canStepIn = (me, rec) => ['admin', 'user', 'supervisor'].includes(me.role) && inScope(me, rec.building);
+const canStepIn = (me, rec) => can(me, 'step_in') && inScope(me, rec.building);
 async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   const [, , , id, action] = parts; // /api/cleanings/:id/:action
   const list = await loadList(env, 'cleanings');
@@ -1412,8 +1422,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   }
 
   if (req.method === 'POST' && id === 'start') {
-    if (!can(me, 'do_cleaning')) return deny();
     if (me.role === 'user') return deny('Users can’t start cleanings. Assign it to a cleaner instead.');
+    if (!can(me, 'do_cleaning')) return deny();
     const body = await req.json().catch(() => ({}));
     // Admins can, but only after confirming they really mean to (they're not a cleaner).
     if (me.role === 'admin' && body.notCleanerConfirmed !== true) return json({ error: 'You’re not a cleaner. Confirm you want to start this cleaning yourself.' }, 400);
@@ -1575,7 +1585,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     }
     if (rec.keyMode === 'keynest' && body.override === true) {
       // Finishing without KeyNest confirming the key is back: Admin, User or supervisor only, and recorded.
-      if (!stepIn) return json({ error: 'Only Admins, Users and supervisors can override the KeyNest check.' }, 403);
+      if (!stepIn) return json({ error: 'You don’t have permission to override the KeyNest check.' }, 403);
       const l = await listingInfo(env, ctx, rec.listingId);
       let keyId = null; try { keyId = l ? ((await keynestLink(env, l)) || {}).keyId || null : null; } catch (_) { /* KeyNest down: that's often why */ }
       rec.key = { mode: 'keynest', keyId, status: 'not checked', overridden: true, overriddenBy: me.name, overriddenById: me.id, confirmedAt: nowIso(),
@@ -1693,9 +1703,10 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
   const tasks = await loadList(env, 'maintenance');
   const save = () => saveList(env, 'maintenance', tasks.slice(-2000));
   const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await req.json().catch(() => ({}));
-  const manage = (t) => isManager(me) && inScope(me, t.building);
+  const mm = can(me, 'manage_maintenance'); // Admins and Users by default
+  const manage = (t) => mm && inScope(me, t.building);
   const mine = (t) => t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id;
-  const canSee = (t) => (inScope(me, t.building) && (isManager(me) || me.role === 'supervisor')) || t.reporterId === me.id || mine(t);
+  const canSee = (t) => (inScope(me, t.building) && (mm || me.role === 'supervisor')) || t.reporterId === me.id || mine(t);
   const canMove = (t) => manage(t) || mine(t) || (me.role === 'supervisor' && inScope(me, t.building));
   const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
   const link = (t) => `/?view=maintenance&task=${t.id}`;
@@ -1741,18 +1752,19 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
     const open = tasks.filter((t) => canSee(t) && !['done', 'cancelled'].includes(t.status));
     const late = (t) => Boolean(t.due && t.due < londonDate());
     // The sidebar badge: yours to do, plus (for Admins/Users) tasks nobody has yet and anything overdue.
-    const counts = { mine: open.filter(mine).length, unassigned: isManager(me) ? open.filter((t) => !t.assignee).length : 0, overdue: open.filter(late).length,
-      badge: open.filter((t) => mine(t) || (isManager(me) && (!t.assignee || late(t)))).length };
-    return json({ tasks: out.reverse(), counts, canManage: isManager(me), contractors: isManager(me) ? ((await env.STORE.get('contractors', 'json')) || []) : [] });
+    const counts = { mine: open.filter(mine).length, unassigned: mm ? open.filter((t) => !t.assignee).length : 0, overdue: open.filter(late).length,
+      badge: open.filter((t) => mine(t) || (mm && (!t.assignee || late(t)))).length };
+    return json({ tasks: out.reverse(), counts, canManage: mm, contractors: mm ? ((await env.STORE.get('contractors', 'json')) || []) : [] });
   }
   if (id === 'people' && req.method === 'GET') {
-    if (!isManager(me)) return json({ error: 'Only Admins and Users assign maintenance.' }, 403);
+    if (!mm) return json({ error: 'You don’t have permission to assign maintenance. Ask an admin.' }, 403);
     const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
     if (!l || !inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
     const people = (await loadUsers(env)).filter((u) => u.active !== false && coversBuilding(u, l.building));
     return json({ people: people.map((u) => ({ id: u.id, name: u.name, role: u.role })).sort((a, b) => a.name.localeCompare(b.name)) });
   }
   if (!id && req.method === 'POST') {
+    if (!mm && !can(me, 'report_maintenance')) return json({ error: 'You don’t have permission to report maintenance. Ask an admin.' }, 403);
     const l = await listingInfo(env, ctx, String(body.listingId || ''));
     if (!l) return json({ error: 'Pick the flat.' }, 400);
     if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
@@ -1762,23 +1774,23 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
       id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
       priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due: null, repeat: null, cost: null,
       reporterId: me.id, reporterName: me.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
-      media: (await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => ['maintenance', 'damage'].includes(m.purpose) && m.listingId === l.id && (m.byId === me.id || isManager(me)))).map((m) => m.id), log: [], damageId: body.damageId ? String(body.damageId) : null,
+      media: (await mediaReady(env, (body.mediaIds || []).map(String), null, (m) => ['maintenance', 'damage'].includes(m.purpose) && m.listingId === l.id && (m.byId === me.id || mm))).map((m) => m.id), log: [], damageId: body.damageId ? String(body.damageId) : null,
     };
     t.seriesId = t.id;
-    if (isManager(me)) { // triage details come from Admins and Users
+    if (mm) { // triage details come from Admins and Users
       t.assignee = await readAssignee(body.assignee, t);
       if (body.due) { if (!realDate(body.due)) return json({ error: 'Pick a due date.' }, 400); t.due = body.due; }
       t.repeat = readRepeat(body.repeat);
       if (t.repeat && !t.due) t.due = londonDate();
       if (body.cost !== undefined && body.cost !== null && body.cost !== '') t.cost = Math.max(0, Math.round(Number(body.cost) * 100) / 100) || null;
     }
-    log(t, isManager(me) ? 'Created' : 'Reported');
+    log(t, mm ? 'Created' : 'Reported');
     if (t.assignee) log(t, `Assigned to ${who(t.assignee)}`);
     tasks.push(t);
     await save();
-    if (!isManager(me)) await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, me.id), { type: 'maintenance', title: `Maintenance reported · ${t.label}`, body: `${t.title} — ${me.name}`, url: link(t), tag: `mt-${t.id}` });
+    if (!mm) await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, me.id), { type: 'maintenance', title: `Maintenance reported · ${t.label}`, body: `${t.title} — ${me.name}`, url: link(t), tag: `mt-${t.id}` });
     await tellAssignee(t);
-    console.log(`[maintenance] ${me.name} ${isManager(me) ? 'created' : 'reported'} "${t.title}" at ${t.label}`);
+    console.log(`[maintenance] ${me.name} ${mm ? 'created' : 'reported'} "${t.title}" at ${t.label}`);
     return json({ task: await shape(t) });
   }
   const t = tasks.find((x) => x.id === id);
@@ -1823,7 +1835,7 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
     }
     await save();
     if (s === 'done') {
-      const to = [...new Set([t.reporterId, ...(isManager(me) ? [] : await recipients(env, ['admin', 'user'], t.building, me.id))])].filter((x) => x && x !== me.id);
+      const to = [...new Set([t.reporterId, ...(mm ? [] : await recipients(env, ['admin', 'user'], t.building, me.id))])].filter((x) => x && x !== me.id);
       await notify(env, ctx, to, { type: 'maintenance', title: `Maintenance done · ${t.label}`, body: `${t.title} — ${me.name}`, url: link(t), tag: `mt-${t.id}` });
     }
     return json({ task: await shape(t), next: next ? await shape(next) : null });
@@ -2038,7 +2050,7 @@ async function handle(req, env, ctx) {
       if (body.purpose === 'cleaning') { const c = (await loadList(env, 'cleanings')).find((x) => x.id === body.ownerId); building = c && c.building; }
       return json({ ok: true, user: { id: me.id, name: me.name }, building });
     }
-    if (body.mode === 'admin') return json({ ok: me.role === 'admin', user: { id: me.id, name: me.name } }); // backups: Admins only
+    if (body.mode === 'admin') return json({ ok: can(me, 'download_backups'), user: { id: me.id, name: me.name } }); // backups
     if (body.mode === 'view') {
       const m = await env.STORE.get('media:' + body.id, 'json');
       return json({ ok: Boolean(m && (await mediaViewAllowed(env, me, m))), userId: me.id });
