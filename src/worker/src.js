@@ -2138,6 +2138,24 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
 // the task arrives open and unassigned, exactly like a cleaner's report, and Admins/Users of the building are told.
 // If the same guest reports the same thing again while it's still open, it's added as a note instead of a new task.
 // Off unless the ASSISTANT_API_KEY secret is set; the assistant sends it as "Authorization: Bearer <key>".
+// Two task titles for the same thing: identical once a bracketed note at the end (the guest's name, "(details unknown)")
+// is ignored. Deliberately strict: rewording is matched by the guest assistant itself, which sees the open tasks; a
+// loose match here would merge different problems ("Kitchen tap leaking" / "Kitchen ceiling leaking").
+const splitTitle = (t) => { const m = String(t || '').match(/^(.*?)\s*\(([^()]*)\)\s*$/); return m ? { core: normName(m[1]), note: normName(m[2]) } : { core: normName(t), note: '' }; };
+// The bracketed notes must match too, unless one title has none: "Radiator not working (bedroom)" and "(living room)"
+// are different radiators.
+const similarTitles = (a, b) => { const x = splitTitle(a), y = splitTitle(b); return x.core.length >= 3 && x.core === y.core && (!x.note || !y.note || x.note === y.note); };
+const MT_OPEN = (t) => !['done', 'cancelled'].includes(t.status);
+// The open tasks at a flat, so the guest assistant can tell a problem that's already reported from a new one.
+async function assistantOpenTasks(req, env, ctx, url) {
+  const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.ASSISTANT_API_KEY || !safeEqual(key, env.ASSISTANT_API_KEY)) return json({ error: 'unauthorised' }, 401);
+  const listingId = String(url.searchParams.get('listingId') || '');
+  const tasks = (await loadList(env, 'maintenance')).filter((t) => t.listingId === listingId && MT_OPEN(t))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 40)
+    .map((t) => ({ id: t.id, title: t.title, kind: t.kind === 'guest_request' ? 'guest_request' : 'maintenance', priority: t.priority, status: t.status, createdAt: t.createdAt, url: `/?view=maintenance&task=${t.id}` }));
+  return json({ tasks });
+}
 async function assistantMaintenanceApi(req, env, ctx) {
   const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (!env.ASSISTANT_API_KEY || !safeEqual(key, env.ASSISTANT_API_KEY)) return json({ error: 'unauthorised' }, 401);
@@ -2157,10 +2175,28 @@ async function assistantMaintenanceApi(req, env, ctx) {
   const bot = { id: 'assistant', name: 'Guest assistant (AI)' };
   const tasks = await loadList(env, 'maintenance');
   const link = (t) => `/?view=maintenance&task=${t.id}`;
-  const same = reservationId && tasks.find((t) => t.reporterId === bot.id && t.reservationId === reservationId && t.listingId === l.id
-    && !['done', 'cancelled'].includes(t.status) && normName(t.title) === normName(title) && (t.kind === 'guest_request') === guestRequest);
+  const messageIds = [...new Set((Array.isArray(body.messageIds) ? body.messageIds : []).map((x) => text(x, 60)).filter(Boolean))].slice(0, 50);
+  const sameKind = (t) => (t.kind === 'guest_request') === guestRequest;
+  // Already reported: the open task the assistant said it is, or (as a safety net) an open task at this flat for
+  // the same booking, or reported by the assistant in the last fortnight, with a title about the same thing.
+  // Already reported: the open task the assistant said it is (same kind), or, as a safety net for an automatic report,
+  // an open task for the same booking with the same title. Never across bookings or guests, and never for a task a
+  // team member asked for in Slack (they asked for a new one).
+  const named = body.existingTaskId && tasks.find((t) => t.id === String(body.existingTaskId) && t.listingId === l.id && MT_OPEN(t) && sameKind(t));
+  const same = named || (!fromSlack && reservationId && tasks.find((t) => t.listingId === l.id && MT_OPEN(t) && sameKind(t) && t.reservationId === reservationId && similarTitles(t.title, title)));
   if (same) {
-    same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: text(body.details, 2000) || 'The guest mentioned this again.' }];
+    // Each problem from a guest message is noted once, however many drafts mention it (two different problems from
+    // the same message are each noted).
+    const keys = (messageIds.length ? messageIds : ['']).map((m) => `${m}|${normName(title)}`);
+    const fresh = keys.filter((k) => !(same.notedKeys || []).includes(k));
+    const noted = Boolean(fresh.length || !messageIds.length);
+    if (noted) {
+      same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: (normName(title) !== normName(same.title) ? `${title}: ` : '') + (text(body.details, 2000) || 'The guest mentioned this again.') }];
+      same.messageIds = [...new Set([...(same.messageIds || []), ...messageIds])];
+      same.notedKeys = [...new Set([...(same.notedKeys || []), ...keys])].slice(-200);
+    }
+    // A repeat never changes the priority: every new draft for the guest re-sends their earlier problems, so this would
+    // undo a manager's own triage. The note shows what the guest said; a manager decides.
     // The guest changed the day: the task moves to it.
     const dueChanged = Boolean(due && due !== same.due);
     if (dueChanged) {
@@ -2170,14 +2206,14 @@ async function assistantMaintenanceApi(req, env, ctx) {
     same.log = same.log.slice(-200);
     same.updatedAt = nowIso();
     await saveList(env, 'maintenance', tasks.slice(-2000));
-    return json({ task: { id: same.id, url: link(same), duplicate: true, due: same.due, dueChanged } });
+    return json({ task: { id: same.id, url: link(same), title: same.title, duplicate: true, noted, due: same.due, dueChanged } });
   }
   const t = {
     id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
     priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due, repeat: null, cost: null,
     reporterId: bot.id, reporterName: bot.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
     media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `${guestRequest ? 'Guest request' : 'Reported'} ${origin}` }],
-    damageId: null, reservationId, ...(guestRequest ? { kind: 'guest_request' } : {}),
+    damageId: null, reservationId, messageIds, ...(guestRequest ? { kind: 'guest_request' } : {}),
     complaintId: text(body.complaintId, 40) || null, // the guest complaint it came with, if any
   };
   t.seriesId = t.id;
@@ -2187,7 +2223,7 @@ async function assistantMaintenanceApi(req, env, ctx) {
   const heading = guestRequest ? `Guest request · ${t.label}` : `${urgent}Maintenance reported · ${t.label}`;
   await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: heading, body: `${t.title} — ${origin}`, url: link(t), tag: `mt-${t.id}` });
   console.log(`[maintenance] guest assistant ${guestRequest ? 'added guest request' : 'reported'} "${t.title}" at ${t.label}`);
-  return json({ task: { id: t.id, url: link(t), duplicate: false, due: t.due, dueChanged: false } });
+  return json({ task: { id: t.id, url: link(t), title: t.title, duplicate: false, due: t.due, dueChanged: false } });
 }
 
 // ---------------------------------------------------------------- guest assistant: complaints
@@ -2627,6 +2663,7 @@ async function handle(req, env, ctx) {
   }
 
   if (p === '/api/integrations/maintenance' && req.method === 'POST') return withLock('maintenance', () => assistantMaintenanceApi(req, env, ctx));
+  if (p === '/api/integrations/maintenance' && req.method === 'GET') return assistantOpenTasks(req, env, ctx, url);
   if (p === '/api/integrations/complaints' || p.startsWith('/api/integrations/complaints/')) return withLock('complaints', () => assistantComplaintsApi(req, env, ctx, p.split('/')));
 
   if (p.startsWith('/webhooks/guesty/') && req.method === 'POST') {
