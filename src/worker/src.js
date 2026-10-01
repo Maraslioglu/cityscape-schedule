@@ -106,7 +106,10 @@ const PERM_DEFS = [
   ['do_cleaning', 'Begin & end cleanings', 'Cleaning', ['admin', 'supervisor', 'cleaner']],
   ['view_cleaning', 'See cleaning times, videos & lockbox codes', 'Cleaning', ALL4],
   ['assign_cleanings', 'Assign cleanings to people', 'Cleaning', RUNS],
-  ['step_in', 'Finish others’ cleanings & override KeyNest', 'Cleaning', LEADS],
+  ['step_in', 'Finish others’ cleanings (override KeyNest or the video)', 'Cleaning', LEADS],
+  ['reset_cleanings', 'Reset cleanings (undo a finished one, stop someone else’s)', 'Cleaning', LEADS],
+  ['move_cleanings', 'Move a cleaning to another day', 'Cleaning', LEADS],
+  ['mark_cleaned', 'Mark a flat cleaned (another date, no video)', 'Cleaning', LEADS],
   ['view_properties', 'Properties list', 'Properties', ALL4],
   ['edit_properties', 'Edit property details', 'Properties', LEADS],
   ['edit_lockbox', 'Change lockbox codes', 'Properties', ALL4],
@@ -354,15 +357,15 @@ function shapeWeek(data, u) {
   if (u.role === 'supervisor' || u.role === 'cleaner') {
     let fresh = 0;
     for (const d of data.days) {
-      d.units = d.units.filter((x) => x.checkOut);
+      d.units = d.units.filter((x) => x.checkOut || x.movedOut);
       d.arrivals = d.turnovers;
-      d.hasNew = d.units.some((x) => (x.checkIn && x.checkIn.isNew) || x.checkOut.isNew);
+      d.hasNew = d.units.some((x) => (x.checkIn && x.checkIn.isNew) || (x.checkOut && x.checkOut.isNew));
       fresh += d.units.filter((x) => x.checkIn && x.checkIn.isNew).length;
     }
-    const empty = { occ: false, out: null, in: null };
+    const empty = { occ: false, out: null, in: null, movedOut: null };
     data.board = data.board.map((b) => ({ ...b, units: b.units
-      .map((x) => ({ ...x, cells: x.cells.map((c) => (c.out ? { occ: Boolean(c.in), out: c.out, in: c.in } : empty)) }))
-      .filter((x) => x.cells.some((c) => c.out)) })).filter((b) => b.units.length);
+      .map((x) => ({ ...x, cells: x.cells.map((c) => (c.out || c.movedOut ? { occ: Boolean(c.out && c.in), out: c.out, in: c.out ? c.in : null, movedOut: c.movedOut || null } : empty)) }))
+      .filter((x) => x.cells.some((c) => c.out || c.movedOut)) })).filter((b) => b.units.length);
     data.totals.checkIns = data.totals.turnovers;
     data.totals.newBookings = fresh;
     data.cleansOnly = true;
@@ -525,8 +528,30 @@ async function loadPropOverrides(env, fresh) {
   propOv = { at: Date.now(), map, ver: Object.keys(map).length ? fnv(JSON.stringify(map)) : '' };
   return map;
 }
-// What the page compares to know the schedule changed: Guesty's bookings plus any details edited in the app.
-const dataVersion = (snap) => snap.hash + (propOv.ver ? '.' + propOv.ver : '');
+// Cleans moved to another day: { "listingId|checkoutDate": { listingId, from, to, code, label, building, byId, byName, at, note } }.
+// Keyed by the guest's real check-out date (the "job"), so a cleaning counted for that job (forDate) follows the move.
+let jobMv = { at: 0, map: {}, ver: '' };
+async function loadJobMoves(env, fresh) {
+  if (!fresh && Date.now() - jobMv.at < MEM_TTL) return jobMv.map;
+  const map = (env.STORE && (await env.STORE.get('jobMoves', 'json'))) || {};
+  jobMv = { at: Date.now(), map, ver: Object.keys(map).length ? fnv(JSON.stringify(map)) : '' };
+  return map;
+}
+// Does a clean moved for stay `r` still apply? Not if Guesty changed things since: another booking code, another stay
+// now checking out on the new day, or new guests arriving before the new day (unless the move was made knowing that).
+// Decided from all the flat's stays, so every week (and every endpoint) gives the same answer.
+function moveFor(moves, r, stays, statuses) {
+  const co = r.checkOutDateLocalized, mv = moves[`${r.listingId}|${co}`];
+  if (!mv || !mv.to || mv.to === co) return null;
+  if (mv.code && r.confirmationCode && mv.code !== r.confirmationCode) return null;
+  const others = stays.filter((x) => x !== r && x.listingId === r.listingId && statuses.includes(x.status));
+  if (others.some((x) => x.checkOutDateLocalized === mv.to)) return { mv, void: 'clash' };
+  const nextIn = others.map((x) => x.checkInDateLocalized).filter((d) => d >= co).sort()[0] || null;
+  if (nextIn && nextIn < mv.to && nextIn !== (mv.nextIn || null)) return { mv, void: 'arrival', nextIn };
+  return { mv };
+}
+// What the page compares to know the schedule changed: Guesty's bookings plus any details edited or cleans moved in the app.
+const dataVersion = (snap) => snap.hash + (propOv.ver ? '.' + propOv.ver : '') + (jobMv.ver ? '~' + jobMv.ver : '');
 function listingMap(raw, cfg, allow, { all = false } = {}) {
   const map = new Map();
   for (const l of raw) {
@@ -610,7 +635,7 @@ async function propertyEditApi(req, env, ctx, me, id) {
   return json({ ok: true });
 }
 
-function buildWeek(start, rawListings, stays, cfg, meta, allow) {
+function buildWeek(start, rawListings, stays, cfg, meta, allow, moves = {}) {
   const listings = listingMap(rawListings, cfg, allow);
   const end = addDays(start, 6);
   const dates = Array.from({ length: 7 }, (_, i) => addDays(start, i));
@@ -623,18 +648,39 @@ function buildWeek(start, rawListings, stays, cfg, meta, allow) {
 
   const grid = new Map();
   const cell = (id, d) => {
-    if (!grid.has(id)) grid.set(id, Object.fromEntries(dates.map((x) => [x, { occ: false, out: null, in: null }])));
+    if (!grid.has(id)) grid.set(id, Object.fromEntries(dates.map((x) => [x, { occ: false, out: null, in: null, movedOut: null }])));
     return grid.get(id)[d];
   };
   let hiddenBookings = 0;
+  const inWeek = (d) => d >= start && d <= end;
+  // The next arrival at each flat after a check-out: a cleaning done later than that can't be for that check-out.
+  const arrivals = new Map();
+  for (const r of stays) if (cfg.statuses.includes(r.status)) { if (!arrivals.has(r.listingId)) arrivals.set(r.listingId, []); arrivals.get(r.listingId).push(r.checkInDateLocalized); }
+  for (const a of arrivals.values()) a.sort();
+  const nextIn = (id, co) => (arrivals.get(id) || []).find((d) => d >= co) || null;
+  const moved = [], moveWarnings = [];
   for (const r of stays) {
     const ci = r.checkInDateLocalized, co = r.checkOutDateLocalized;
-    if (!(ci <= end && co >= start) || !cfg.statuses.includes(r.status)) continue;
+    if (!cfg.statuses.includes(r.status)) continue;
+    const m = moveFor(moves, r, stays, cfg.statuses), mv = m && m.mv;
+    const job = m && !m.void ? mv.to : null;
+    if (!((ci <= end && co >= start) || (mv && inWeek(mv.to)))) continue;
     const l = listings.get(r.listingId);
     if (!l) { if (!allow) hiddenBookings++; continue; }
+    if (m && m.void) moveWarnings.push(m.void === 'clash'
+      ? `${l.label}: another booking now checks out on ${dayLabel(mv.to)}, so the clean moved there shows on ${dayLabel(co)} again. Move it again if needed.`
+      : `${l.label}: new guests arrive ${dayLabel(m.nextIn)}, before the clean moved to ${dayLabel(mv.to)}, so it shows on ${dayLabel(co)} again.`);
     for (const d of dates) if (d >= ci && d < co) cell(r.listingId, d).occ = true;
-    if (ci >= start && ci <= end) cell(r.listingId, ci).in = ev(r, l, 'in');
-    if (co >= start && co <= end) cell(r.listingId, co).out = ev(r, l, 'out');
+    if (inWeek(ci)) cell(r.listingId, ci).in = ev(r, l, 'in');
+    const out = { ...ev(r, l, 'out'), nextIn: nextIn(r.listingId, co) };
+    if (job) moved.push({ id: r.listingId, l, co, job, mv, out });
+    else if (inWeek(co)) cell(r.listingId, co).out = out;
+  }
+  // Cleans moved to another day show there; the original day says where it went. (Moves that no longer apply were
+  // already put back on their own day above.)
+  for (const { id, co, job, mv, out } of moved) {
+    if (inWeek(job)) cell(id, job).out = { ...out, movedFrom: co, movedBy: mv.byName || '', movedNote: mv.note || '' };
+    if (inWeek(co)) cell(id, co).movedOut = { to: job, by: mv.byName || '' };
   }
 
   const linen = {};
@@ -643,9 +689,9 @@ function buildWeek(start, rawListings, stays, cfg, meta, allow) {
     const units = [], dayLinen = {};
     for (const [id, cells] of grid) {
       const c = cells[date];
-      if (!c.out && !c.in) continue;
+      if (!c.out && !c.in && !c.movedOut) continue;
       const l = listings.get(id);
-      units.push({ listingId: id, name: l.name, label: l.label, building: l.building, postcode: l.postcode, address: l.address, unitType: l.unitType, keyMode: l.keyMode, checkOut: c.out, checkIn: c.in });
+      units.push({ listingId: id, name: l.name, label: l.label, building: l.building, postcode: l.postcode, address: l.address, unitType: l.unitType, keyMode: l.keyMode, checkOut: c.out, checkIn: c.in, movedOut: c.movedOut || null });
       if (c.out) { checkOuts++; linen[l.unitType] = (linen[l.unitType] || 0) + 1; dayLinen[l.unitType] = (dayLinen[l.unitType] || 0) + 1; }
       if (c.in) { checkIns++; if (c.in.isNew) newBookings++; }
       if (c.in && c.out) turnovers++;
@@ -684,6 +730,7 @@ function buildWeek(start, rawListings, stays, cfg, meta, allow) {
     warnings: [
       ...[...listings.values()].filter((l) => l.unitType === 'Unknown').map((l) => `“${l.name}” has no bedroom count in Guesty, so its linen is counted as “Unknown”.`),
       ...(hiddenBookings ? [`${hiddenBookings} booking(s) belong to inactive or hidden listings and are not shown.`] : []),
+      ...moveWarnings,
     ],
   };
 }
@@ -696,7 +743,7 @@ async function weekDataRaw(env, ctx, dateParam, fresh, allow, user) {
   const start = weekStartFor(dateParam, cfg.weekStartDay);
   const end = addDays(start, 6);
   let snap = fresh ? await refreshSnapshot(env, 'manual refresh') : await getSnapshot(env, ctx);
-  if (start >= snap.from && end <= snap.to) return buildWeek(start, snap.listings, snap.stays, cfg, { at: snap.at, version: dataVersion(snap) }, allow);
+  if (start >= snap.from && end <= snap.to) return buildWeek(start, snap.listings, snap.stays, cfg, { at: snap.at, version: dataVersion(snap) }, allow, jobMv.map);
   // Outside the pre-loaded window (far past / far future): ask Guesty directly and cache at the edge.
   const cache = caches.default;
   const scope = allow ? fnv(JSON.stringify(user.buildings)) : 'all';
@@ -704,7 +751,7 @@ async function weekDataRaw(env, ctx, dateParam, fresh, allow, user) {
   const hit = !fresh && (await cache.match(key));
   if (hit) return hit.json();
   const stays = (await fetchStays(env, cfg, start, end)).map(slimStay);
-  const data = buildWeek(start, snap.listings, stays, cfg, { at: Date.now(), version: dataVersion(snap) }, allow);
+  const data = buildWeek(start, snap.listings, stays, cfg, { at: Date.now(), version: dataVersion(snap) }, allow, jobMv.map);
   ctx.waitUntil(cache.put(key, new Response(JSON.stringify(data), { headers: { 'Cache-Control': 'max-age=600' } })));
   return data;
 }
@@ -837,20 +884,23 @@ async function withMedia(env, rec) {
 }
 
 // Mark the flat clean in Guesty. Never blocks the cleaner: failures are recorded and shown to admins.
-async function markCleanInGuesty(env, listingId) {
+async function markCleanInGuesty(env, listingId, value = 'clean') {
   if (config(env).mock) return 'preview';
   if (env.GUESTY_MARK_CLEAN === '0') return 'off';
   try {
-    await gapi(env, 'PUT', `/v1/listings/${listingId}`, { body: { cleaningStatus: { value: 'clean' } } });
+    await gapi(env, 'PUT', `/v1/listings/${listingId}`, { body: { cleaningStatus: { value } } });
     const l = await gapi(env, 'GET', `/v1/listings/${listingId}`, { params: { fields: 'cleaningStatus' } });
     const v = l && l.cleaningStatus && (l.cleaningStatus.value || l.cleaningStatus);
-    console.log('[guesty] cleaning status now', JSON.stringify(v));
-    return v === 'clean' ? 'updated' : 'sent';
+    console.log(`[guesty] ${listingId} cleaning status now`, JSON.stringify(v));
+    return v === value ? 'updated' : 'sent';
   } catch (e) {
-    console.log('[guesty] mark clean failed', e.message);
+    console.log(`[guesty] ${listingId} mark ${value} failed`, e.message);
     return 'failed';
   }
 }
+// Guesty calls for one flat go one at a time, and each checks it still applies when its turn comes (a reset racing a
+// finish, say). Never awaited while holding the cleanings lock: Guesty can take many seconds.
+const syncGuesty = (env, listingId, value, stillWanted) => withLock(`guesty:${listingId}`, async () => ((await stillWanted()) ? markCleanInGuesty(env, listingId, value) : 'skipped'));
 
 // ---------------------------------------------------------------- KeyNest
 // Flats tagged KEYNEST in Guesty can only be completed once KeyNest reports the key back in a store.
@@ -1120,13 +1170,16 @@ async function recipients(env, roles, building, except) {
   return [...new Set(ids)].filter((id) => id && id !== except);
 }
 async function notify(env, ctx, to, n) {
+  to = [...new Set(to.filter(Boolean))];
   if (!to.length) return;
   const at = nowIso();
-  const list = (await env.STORE.get('notifications', 'json')) || [];
-  const cutoff = Date.now() - 60 * 864e5;
-  const items = to.map((id) => ({ id: newId(), to: id, type: n.type, title: n.title, body: n.body || '', url: n.url || '/', at, read: false }));
-  const kept = list.filter((x) => Date.parse(x.at) > cutoff).concat(items).slice(-2000);
-  await env.STORE.put('notifications', JSON.stringify(kept));
+  await withLock('notifications', async () => {
+    const list = (await env.STORE.get('notifications', 'json')) || [];
+    const cutoff = Date.now() - 60 * 864e5;
+    const items = to.map((id) => ({ id: newId(), to: id, type: n.type, title: n.title, body: n.body || '', url: n.url || '/', at, read: false }));
+    const kept = list.filter((x) => Date.parse(x.at) > cutoff).concat(items).slice(-2000);
+    await env.STORE.put('notifications', JSON.stringify(kept));
+  });
   ctx.waitUntil(pushTo(env, to, { title: n.title, body: n.body || '', url: n.url || '/', tag: n.tag || n.type }).catch((e) => console.log('[push] failed', e.message)));
 }
 // ---------------------------------------------------------------- team forum
@@ -1334,7 +1387,7 @@ const ASSIGNABLE = ['cleaner', 'supervisor']; // Admins and Users run the operat
 async function assignmentsApi(req, env, ctx, me, url) {
   const all = (await env.STORE.get('assignments', 'json')) || {};
   if (req.method === 'GET' && url.pathname === '/api/assignees') {
-    if (!can(me, 'assign_cleanings')) return json({ error: 'You don’t have permission to assign cleanings. Ask an admin.' }, 403);
+    if (!can(me, 'assign_cleanings') && !can(me, 'mark_cleaned')) return json({ error: 'You don’t have permission to assign cleanings. Ask an admin.' }, 403);
     const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
     if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
@@ -1398,6 +1451,52 @@ async function keyPrecheck(req, env, ctx, parts) {
 }
 // Admin, User and supervisor roles can finish someone else's cleaning at the key step, and override the KeyNest check.
 const canStepIn = (me, rec) => can(me, 'step_in') && inScope(me, rec.building);
+
+// ---------------------------------------------------------------- jobs: the clean after each check-out
+const ACTIVE_ST = ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key'];
+// "HH:MM" on a London date, as an ISO time (right across the clock changes).
+const londonToIso = (date, hhmm) => {
+  const [y, m, d] = date.split('-').map(Number), [h, mi] = String(hhmm || '12:00').split(':').map(Number);
+  const u = Date.UTC(y, m - 1, d, h, mi);
+  let t = u - londonOffsetMs(u); t = u - londonOffsetMs(t);
+  return new Date(t).toISOString();
+};
+const londonHHMM = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(iso ? new Date(iso) : new Date());
+const hhmmOk = (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(v || '');
+const minusMin = (hhmm, n) => { const [h, m] = hhmm.split(':').map(Number); const t = Math.max(0, h * 60 + m - n); return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
+// The job for the guest who checks out of flat `l` on `date`: where its clean shows (moved or not) and the next arrival.
+async function jobFor(env, ctx, l, date) {
+  const snap = await getSnapshot(env, ctx), cfg = config(env);
+  const stays = (snap.stays || []).filter((r) => r.listingId === l.id && cfg.statuses.includes(r.status));
+  const stay = stays.find((r) => r.checkOutDateLocalized === date);
+  if (!stay) return null;
+  const nxt = stays.filter((r) => r !== stay && r.checkInDateLocalized >= date).sort((a, b) => a.checkInDateLocalized.localeCompare(b.checkInDateLocalized))[0] || null;
+  const m = moveFor(jobMv.map, stay, snap.stays || [], cfg.statuses);
+  const moved = m && !m.void ? m.mv : null;
+  return {
+    date, code: stay.confirmationCode || '', checkIn: stay.checkInDateLocalized, outTime: stay.plannedDeparture || l.checkOutTime || null,
+    displayDay: moved ? moved.to : date, moved, window: { from: snap.from, to: snap.to },
+    nextIn: nxt ? { date: nxt.checkInDateLocalized, time: nxt.plannedArrival || l.checkInTime || null } : null,
+  };
+}
+// Check-outs at a flat around a day, to point someone at the right one.
+async function checkoutsNear(env, ctx, l, date) {
+  const snap = await getSnapshot(env, ctx), cfg = config(env);
+  return (snap.stays || []).filter((r) => r.listingId === l.id && cfg.statuses.includes(r.status) && r.checkOutDateLocalized >= addDays(date, -7) && r.checkOutDateLocalized <= addDays(date, 7))
+    .map((r) => r.checkOutDateLocalized).sort();
+}
+// The day a cleaning's job shows on, and whoever was assigned to it.
+const jobDay = (c) => (c.forDate ? ((jobMv.map[`${c.listingId}|${c.forDate}`] || {}).to || c.forDate) : c.date);
+const assignmentFor = (c, assigned) => assigned[`${jobDay(c)}|${c.listingId}`] || assigned[`${c.date}|${c.listingId}`] || null;
+// Guesty should only be told "clean" while the flat is still empty and waiting for its next guests.
+function flatWaiting(job) {
+  if (!job || job.displayDay > londonDate()) return false;
+  const n = job.nextIn;
+  if (!n) return true;
+  if (n.date > londonDate()) return true;
+  return n.date === londonDate() && (!n.time || londonHHMM() < n.time);
+}
+
 async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   const [, , , id, action] = parts; // /api/cleanings/:id/:action
   const list = await loadList(env, 'cleanings');
@@ -1412,9 +1511,11 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
       if (c.cleanerId === me.id) return true;
       if (!can(me, 'view_cleaning')) return false;
       return inScope(me, c.building);
-    }).filter((c) => (!from || c.date >= from) && (!to || c.date <= to));
+    });
+    const inR = (d) => Boolean(d) && (!from || d >= from) && (!to || d <= to);
+    const inRange = visible.filter((c) => inR(c.date) || inR(c.forDate)); // done that day, or counted for that day's check-out
     const out = [];
-    for (const c of [...new Set([...visible, ...mine])]) {
+    for (const c of [...new Set([...inRange, ...mine])]) {
       const x = await withMedia(env, c);
       if (c.keyMode === 'lockbox' && c.status !== 'completed' && c.status !== 'cancelled') { const l = await listingInfo(env, ctx, c.listingId); x.keyNoCode = Boolean(l && l.lockboxNoCode); x.keyInstruction = (l && l.keyInstruction) || ''; }
       out.push(x);
@@ -1432,7 +1533,20 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     const l = await listingInfo(env, ctx, String(body.listingId || ''));
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
     if (!inScope(me, l.building)) return deny('That property isn’t one of your buildings.');
-    const active = list.find((c) => c.listingId === l.id && ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key'].includes(c.status));
+    const active = list.find((c) => c.listingId === l.id && ACTIVE_ST.includes(c.status));
+    // Which guest's check-out this cleaning is for (the day picked on the schedule), so it counts there even when it's
+    // started after midnight or the day after.
+    let forDate = null;
+    if (body.forDate && realDate(String(body.forDate))) {
+      const job = await jobFor(env, ctx, l, String(body.forDate));
+      if (job && job.date > addDays(londonDate(), 1) && job.displayDay > addDays(londonDate(), 1)) return json({ error: `Those guests leave ${l.label} on ${dayLabel(job.date)}, so it can’t be cleaned for them yet.` }, 400);
+      if (job && job.nextIn && londonDate() > addDays(job.nextIn.date, 1)) return json({ error: `New guests have arrived at ${l.label} since that check-out (${dayLabel(job.nextIn.date)}). To record a clean done back then, use Mark as cleaned.` }, 400);
+      if (job) {
+        const counted = list.find((c) => c.listingId === l.id && c.status === 'completed' && c.forDate === job.date);
+        if (counted) return json({ error: `${l.label} is already cleaned for ${dayLabel(job.displayDay)} (${counted.manual ? 'marked by ' + counted.manual.byName : counted.cleanerName}). Reset that cleaning first if it needs doing again.` }, 409);
+        forDate = job.date;
+      }
+    }
     if (active) {
       const at = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', minute: '2-digit' }).format(new Date(active.startedAt));
       return json({ error: `${active.cleanerName} already started cleaning ${l.label} at ${at}.`, cleaning: active }, 409);
@@ -1440,18 +1554,95 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     const rec = {
       id: newId(), listingId: l.id, listingName: l.name, label: l.label, building: l.building, unitType: l.unitType,
       cleanerId: me.id, cleanerName: me.name, startedAt: nowIso(), endedAt: null, completedAt: null,
-      date: londonDate(), status: 'in_progress', checklist: [], media: [], guesty: null, keyMode: l.keyMode || null, key: null,
+      date: londonDate(), forDate, status: 'in_progress', checklist: [], media: [], guesty: null, keyMode: l.keyMode || null, key: null,
     };
     list.push(rec);
     await saveList(env, 'cleanings', list);
     return json({ cleaning: rec });
   }
 
+
+  // Which cleanings could be the one for a check-out (to count it there), and whether one already is.
+  if (req.method === 'GET' && id === 'candidates') {
+    const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
+    if (!l || !inScope(me, l.building) || !can(me, 'mark_cleaned')) return deny();
+    const forDate = String(url.searchParams.get('forDate') || '');
+    const job = realDate(forDate) ? await jobFor(env, ctx, l, forDate) : null;
+    if (!job) return json({ error: `There’s no check-out at ${l.label} on ${realDate(forDate) ? dayLabel(forDate) : 'that day'}.`, checkouts: await checkoutsNear(env, ctx, l, realDate(forDate) ? forDate : londonDate()) }, 404);
+    const sum = (c) => ({ id: c.id, cleanerName: c.cleanerName, date: c.date, forDate: c.forDate || null, startedAt: c.startedAt, endedAt: c.endedAt, manual: c.manual || null, videos: (c.media || []).length });
+    const done = list.filter((c) => c.listingId === l.id && c.status === 'completed');
+    const counted = done.find((c) => c.forDate === job.date) || null;
+    const since = [job.date, job.displayDay].sort()[0]; // the guests left on job.date; a clean moved earlier counts from then
+    const last = [londonDate(), addDays([job.date, job.displayDay].sort()[1], 3)].sort()[0];
+    const candidates = counted ? [] : done.filter((c) => (!c.forDate || c.forDate === job.date) && c.date >= addDays(since, -1) && c.date <= last).sort((a, b) => a.startedAt.localeCompare(b.startedAt)).map(sum);
+    const assigned = ((await env.STORE.get('assignments', 'json')) || {})[`${job.displayDay}|${l.id}`] || null;
+    return json({ job, counted: counted && sum(counted), candidates, assigned: assigned && { cleanerId: assigned.cleanerId, cleanerName: assigned.cleanerName }, guestyEligible: flatWaiting(job) && !config(env).mock });
+  }
+  // Record a cleaning that happened earlier (yesterday, say) without the video and checklist.
+  if (req.method === 'POST' && id === 'manual') {
+    const body = await req.json().catch(() => ({}));
+    const l = await listingInfo(env, ctx, String(body.listingId || ''));
+    if (!l) return json({ error: 'That property wasn’t found.' }, 404);
+    if (!inScope(me, l.building) || !can(me, 'mark_cleaned')) return deny();
+    const forDate = String(body.forDate || ''), date = String(body.date || '');
+    const job = realDate(forDate) ? await jobFor(env, ctx, l, forDate) : null;
+    if (!job) return json({ error: `There’s no check-out at ${l.label} on ${realDate(forDate) ? dayLabel(forDate) : 'that day'} to mark cleaned.` }, 400);
+    if (!realDate(date)) return json({ error: 'Pick the day it was cleaned.' }, 400);
+    if (date > londonDate()) return json({ error: 'That day hasn’t happened yet.' }, 400);
+    const since = [job.date, job.displayDay].sort()[0];
+    if (date < since) return json({ error: `That’s before the guests left (${dayLabel(job.date)}).` }, 400);
+    if (date < job.window.from) return json({ error: 'That’s too far back to record here.' }, 400);
+    if (job.nextIn && date > job.nextIn.date) return json({ error: `The next guests arrived on ${dayLabel(job.nextIn.date)}, so it must have been cleaned by then.` }, 400);
+    const start = body.start ? String(body.start) : '', end = body.end ? String(body.end) : '';
+    if ((start && !hhmmOk(start)) || (end && !hhmmOk(end))) return json({ error: 'Times look like 10:30.' }, 400);
+    if (start && end && end <= start) return json({ error: 'It has to finish after it started.' }, 400);
+    if (start && date === job.date && !job.moved && job.outTime && start < minusMin(job.outTime, 120)) return json({ error: `That’s before the guests left (check-out ${fmtTime(job.outTime)}).` }, 400);
+    if (start && job.nextIn && date === job.nextIn.date && job.nextIn.time && start >= job.nextIn.time) return json({ error: `That’s after the next guests arrived (${fmtTime(job.nextIn.time)}).` }, 400);
+    let startedAt = londonToIso(date, start || (date === job.date && job.outTime ? job.outTime : '12:00'));
+    if (!start && Date.parse(startedAt) > Date.now()) startedAt = nowIso(); // no time given for today: never a time still to come
+    const endedAt = end ? londonToIso(date, end) : startedAt;
+    if ((start && Date.parse(startedAt) > Date.now()) || (end && Date.parse(endedAt) > Date.now() + 60e3)) return json({ error: 'That time hasn’t happened yet.' }, 400);
+    let cleaner = null;
+    if (body.cleanerId) {
+      cleaner = (await loadUsers(env)).find((u) => u.id === String(body.cleanerId) && u.active !== false);
+      if (!cleaner || !coversBuilding(cleaner, l.building)) return json({ error: 'Pick someone who covers this building.' }, 400);
+    }
+    const busy = list.find((c) => c.listingId === l.id && ACTIVE_ST.includes(c.status));
+    if (busy) return json({ error: `${busy.cleanerName} is cleaning ${l.label} now. Finish or reset that first.` }, 409);
+    const counted = list.find((c) => c.listingId === l.id && c.status === 'completed' && c.forDate === job.date);
+    if (counted) return json({ error: `${l.label} is already cleaned for ${dayLabel(job.displayDay)} (${counted.manual ? 'marked by ' + counted.manual.byName : counted.cleanerName}). Reset that one first if it’s wrong.`, existingId: counted.id }, 409);
+    const rec = {
+      id: newId(), listingId: l.id, listingName: l.name, label: l.label, building: l.building, unitType: l.unitType,
+      cleanerId: cleaner ? cleaner.id : null, cleanerName: cleaner ? cleaner.name : 'Not recorded', date, forDate: job.date,
+      startedAt, endedAt, completedAt: nowIso(), completedBy: me.name, completedById: me.id, status: 'completed', checklist: [], media: [], key: null, keyMode: null,
+      guesty: null, manual: { byId: me.id, byName: me.name, at: nowIso(), note: String(body.note || '').trim().slice(0, 300) || null, timeKnown: Boolean(start), durationKnown: Boolean(start && end) },
+    };
+    const wantGuesty = body.guesty === true && flatWaiting(job);
+    if (!wantGuesty) rec.guesty = 'skipped';
+    list.push(rec);
+    await saveList(env, 'cleanings', list);
+    console.log(`[cleanings] ${me.name} marked ${l.label} cleaned on ${date} for the check-out of ${job.date}${cleaner ? ` (by ${cleaner.name})` : ''}`);
+    const link = `/?view=day&date=${job.displayDay}&flat=${encodeURIComponent(l.id)}`;
+    if (cleaner && cleaner.id !== me.id) await notify(env, ctx, [cleaner.id], { type: 'cleaned', title: `${me.name} recorded your clean of ${l.label}`, body: `${dayLabel(date)} · for the check-out on ${dayLabel(job.displayDay)}`, url: link, tag: `cleaned-${rec.id}` }).catch(() => {});
+    await notify(env, ctx, (await recipients(env, ['admin', 'user'], l.building, me.id)).filter((x) => x !== rec.cleanerId), { type: 'cleaned', title: `${l.label} marked cleaned`, body: `${rec.cleanerName} · ${dayLabel(date)} · marked by ${me.name}`, url: link, tag: `cleaned-${rec.id}` }).catch(() => {});
+    if (wantGuesty) ctx.waitUntil((async () => {
+      const still = async () => { const r2 = (await loadList(env, 'cleanings')).find((c) => c.id === rec.id); return Boolean(r2 && r2.status === 'completed'); };
+      const g = await syncGuesty(env, l.id, 'clean', still);
+      await withLock('cleanings', async () => { const l2 = await loadList(env, 'cleanings'); const r2 = l2.find((c) => c.id === rec.id); if (r2) { r2.guesty = g; await saveList(env, 'cleanings', l2); } });
+    })());
+    return json({ cleaning: rec });
+  }
+
   const rec = list.find((c) => c.id === id);
   if (!rec) return json({ error: 'That cleaning wasn’t found.' }, 404);
   const isMine = rec.cleanerId === me.id;
-  const isAdmin = can(me, 'manage_users') && inScope(me, rec.building);
+  const canReset = can(me, 'reset_cleanings') && inScope(me, rec.building);
   const stepIn = canStepIn(me, rec);
+  // Someone reset this cleaning while it was being done: say so instead of a confusing step error.
+  if (req.method === 'POST' && rec.status === 'cancelled' && ['end', 'confirm', 'checks-done', 'complete', 'key', 'no-video'].includes(action)) {
+    if (!isMine && !stepIn && !canReset) return deny();
+    return json({ error: rec.reset ? `${rec.reset.byName} reset this cleaning. Start again if the flat still needs cleaning.` : 'This cleaning was cancelled.', cleaning: rec }, 409);
+  }
 
   if (req.method === 'POST' && action === 'end') {
     if (!isMine) return deny('Only the person who started this cleaning can end it.');
@@ -1499,7 +1690,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
       type: 'cleaned', title: `${rec.label} cleaned`, body: `${rec.cleanerName} · ${rec.building} · ${mins} min`,
       url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch((e) => console.log('[notify] failed', e.message));
     ctx.waitUntil((async () => {
-      const g = await markCleanInGuesty(env, rec.listingId);
+      const still = async () => { const r2 = (await loadList(env, 'cleanings')).find((c) => c.id === rec.id); return Boolean(r2 && r2.status === 'completed'); };
+      const g = await syncGuesty(env, rec.listingId, 'clean', still);
       await withLock('cleanings', async () => {
         const l2 = await loadList(env, 'cleanings');
         const r2 = l2.find((c) => c.id === rec.id);
@@ -1529,6 +1721,45 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
       return json({ cleaning: await withMedia(env, rec) });
     }
     return finish();
+  }
+  if (req.method === 'POST' && action === 'no-video') {
+    // The cleaner's phone won't upload the walkthrough video: an Admin, User or supervisor can finish without it (recorded).
+    if (!stepIn) return deny('Only an Admin, User or supervisor can finish a cleaning without its video.');
+    if (isMine) return deny('Upload the video of your own cleaning, or ask another Admin, User or supervisor to finish it without one.');
+    if (rec.status !== 'awaiting_video') return json({ error: 'This cleaning isn’t waiting for its video.' }, 400);
+    const body = await req.json().catch(() => ({}));
+    rec.videoSkipped = { byId: me.id, byName: me.name, at: nowIso(), reason: String(body.reason || '').trim().slice(0, 300) || null };
+    console.log(`[cleanings] ${me.name} finished the video step without a video for ${rec.label} (cleaning ${rec.id} by ${rec.cleanerName})`);
+    if (rec.cleanerId && rec.cleanerId !== me.id) await notify(env, ctx, [rec.cleanerId], { type: 'cleaned', title: `${me.name} skipped the video for you · ${rec.label}`, body: rec.videoSkipped.reason || 'The video step was finished without a video.', url: `/?view=day&date=${jobDay(rec)}&flat=${encodeURIComponent(rec.listingId)}`, tag: `cleaned-${rec.id}` }).catch(() => {});
+    const l = await listingInfo(env, ctx, rec.listingId);
+    const mode = (l && l.keyMode) || null;
+    if (mode) {
+      rec.keyMode = mode;
+      rec.status = 'awaiting_key';
+      await saveList(env, 'cleanings', list);
+      return json({ cleaning: await withMedia(env, rec) });
+    }
+    return finish();
+  }
+  // Count a cleaning that's already in the log for a check-out (e.g. it was started after midnight).
+  if (req.method === 'POST' && action === 'for') {
+    if (!can(me, 'mark_cleaned') || !inScope(me, rec.building)) return deny();
+    if (rec.status !== 'completed') return json({ error: 'Only a finished cleaning can be counted for a check-out.' }, 400);
+    const body = await req.json().catch(() => ({}));
+    const l = (await listingInfo(env, ctx, rec.listingId)) || { id: rec.listingId, label: rec.label };
+    const job = realDate(String(body.forDate || '')) ? await jobFor(env, ctx, l, String(body.forDate)) : null;
+    if (!job) return json({ error: `There’s no check-out at ${rec.label} on that day.` }, 400);
+    if (rec.forDate === job.date) return json({ cleaning: rec });
+    const other = list.find((c) => c.id !== rec.id && c.listingId === rec.listingId && c.status === 'completed' && c.forDate === job.date);
+    if (other) return json({ error: `Already counted: ${other.manual ? 'marked by ' + other.manual.byName : other.cleanerName + '’s cleaning'} on ${dayLabel(other.date)}. Reset that one first.` }, 409);
+    if (rec.date < addDays([job.date, job.displayDay].sort()[0], -1)) return json({ error: `This cleaning was before the guests left (${dayLabel(job.date)}).` }, 400);
+    if (job.nextIn && rec.date > addDays(job.nextIn.date, 1)) return json({ error: `The next guests arrived on ${dayLabel(job.nextIn.date)}, so this cleaning can’t be for that check-out.` }, 400);
+    rec.forBy = { byId: me.id, byName: me.name, at: nowIso(), previous: rec.forDate || null };
+    rec.forDate = job.date;
+    await saveList(env, 'cleanings', list);
+    console.log(`[cleanings] ${me.name} counted ${rec.label} cleaning ${rec.id} (${rec.date}) for the check-out of ${job.date}`);
+    if (rec.cleanerId && rec.cleanerId !== me.id) await notify(env, ctx, [rec.cleanerId], { type: 'cleaned', title: `${me.name} counted your cleaning of ${rec.label}`, body: `For the check-out on ${dayLabel(job.displayDay)}`, url: `/?view=day&date=${job.displayDay}&flat=${encodeURIComponent(rec.listingId)}`, tag: `cleaned-${rec.id}` }).catch(() => {});
+    return json({ cleaning: await withMedia(env, rec) });
   }
   if (req.method === 'GET' && action === 'key-status') {
     // Live KeyNest status for the cleaner's "key back in KeyNest" screen.
@@ -1608,18 +1839,58 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     }
     return finish();
   }
-  if (req.method === 'POST' && action === 'cancel') {
-    if (!isMine && !isAdmin) return deny();
+  if (req.method === 'POST' && action === 'cancel' && isMine) {
+    // A cleaner backing out of their own cleaning (started by mistake).
     if (rec.status === 'completed') return json({ error: 'Completed cleanings can’t be cancelled.' }, 400);
+    if (rec.status === 'cancelled') return json({ cleaning: rec });
     rec.status = 'cancelled';
     rec.cancelledAt = nowIso();
     rec.cancelledBy = me.name;
     await saveList(env, 'cleanings', list);
     return json({ cleaning: rec });
   }
+  if (req.method === 'POST' && (action === 'reset' || action === 'cancel')) {
+    // Reset: the flat shows as not cleaned again. The record stays in the log, marked reset, with who, when and why.
+    if (!canReset) return deny(rec.status === 'completed' ? 'Only an Admin, User or supervisor can reset a finished cleaning.' : 'You don’t have permission to stop someone else’s cleaning.');
+    if (rec.status === 'cancelled') return json({ cleaning: rec });
+    const body = await req.json().catch(() => ({}));
+    const from = rec.status, now = nowIso();
+    let dirty = false;
+    if (from === 'completed' && body.guesty === true && ['updated', 'sent'].includes(rec.guesty)) {
+      const later = list.some((c) => c.id !== rec.id && c.listingId === rec.listingId && c.status === 'completed' && (c.completedAt || '') > (rec.completedAt || ''));
+      const l = await listingInfo(env, ctx, rec.listingId);
+      const job = l && rec.forDate ? await jobFor(env, ctx, l, rec.forDate) : null;
+      dirty = !later && Boolean(job) && flatWaiting(job);
+    }
+    rec.status = 'cancelled';
+    rec.cancelledAt = now; rec.cancelledBy = me.name; rec.cancelledById = me.id;
+    rec.reset = { at: now, byId: me.id, byName: me.name, reason: String(body.reason || '').trim().slice(0, 300) || null, from, guesty: from !== 'completed' ? null : dirty ? 'pending' : 'skipped' };
+    await saveList(env, 'cleanings', list);
+    console.log(`[cleanings] ${me.name} reset ${rec.label} (${from}) by ${rec.cleanerName} (cleaning ${rec.id})`);
+    const assigned = assignmentFor(rec, (await env.STORE.get('assignments', 'json')) || {});
+    const day = jobDay(rec), link = `/?view=day&date=${day}&flat=${encodeURIComponent(rec.listingId)}`, why = rec.reset.reason ? ` “${rec.reset.reason}”` : '';
+    const title = `${rec.label}: cleaning reset`;
+    const text = from === 'completed' ? `${me.name} reset the cleaning for ${dayLabel(day)}. It needs cleaning again.${why}` : `${me.name} stopped the cleaning (${({ in_progress: 'cleaning', checklist: 'final checks', awaiting_video: 'video', awaiting_key: 'key' })[from] || from}).${why}`;
+    await notify(env, ctx, [rec.cleanerId, assigned && assigned.cleanerId].filter((x) => x && x !== me.id), { type: 'reset', title, body: text, url: link, tag: `cleaned-${rec.id}` }).catch(() => {});
+    if (me.role === 'supervisor' && from === 'completed') await notify(env, ctx, await recipients(env, ['admin', 'user'], rec.building, me.id), { type: 'reset', title, body: text, url: link, tag: `cleaned-${rec.id}` }).catch(() => {});
+    if (dirty) ctx.waitUntil((async () => {
+      const still = async () => { const l2 = await loadList(env, 'cleanings'); const r2 = l2.find((c) => c.id === rec.id); return Boolean(r2 && r2.status === 'cancelled' && !l2.some((c) => c.listingId === rec.listingId && c.status === 'completed' && (c.completedAt || '') > now)); };
+      const g = await syncGuesty(env, rec.listingId, 'dirty', still);
+      await withLock('cleanings', async () => { const l2 = await loadList(env, 'cleanings'); const r2 = l2.find((c) => c.id === rec.id); if (r2 && r2.reset) { r2.reset.guesty = g; await saveList(env, 'cleanings', l2); } });
+    })());
+    return json({ cleaning: rec });
+  }
   if (req.method === 'GET') {
     if (!isMine && !(can(me, 'view_cleaning') && inScope(me, rec.building))) return deny();
-    return json({ cleaning: await withMedia(env, rec), keyMoves: await keyMovesFor(env, ctx, rec), checklist: CHECKLIST, holdMs: HOLD_MS });
+    let resetInfo;
+    if (canReset && rec.status === 'completed') {
+      const l = await listingInfo(env, ctx, rec.listingId);
+      const job = l && rec.forDate ? await jobFor(env, ctx, l, rec.forDate) : null;
+      const later = list.some((c) => c.id !== rec.id && c.listingId === rec.listingId && c.status === 'completed' && (c.completedAt || '') > (rec.completedAt || ''));
+      resetInfo = { linkedComplaints: (await loadList(env, 'complaints')).filter((x) => x.cleaning && x.cleaning.id === rec.id).length,
+        guestyEligible: ['updated', 'sent'].includes(rec.guesty) && !later && Boolean(job) && flatWaiting(job) };
+    }
+    return json({ cleaning: await withMedia(env, rec), keyMoves: await keyMovesFor(env, ctx, rec), checklist: CHECKLIST, holdMs: HOLD_MS, resetInfo });
   }
   return json({ error: 'Not supported' }, 405);
 }
@@ -1929,6 +2200,9 @@ const CP_SEVERITY = ['low', 'medium', 'high'];
 const CP_STATUS = ['open', 'investigating', 'resolved', 'dismissed'];
 async function cpCategories(env) { return (await env.STORE.get('complaintCategories', 'json')) || CP_DEFAULT_CATEGORIES; }
 // The stay a complaint on `date` belongs to, and the cleaning that got the flat ready for it.
+// What a complaint keeps about the cleaning it's tagged to (a snapshot, so patterns survive later changes).
+const cpCleaning = (assigned) => (c) => { const a = assignmentFor(c, assigned); return { id: c.id, date: c.date, forDate: c.forDate || null, cleanerId: c.cleanerId, cleanerName: c.cleanerName, startedAt: c.startedAt, endedAt: c.endedAt,
+  assignedId: a ? a.cleanerId : null, assignedName: a ? a.cleanerName : null, manual: c.manual ? { timeKnown: Boolean(c.manual.timeKnown), durationKnown: Boolean(c.manual.durationKnown), byName: c.manual.byName } : null }; };
 async function cpLookup(env, ctx, l, date) {
   const snap = await getSnapshot(env, ctx);
   const stays = (snap.stays || []).filter((r) => r.listingId === l.id && r.checkInDateLocalized <= date && r.checkOutDateLocalized >= addDays(date, -14))
@@ -1936,9 +2210,9 @@ async function cpLookup(env, ctx, l, date) {
     .map((r) => ({ code: r.confirmationCode || '', checkIn: r.checkInDateLocalized, checkOut: r.checkOutDateLocalized, guests: r.guestsCount || null }));
   const stay = stays.find((s) => s.checkIn <= date && s.checkOut >= date) || stays[0] || null;
   const assigned = (await env.STORE.get('assignments', 'json')) || {};
-  const cleanings = (await loadList(env, 'cleanings')).filter((c) => c.listingId === l.id && c.status === 'completed' && c.date <= (stay ? stay.checkIn : date))
-    .sort((a, b) => (b.endedAt || b.date).localeCompare(a.endedAt || a.date)).slice(0, 8)
-    .map((c) => { const a = assigned[`${c.date}|${c.listingId}`]; return { id: c.id, date: c.date, cleanerId: c.cleanerId, cleanerName: c.cleanerName, startedAt: c.startedAt, endedAt: c.endedAt, assignedId: a ? a.cleanerId : null, assignedName: a ? a.cleanerName : null }; });
+  const cleanings = (await loadList(env, 'cleanings')).filter((c) => c.listingId === l.id && c.status === 'completed' && (c.forDate || c.date) <= (stay ? stay.checkIn : date))
+    .sort((a, b) => (b.forDate || b.date).localeCompare(a.forDate || a.date) || (b.endedAt || b.date).localeCompare(a.endedAt || a.date)).slice(0, 8)
+    .map(cpCleaning(assigned));
   return { stays, stay, cleanings, suggestedCleaningId: cleanings[0] ? cleanings[0].id : null };
 }
 async function complaintsApi(req, env, ctx, me, parts, url) {
@@ -1974,8 +2248,7 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
         const found = (await cpLookup(env, ctx, l, addDays(c.date, 60))).cleanings; // any recent cleaning at this flat may be picked
         const all = (await loadList(env, 'cleanings')).find((x) => x.id === body.cleaningId && x.listingId === l.id && x.status === 'completed');
         if (!all) throw userError('That cleaning isn’t one of this flat’s finished cleanings.', 400);
-        const a = ((await env.STORE.get('assignments', 'json')) || {})[`${all.date}|${all.listingId}`];
-        c.cleaning = found.find((x) => x.id === all.id) || { id: all.id, date: all.date, cleanerId: all.cleanerId, cleanerName: all.cleanerName, startedAt: all.startedAt, endedAt: all.endedAt, assignedId: a ? a.cleanerId : null, assignedName: a ? a.cleanerName : null };
+        c.cleaning = found.find((x) => x.id === all.id) || cpCleaning((await env.STORE.get('assignments', 'json')) || {})(all);
       }
     }
     if (!c.title || c.title.length < 3) throw userError('Say in a few words what the guest complained about.', 400);
@@ -2082,6 +2355,77 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
   return json({ error: 'Not supported' }, 405);
 }
 
+
+// ---------------------------------------------------------------- moving a clean to another day
+async function jobMovesApi(req, env, ctx, me) {
+  if (!can(me, 'move_cleanings')) return json({ error: 'You don’t have permission to move cleanings. Ask an admin.' }, 403);
+  const body = await req.json().catch(() => ({}));
+  const l = await listingInfo(env, ctx, String(body.listingId || ''));
+  if (!l) return json({ error: 'That property wasn’t found.' }, 404);
+  if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
+  const from = String(body.from || ''), to = req.method === 'DELETE' ? from : String(body.to || '');
+  if (!realDate(from) || !realDate(to)) return json({ error: 'Pick a day.' }, 400);
+  const job = await jobFor(env, ctx, l, from);
+  const moves = (await env.STORE.get('jobMoves', 'json')) || {};
+  const key = `${l.id}|${from}`;
+  if (!job) {
+    // The booking changed in Guesty (a new check-out day, or cancelled): a move left behind can still be undone.
+    if (req.method === 'DELETE' && moves[key]) {
+      const assigned = (await env.STORE.get('assignments', 'json')) || {}, old = moves[key];
+      const a = assigned[`${old.to}|${l.id}`];
+      if (a && a.movedFrom) { delete assigned[`${old.to}|${l.id}`]; await env.STORE.put('assignments', JSON.stringify(assigned)); }
+      delete moves[key];
+      await env.STORE.put('jobMoves', JSON.stringify(moves)); await loadJobMoves(env, true);
+      if (a && a.movedFrom && a.cleanerId !== me.id) await notify(env, ctx, [a.cleanerId], { type: 'unassigned', title: `${l.label}: ${dayLabel(old.to)} cancelled`, body: `The booking changed, so the clean moved there no longer applies · ${me.name}`, url: `/?view=day&date=${old.to}`, tag: `move-${key}` }).catch(() => {});
+      return json({ ok: true, removed: true });
+    }
+    return json({ error: `There’s no check-out at ${l.label} on ${dayLabel(from)}.` }, 404);
+  }
+  const oldDay = job.displayDay, force = body.force === true;
+  if (to === oldDay) return json({ ok: true, unchanged: true, move: job.moved });
+  if (to !== from) {
+    const days = Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 864e5);
+    if (Math.abs(days) > 14 || to < job.window.from || to > job.window.to) return json({ error: 'Pick a day within 2 weeks of the check-out.' }, 400);
+    if (to <= job.checkIn) return json({ error: `Those guests only arrived on ${dayLabel(job.checkIn)}. Pick a day after that.` }, 400);
+    const snap = await getSnapshot(env, ctx), cfg = config(env);
+    const stays = (snap.stays || []).filter((r) => r.listingId === l.id && cfg.statuses.includes(r.status));
+    const applies = (k) => { const [, f] = k.split('|'); const r = stays.find((x) => x.checkOutDateLocalized === f); const m2 = r && moveFor(moves, r, snap.stays || [], cfg.statuses); return Boolean(m2 && !m2.void); };
+    if (stays.some((r) => r.checkOutDateLocalized === to && !applies(`${l.id}|${to}`)) || Object.entries(moves).some(([k, m]) => k !== key && m.listingId === l.id && m.to === to && applies(k))) {
+      return json({ error: `${l.label} already has a clean on ${dayLabel(to)}.` }, 409);
+    }
+    const warnings = [];
+    if (job.nextIn && to > job.nextIn.date) warnings.push(`The next guests arrive ${dayLabel(job.nextIn.date)}${job.nextIn.time ? ' at ' + fmtTime(job.nextIn.time) : ''}, before this day.`);
+    const counted = (await loadList(env, 'cleanings')).find((c) => c.listingId === l.id && c.status === 'completed' && c.forDate === from);
+    if (counted) warnings.push(`It’s already cleaned (${counted.manual ? 'marked by ' + counted.manual.byName : counted.cleanerName}).`);
+    if (warnings.length && !force) return json({ needsForce: true, error: warnings.join(' ') }, 409);
+  }
+  // Whoever is assigned moves with the clean.
+  const assigned = (await env.STORE.get('assignments', 'json')) || {};
+  const aOld = assigned[`${oldDay}|${l.id}`] || null;
+  let bumped = null;
+  if (aOld) {
+    delete assigned[`${oldDay}|${l.id}`];
+    const tk = `${to}|${l.id}`;
+    // Nothing else is cleaned there that day (checked above), so an assignment already on it is a leftover: replace it.
+    if (assigned[tk] && assigned[tk].cleanerId !== aOld.cleanerId) bumped = assigned[tk];
+    assigned[tk] = { ...aOld, date: to, movedFrom: oldDay, byId: me.id, byName: me.name, at: nowIso() };
+  }
+  const note = String(body.note || '').trim().slice(0, 300);
+  if (to === from) delete moves[key];
+  else moves[key] = { listingId: l.id, from, to, code: job.code, nextIn: job.nextIn ? job.nextIn.date : null, label: l.label, building: l.building, byId: me.id, byName: me.name, at: nowIso(), note, forced: force };
+  for (const [k, m] of Object.entries(moves)) if (m.from < addDays(londonDate(), -90)) delete moves[k];
+  await env.STORE.put('jobMoves', JSON.stringify(moves));
+  if (aOld) await env.STORE.put('assignments', JSON.stringify(assigned));
+  await loadJobMoves(env, true);
+  console.log(`[cleanings] ${me.name} moved the clean of ${l.label} (check-out ${from}) from ${oldDay} to ${to}`);
+  const link = `/?view=day&date=${to}&flat=${encodeURIComponent(l.id)}`;
+  const title = to === from ? `${l.label} moved back to ${dayLabel(to)}` : `${l.label} moved to ${dayLabel(to)}`;
+  const text = `Was ${dayLabel(oldDay)} · moved by ${me.name}${note ? ` — ${note}` : ''}`;
+  if (aOld) await notify(env, ctx, [aOld.cleanerId].filter((x) => x !== me.id), { type: 'moved', title, body: text, url: link, tag: `move-${key}` }).catch(() => {});
+  if (bumped) await notify(env, ctx, [bumped.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', title: `${l.label} on ${dayLabel(to)}`, body: `You’re no longer assigned: ${aOld.cleanerName} cleans it that day (moved from ${dayLabel(oldDay)} by ${me.name}).`, url: link, tag: `move-${key}` }).catch(() => {});
+  return json({ ok: true, move: moves[key] || null, to });
+}
+
 async function mediaAccess(env, ctx, me, body) {
   if (body.purpose === 'damage') return can(me, 'report_damage');
   if (body.purpose === 'maintenance') return true; // anyone can report an issue at a flat in their buildings (checked below)
@@ -2112,7 +2456,7 @@ async function handle(req, env, ctx) {
   const ip = req.headers.get('CF-Connecting-IP') || 'x';
 
   if (p === '/health') return json({ ok: true, mock: config(env).mock });
-  if (env.STORE) await loadPropOverrides(env);
+  if (env.STORE) { await loadPropOverrides(env); await loadJobMoves(env); }
 
   if (p.startsWith('/webhooks/keynest/') && req.method === 'POST') {
     if (!safeEqual(p.split('/')[3] || '', await webhookKeyFor(env, 'keynest'))) return new Response('unauthorised', { status: 401 });
@@ -2211,6 +2555,7 @@ async function handle(req, env, ctx) {
   if (p.startsWith('/api/push/')) return locked('pushSubs', () => pushApi(req, env, me, p.split('/')));
   if (p === '/api/assignments' || p === '/api/assignees') return locked('assignments', () => assignmentsApi(req, env, ctx, me, url));
   if (p === '/api/forum' || p.startsWith('/api/forum/')) return locked('forum', () => forumApi(req, env, ctx, me, p.split('/')));
+  if (p === '/api/job-moves' && (req.method === 'PUT' || req.method === 'DELETE')) return withLock('jobMoves', () => withLock('assignments', () => jobMovesApi(req, env, ctx, me)));
   if (p === '/api/complaints' || p.startsWith('/api/complaints/')) return locked('complaints', () => complaintsApi(req, env, ctx, me, p.split('/'), url));
   if (p === '/api/maintenance' || p.startsWith('/api/maintenance/')) return locked('maintenance', () => maintenanceApi(req, env, ctx, me, p.split('/'), url));
   // Internal checks used by server.mjs for uploads and playback (same-process only; not reachable from outside).
