@@ -1077,7 +1077,7 @@ function knTime(s, received) {
   const london = utc - londonOffsetMs(utc);
   return Math.abs(london - received) < Math.abs(utc - received) ? london : utc;
 }
-async function keynestRecord(env, b) {
+async function keynestRecord(env, ctx, b) {
   const now = Date.now();
   const event = String(b.EventName || '').toUpperCase().replace(/[^A-Z_]/g, '').slice(0, 30);
   await env.STORE.put('keynestHook', JSON.stringify({ at: new Date(now).toISOString(), event: event || null })); // shown in Settings
@@ -1093,6 +1093,7 @@ async function keynestRecord(env, b) {
     .sort((x, y) => x.at.localeCompare(y.at)).slice(-100);
   await env.STORE.put('keynestMoves', JSON.stringify(moves));
   console.log('[keynest]', event.toLowerCase(), s(b.KeyName) || id);
+  if (event === 'DROPPED' && ctx) ctx.waitUntil(finishOnKeyDrop(env, ctx, id, move).catch((e) => console.log('[keynest] auto-finish failed', e.message)));
 }
 // The KeyNest movements of this flat's key from 6 hours before the cleaning started to 3 hours after it finished.
 async function keyMovesFor(env, ctx, rec) {
@@ -1497,6 +1498,49 @@ function flatWaiting(job) {
   return n.date === londonDate() && (!n.time || londonHHMM() < n.time);
 }
 
+// A cleaning is done: save it, tell the managers (and the cleaner, when someone or something else finished it) and mark
+// the flat clean in Guesty in the background. `by` is whoever finished it for the cleaner ({ id, name, tell }), or null.
+// Call while holding the cleanings lock, with `list` freshly loaded.
+async function finishCleaning(env, ctx, list, rec, by) {
+  rec.completedAt = nowIso();
+  rec.status = 'completed';
+  if (by && by.id && rec.cleanerId !== by.id) { rec.completedBy = by.name; rec.completedById = by.id; }
+  await saveList(env, 'cleanings', list);
+  if (by && by.tell && rec.cleanerId) await notify(env, ctx, [rec.cleanerId].filter((x) => x !== by.id), { type: 'cleaned', title: by.tell.title, body: by.tell.body, url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch(() => {});
+  const mins = Math.max(1, Math.round((Date.parse(rec.endedAt || rec.completedAt) - Date.parse(rec.startedAt)) / 60000));
+  await notify(env, ctx, await recipients(env, ['admin', 'user'], rec.building, rec.cleanerId), {
+    type: 'cleaned', title: `${rec.label} cleaned`, body: `${rec.cleanerName} · ${rec.building} · ${mins} min${rec.key && rec.key.viaWebhook ? ' · key handed in at KeyNest' : ''}`,
+    url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch((e) => console.log('[notify] failed', e.message));
+  ctx.waitUntil((async () => {
+    const still = async () => { const r2 = (await loadList(env, 'cleanings')).find((c) => c.id === rec.id); return Boolean(r2 && r2.status === 'completed'); };
+    const g = await syncGuesty(env, rec.listingId, 'clean', still);
+    await withLock('cleanings', async () => {
+      const l2 = await loadList(env, 'cleanings');
+      const r2 = l2.find((c) => c.id === rec.id);
+      if (r2) { r2.guesty = g; await saveList(env, 'cleanings', l2); }
+    });
+  })());
+}
+// KeyNest says a key was handed in at a store: any cleaning of that key's flat waiting at the key step is done, without
+// anyone having to press anything or override. Runs after the webhook has been answered.
+async function finishOnKeyDrop(env, ctx, keyId, move) {
+  const waiting = (await loadList(env, 'cleanings')).filter((c) => c.status === 'awaiting_key' && c.keyMode === 'keynest' && Date.parse(c.startedAt) <= Date.parse(move.at) + 60e3);
+  if (!waiting.length) return;
+  const ids = [];
+  for (const c of waiting) { // which of them are for this key (looked up before taking the lock: KeyNest can be slow)
+    try { const l = await listingInfo(env, ctx, c.listingId); const link = l && await keynestLink(env, l); if (link && String(link.keyId) === String(keyId)) ids.push(c.id); } catch (_) { /* can't tell: leave it for the live check */ }
+  }
+  if (!ids.length) return;
+  await withLock('cleanings', async () => {
+    const list = await loadList(env, 'cleanings');
+    for (const rec of list.filter((c) => ids.includes(c.id) && c.status === 'awaiting_key')) {
+      rec.key = { mode: 'keynest', keyId, status: move.status || 'In Store', store: move.store || null, droppedBy: move.who || null, confirmedAt: move.at, viaWebhook: true };
+      console.log(`[keynest] ${rec.label}: key handed in${move.store ? ' at ' + move.store : ''}, so cleaning ${rec.id} by ${rec.cleanerName} is complete`);
+      await finishCleaning(env, ctx, list, rec, { id: 'keynest', name: 'KeyNest', tell: { title: `${rec.label} cleaning complete`, body: `KeyNest recorded the key handed in${move.store ? ' at ' + move.store : ''}. Thank you!` } });
+    }
+  });
+}
+
 async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   const [, , , id, action] = parts; // /api/cleanings/:id/:action
   const list = await loadList(env, 'cleanings');
@@ -1679,25 +1723,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   }
   // Final step: mark completed and tell Guesty the flat is clean (in the background).
   const finish = async () => {
-    rec.completedAt = nowIso();
-    rec.status = 'completed';
-    if (rec.cleanerId !== me.id) { rec.completedBy = me.name; rec.completedById = me.id; }
-    await saveList(env, 'cleanings', list);
-    if (rec.cleanerId !== me.id) await notify(env, ctx, [rec.cleanerId], { type: 'cleaned', title: `${me.name} finished your cleaning · ${rec.label}`,
-      body: rec.key && rec.key.overridden ? 'The KeyNest check was overridden.' : 'The key step was completed for you.', url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch(() => {});
-    const mins = Math.max(1, Math.round((Date.parse(rec.endedAt || rec.completedAt) - Date.parse(rec.startedAt)) / 60000));
-    await notify(env, ctx, await recipients(env, ['admin', 'user'], rec.building, rec.cleanerId), {
-      type: 'cleaned', title: `${rec.label} cleaned`, body: `${rec.cleanerName} · ${rec.building} · ${mins} min`,
-      url: `/?view=cleaning&date=${rec.date}`, tag: `cleaned-${rec.id}` }).catch((e) => console.log('[notify] failed', e.message));
-    ctx.waitUntil((async () => {
-      const still = async () => { const r2 = (await loadList(env, 'cleanings')).find((c) => c.id === rec.id); return Boolean(r2 && r2.status === 'completed'); };
-      const g = await syncGuesty(env, rec.listingId, 'clean', still);
-      await withLock('cleanings', async () => {
-        const l2 = await loadList(env, 'cleanings');
-        const r2 = l2.find((c) => c.id === rec.id);
-        if (r2) { r2.guesty = g; await saveList(env, 'cleanings', l2); }
-      });
-    })());
+    await finishCleaning(env, ctx, list, rec, rec.cleanerId !== me.id ? { id: me.id, name: me.name, tell: {
+      title: `${me.name} finished your cleaning · ${rec.label}`, body: rec.key && rec.key.overridden ? 'The KeyNest check was overridden.' : 'The key step was completed for you.' } } : null);
     return json({ cleaning: await withMedia(env, rec) });
   };
   if (req.method === 'POST' && action === 'complete') {
@@ -2658,7 +2685,7 @@ async function handle(req, env, ctx) {
 
   if (p.startsWith('/webhooks/keynest/') && req.method === 'POST') {
     if (!safeEqual(p.split('/')[3] || '', await webhookKeyFor(env, 'keynest'))) return new Response('unauthorised', { status: 401 });
-    await keynestRecord(env, await req.json().catch(() => ({})));
+    await keynestRecord(env, ctx, await req.json().catch(() => ({})));
     return new Response('ok');
   }
 
