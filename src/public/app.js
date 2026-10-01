@@ -2043,7 +2043,7 @@
   function keyNote(c) {
     if (!c.key) return '';
     if (c.key.mode === 'lockbox') return c.key.code && can('view_cleaning') ? ` · key in lockbox, new code <b>${esc(c.key.code)}</b>` : c.key.note ? ' · key returned' : ' · key back in the lockbox';
-    return c.key.overridden ? ` · KeyNest check overridden by ${esc(c.key.overriddenBy || '')}` : ' · key back in KeyNest';
+    return c.key.overridden ? ` · KeyNest check overridden by ${esc(c.key.overriddenBy || '')}` : c.key.viaWebhook ? ` · key handed in at ${esc(c.key.store || 'KeyNest')}` : ' · key back in KeyNest';
   }
   let keyPoll = null;
   function keyStep(a) {
@@ -2070,7 +2070,7 @@
     }
     return `<div class="evidence keystep">
       <div class="ev-head"><b>Last step: the key must be in KeyNest.</b> <span class="req">Required</span></div>
-      <p class="ev-note">If you collected the key from KeyNest, hand it back in at the store. As soon as KeyNest shows it in the store, you can complete the cleaning.</p>
+      <p class="ev-note">If you collected the key from KeyNest, hand it back in at the store. As soon as KeyNest records it there, this cleaning completes by itself: you don’t need to come back to the app.</p>
       <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span class="kn-body"><span id="kn-text">Checking KeyNest…</span><small id="kn-when"></small></span></div>
       <div class="kn-stores" id="kn-stores"></div>
       <button class="btn wide" id="kn-check">Check again</button>
@@ -2440,6 +2440,7 @@
       const key = !c.keyMode && !c.key ? '<p class="muted">No key step for this flat.</p>'
         : c.key && c.key.mode === 'lockbox' ? (c.key.code ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>` : `<p>${c.key.note ? `Key returned: ${esc(c.key.note)}` : 'Key back in the lockbox (no new code needed)'} · ${t(c.key.returnedAt)}</p>`)
         : c.key && c.key.mode === 'keynest' && c.key.overridden ? `<p class="warn">KeyNest check overridden by ${esc(c.key.overriddenBy || '')} · ${t(c.key.confirmedAt)}${c.key.note ? ` — “${esc(c.key.note)}”` : ''}</p>`
+        : c.key && c.key.mode === 'keynest' && c.key.viaWebhook ? `<p>Key handed in at ${esc(c.key.store || 'a KeyNest store')} ✓${c.key.droppedBy ? ` by ${esc(c.key.droppedBy)}` : ''} · ${t(c.key.confirmedAt)}<br><span class="muted">KeyNest told the app, so the cleaning finished by itself.</span></p>`
         : c.key && c.key.mode === 'keynest' ? `<p>Key in KeyNest ✓ (${esc(c.key.status || 'in store')}) · checked ${t(c.key.confirmedAt)}</p>`
         : `<p class="warn">Key not returned yet (${esc(c.keyMode === 'keynest' ? 'KeyNest' : 'lockbox')}).</p>`;
       // What KeyNest recorded for this flat's key around the cleaning (from its webhook): who collected it and when it came back.
