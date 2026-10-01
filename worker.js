@@ -2257,24 +2257,45 @@ const assistantAuthorised = (req, env) => {
   const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   return Boolean(env.ASSISTANT_API_KEY && safeEqual(key, env.ASSISTANT_API_KEY));
 };
-// The stay for a booking, and the cleaning that prepared it: the last finished cleaning on or before check-in. If that
-// cleaning is older than the previous guest's checkout, no cleaning was recorded for this turnover, so none is tagged.
+// The stay a complaint is about, and the cleaning that prepared it: the last finished cleaning on or before check-in.
+// Nothing is tagged (and `why` says so) when that can't be known for sure:
+//   - no cleaning was recorded for this turnover (the last one is older than the previous guest's checkout);
+//   - the previous stay isn't in the bookings list (a long stay, or an old complaint), so the gap can't be checked;
+//   - only the date is known and two stays touch it (one leaving, one arriving), so it could be either guest.
 async function cpStayForBooking(env, ctx, l, reservationId, hint, date) {
   const snap = await getSnapshot(env, ctx);
   const stays = (snap.stays || []).filter((r) => r.listingId === l.id);
+  const asStay = (r) => ({ code: r.confirmationCode || '', checkIn: r.checkInDateLocalized, checkOut: r.checkOutDateLocalized, guests: r.guestsCount || null });
+  let stay = null, id = null;
   const r = reservationId ? stays.find((x) => x._id === reservationId) : null;
-  let stay = r ? { code: r.confirmationCode || '', checkIn: r.checkInDateLocalized, checkOut: r.checkOutDateLocalized, guests: r.guestsCount || null } : null;
+  if (r) { stay = asStay(r); id = r._id; }
   if (!stay && hint && realDate(hint.checkIn)) stay = { code: String(hint.code || '').slice(0, 40), checkIn: hint.checkIn, checkOut: realDate(hint.checkOut) ? hint.checkOut : null, guests: Number(hint.guests) || null };
-  if (!stay) stay = (await cpLookup(env, ctx, l, date)).stay;
-  if (!stay) return { stay: null, cleaning: null, gap: false };
-  const previous = stays.filter((x) => x._id !== reservationId && x.checkOutDateLocalized <= stay.checkIn).sort((a, b) => b.checkOutDateLocalized.localeCompare(a.checkOutDateLocalized))[0];
+  // A booking that hadn't started when the guest complained isn't the stay they're complaining about.
+  if (stay && stay.checkIn > date) { stay = null; id = null; }
+  if (!stay) {
+    const touching = stays.filter((x) => x.checkInDateLocalized <= date && x.checkOutDateLocalized >= date);
+    if (touching.length > 1) {
+      const recent = touching.sort((a, b) => b.checkInDateLocalized.localeCompare(a.checkInDateLocalized))[0];
+      return { stay: asStay(recent), cleaning: null, why: 'Two stays touch that day (one guest leaving, one arriving), so no cleaning is tagged. Pick the right booking and cleaning when you edit it.' };
+    }
+    if (touching.length === 1) { stay = asStay(touching[0]); id = touching[0]._id; }
+  }
+  if (!stay) return { stay: null, cleaning: null, why: 'The booking isn’t known, so no cleaning is tagged.' };
+  const previous = stays.filter((x) => x._id !== id && x.checkOutDateLocalized <= stay.checkIn).sort((a, b) => b.checkOutDateLocalized.localeCompare(a.checkOutDateLocalized))[0];
   const assigned = (await env.STORE.get('assignments', 'json')) || {};
   const done = (await loadList(env, 'cleanings')).filter((c) => c.listingId === l.id && c.status === 'completed' && (c.forDate || c.date) <= stay.checkIn)
     .sort((a, b) => (b.forDate || b.date).localeCompare(a.forDate || a.date) || (b.endedAt || b.date).localeCompare(a.endedAt || a.date));
   const last = done[0] || null;
-  const gap = Boolean(last && previous && (last.forDate || last.date) < previous.checkOutDateLocalized);
-  return { stay, cleaning: last && !gap ? cpCleaning(assigned)(last) : null, gap, noCleaning: !last };
+  if (!last) return { stay, cleaning: null, why: 'No cleaning is recorded before this stay.', noCleaning: true };
+  // Every stay that checked out inside the bookings list's window is in it, so with no previous stay found the last
+  // guest left before the window: a cleaning inside the window came after them; an older one can't be checked.
+  if (!previous && (!snap.from || (last.forDate || last.date) < snap.from))
+    return { stay, cleaning: null, why: 'The guest before this stay isn’t in the bookings list (it was too long ago), so the cleaning can’t be checked and none is tagged.' };
+  if (previous && (last.forDate || last.date) < previous.checkOutDateLocalized)
+    return { stay, cleaning: null, why: 'No cleaning was recorded between the previous guest’s checkout and this check-in, so none is tagged.', noCleaning: true };
+  return { stay, cleaning: cpCleaning(assigned)(last), why: null };
 }
+const noOneRecorded = (cl) => !cl || (!cl.cleanerId && !cl.assignedId);
 async function assistantComplaintsApi(req, env, ctx, parts) {
   if (!assistantAuthorised(req, env)) return json({ error: 'unauthorised' }, 401);
   const [, , , , id, action] = parts; // /api/integrations/complaints/:id/:action
@@ -2287,9 +2308,9 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
   const log = (c, kind, txt) => { c.log = [...(c.log || []), { at: nowIso(), byId: ASSISTANT.id, byName: ASSISTANT.name, kind, text: txt }]; c.updatedAt = nowIso(); };
   const managers = async (c) => recipients(env, ['admin', 'user'], c.building, null);
   const cleanerIds = (c) => (c.cleaning ? [c.cleaning.cleanerId, c.cleaning.assignedId].filter(Boolean) : []);
-  const reply = (c, duplicate) => json({ complaint: { id: c.id, url: link(c), duplicate, status: c.status, severity: c.severity, categories: c.categories,
-    stay: c.stay, cleaning: c.cleaning ? { date: c.cleaning.date, cleanerName: c.cleaning.cleanerName, assignedName: c.cleaning.assignedName } : null,
-    cleanerTold: Boolean(c.cleanerTold), noCleaningRecorded: Boolean(c.noCleaningRecorded) } });
+  const reply = (c, duplicate, status = 200) => json({ complaint: { id: c.id, url: link(c), duplicate, status: c.status, severity: c.severity, categories: c.categories,
+    stay: c.stay, cleaning: c.cleaning ? { date: c.cleaning.date, cleanerName: c.cleaning.cleanerName, assignedName: c.cleaning.assignedName, noOneRecorded: noOneRecorded(c.cleaning) } : null,
+    aboutCleaning: c.aboutCleaning !== false, cleanerTold: Boolean(c.cleanerTold), noCleaningRecorded: Boolean(c.noCleaningRecorded), why: c.untaggedWhy || null } }, status);
   const tellCleaner = async (c) => {
     const who = cleanerIds(c);
     if (!who.length || c.cleanerTold) return;
@@ -2308,27 +2329,41 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
     const severity = CP_SEVERITY.includes(body.severity) ? body.severity : 'medium';
     const aboutCleaning = body.aboutCleaning === true;
     const details = text(body.details, 4000);
-    // The same guest complaining again about the same thing: added to the open complaint, not a new one.
-    const same = reservationId && list.find((c) => c.createdById === ASSISTANT.id && c.reservationId === reservationId && c.listingId === l.id && ['open', 'investigating'].includes(c.status)
-      && (normName(c.title) === normName(title) || (categories.length && (c.categories || []).some((x) => categories.includes(x)))));
+    const messageIds = [...new Set((Array.isArray(body.messageIds) ? body.messageIds : []).map((x) => text(x, 60)).filter(Boolean))].slice(0, 50);
+    const mine = list.filter((c) => c.createdById === ASSISTANT.id && c.listingId === l.id);
+    // The same guest message again (a follow-up drafted together with it): never logged twice, and a complaint the
+    // team said isn't one stays dismissed.
+    const sameMessage = messageIds.length && mine.find((c) => (c.messageIds || []).some((m) => messageIds.includes(m)));
+    if (sameMessage && !['open', 'investigating'].includes(sameMessage.status)) return reply(sameMessage, true);
+    // The same guest complaining again about the same thing while it's open: added to it, not logged again.
+    const overlaps = (c) => normName(c.title) === normName(title) || (categories.length && (c.categories || []).some((x) => categories.includes(x)));
+    const same = sameMessage || mine.find((c) => ['open', 'investigating'].includes(c.status) && overlaps(c)
+      && (reservationId ? c.reservationId === reservationId : !c.reservationId && Math.abs(Date.parse(c.date) - Date.parse(date)) <= 2 * 864e5));
     if (same) {
-      log(same, 'note', details || title);
-      same.categories = [...new Set([...(same.categories || []), ...categories])];
-      if (CP_SEVERITY.indexOf(severity) > CP_SEVERITY.indexOf(same.severity)) { log(same, 'event', `Severity raised to ${severity}`); same.severity = severity; }
-      if (aboutCleaning && !same.aboutCleaning) { same.aboutCleaning = true; await tellCleaner(same); }
-      await saveList(env, 'complaints', list);
+      const fresh = messageIds.filter((m) => !(same.messageIds || []).includes(m));
+      if (fresh.length || !messageIds.length) {
+        log(same, 'note', details || title);
+        same.messageIds = [...new Set([...(same.messageIds || []), ...messageIds])];
+        same.categories = [...new Set([...(same.categories || []), ...categories])];
+        if (CP_SEVERITY.indexOf(severity) > CP_SEVERITY.indexOf(same.severity)) { log(same, 'event', `Severity raised to ${severity}`); same.severity = severity; }
+        if (aboutCleaning && !same.aboutCleaning && same.cleaningIfAbout) { same.aboutCleaning = true; same.cleaning = same.cleaningIfAbout; same.cleaningIfAbout = null; await tellCleaner(same); }
+        await saveList(env, 'complaints', list);
+      }
       return reply(same, true);
     }
     const found = await cpStayForBooking(env, ctx, l, reservationId, body.stay, date);
+    // Only a complaint about the clean is put on the cleaning (so it shows as that cleaner's and counts in their
+    // patterns); otherwise the cleaning that prepared the stay is kept for reference only.
     const c = { id: newId(), listingId: l.id, label: l.label, building: l.building, unitType: l.unitType, date, title, details, source: 'guest_message', severity, categories, status: 'open', upheld: null, resolution: '', compensation: null,
-      stay: found.stay, cleaning: found.cleaning, media: [], createdAt: nowIso(), updatedAt: nowIso(), createdById: ASSISTANT.id, createdByName: ASSISTANT.name, resolvedAt: null, resolvedBy: null, log: [],
-      reservationId, aboutCleaning, cleanerTold: false, noCleaningRecorded: Boolean(found.gap || found.noCleaning), slackUrl: text(body.slackUrl, 300) || null };
+      stay: found.stay, cleaning: aboutCleaning ? found.cleaning : null, media: [], createdAt: nowIso(), updatedAt: nowIso(), createdById: ASSISTANT.id, createdByName: ASSISTANT.name, resolvedAt: null, resolvedBy: null, log: [],
+      reservationId, messageIds, aboutCleaning, cleaningIfAbout: aboutCleaning ? null : found.cleaning, cleanerTold: false, noCleaningRecorded: Boolean(found.noCleaning), untaggedWhy: found.why };
     log(c, 'event', 'Logged by the guest assistant from a guest message');
-    if (found.gap) log(c, 'event', 'No cleaning was recorded between the previous guest’s checkout and this check-in, so none is tagged.');
+    if (found.why) log(c, 'event', found.why);
+    if (!aboutCleaning && found.cleaning) log(c, 'event', `Not about the clean, so not tagged to it (the flat was prepared by the cleaning on ${found.cleaning.date} by ${found.cleaning.cleanerName || 'nobody recorded'}).`);
     list.push(c);
     if (aboutCleaning) await tellCleaner(c);
     await saveList(env, 'complaints', list);
-    const cleaningLine = c.cleaning ? `Tagged to the cleaning on ${c.cleaning.date} by ${c.cleaning.cleanerName}` : c.noCleaningRecorded ? 'No cleaning recorded before this stay' : 'No cleaning tagged';
+    const cleaningLine = c.cleaning ? `Tagged to the cleaning on ${c.cleaning.date} by ${c.cleaning.cleanerName || 'nobody recorded'}` : found.why || 'Not about the clean';
     await notify(env, ctx, await managers(c), { type: 'complaint', title: `${severity === 'high' ? 'Serious complaint' : 'Complaint'} from a guest · ${c.label}`, body: `${c.title}. ${cleaningLine}.`, url: link(c), tag: `cp-${c.id}` });
     console.log(`[complaints] guest assistant logged a complaint at ${c.label}${c.cleaning ? ` (cleaning by ${c.cleaning.cleanerName}${c.cleanerTold ? ', told' : ''})` : ''}`);
     return reply(c, false);
@@ -2338,7 +2373,9 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
   if (!c) return json({ error: 'That complaint isn’t available.' }, 404);
   if (action === 'dismiss' && req.method === 'POST') {
     if (c.createdById !== ASSISTANT.id) return json({ error: 'Only complaints the assistant logged can be dismissed from Slack.' }, 403);
-    if (!['open', 'investigating'].includes(c.status)) return reply(c, false);
+    if (c.status === 'dismissed') return reply(c, false);
+    // Already being handled or resolved in the app: left as it is.
+    if (!['open', 'investigating'].includes(c.status) || c.upheld === true) return reply(c, false, 409);
     const by = text(body.by, 80) || 'the team';
     c.status = 'dismissed';
     c.resolvedAt = nowIso();
@@ -2347,7 +2384,7 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
     log(c, 'event', `Dismissed from Slack by ${by}: not a complaint`);
     await saveList(env, 'complaints', list);
     // A cleaner who was told shouldn't be left worrying about it.
-    if (c.cleanerTold) await notify(env, ctx, cleanerIds(c), { type: 'complaint', title: `Complaint dismissed · ${c.label}`, body: `The complaint about the cleaning on ${c.cleaning.date} was a mistake and has been dismissed.`, url: link(c), tag: `cp-${c.id}` });
+    if (c.cleanerTold && cleanerIds(c).length) await notify(env, ctx, cleanerIds(c), { type: 'complaint', title: `Complaint dismissed · ${c.label}`, body: `The complaint${c.cleaning ? ` about the cleaning on ${c.cleaning.date}` : ''} was a mistake and has been dismissed.`, url: link(c), tag: `cp-${c.id}` });
     console.log(`[complaints] ${by} dismissed the assistant's complaint at ${c.label}`);
     return reply(c, false);
   }
@@ -2496,7 +2533,7 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
     if (!t) return json({ error: 'Write a note first.' }, 400);
     log(c, 'note', t);
     await save();
-    const to = [c.createdById, ...(tagged(c) ? [] : [c.cleaning && c.cleaning.cleanerId, c.cleaning && c.cleaning.assignedId])].filter((x) => x && x !== me.id);
+    const to = [c.createdById, ...(tagged(c) ? [] : [c.cleaning && c.cleaning.cleanerId, c.cleaning && c.cleaning.assignedId])].filter((x) => x && x !== me.id && x !== 'assistant');
     await notify(env, ctx, [...new Set(to)], { type: 'complaint', title: `${me.name} replied · complaint at ${c.label}`, body: t.slice(0, 140), url: link(c), tag: `cp-${c.id}` });
     return json({ complaint: shape(c) });
   }
