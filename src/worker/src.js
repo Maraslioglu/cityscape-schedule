@@ -2138,16 +2138,11 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
 // the task arrives open and unassigned, exactly like a cleaner's report, and Admins/Users of the building are told.
 // If the same guest reports the same thing again while it's still open, it's added as a note instead of a new task.
 // Off unless the ASSISTANT_API_KEY secret is set; the assistant sends it as "Authorization: Bearer <key>".
-// Two task titles about the same thing, however they're worded ("Floor reported as dangerous" and "Floor reported as
-// dangerous (details unknown)"): at least half their meaningful words in common.
-const TITLE_STOP = new Set(['the', 'and', 'has', 'have', 'with', 'without', 'for', 'from', 'that', 'this', 'not', 'but', 'are', 'was', 'were', 'been', 'into', 'onto', 'when', 'after', 'before', 'very', 'still', 'again', 'guest', 'guests', 'flat', 'apartment', 'reported', 'says', 'said']);
-const titleWords = (t) => new Set(String(t || '').toLowerCase().replace(/['’]/g, '').split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !TITLE_STOP.has(w)).map((w) => w.replace(/(ing|ed|es|s)$/, '')));
-function similarTitles(a, b) {
-  const A = titleWords(a), B = titleWords(b);
-  if (!A.size || !B.size) return normName(a) === normName(b);
-  const both = [...A].filter((w) => B.has(w)).length;
-  return both / (A.size + B.size - both) >= 0.5;
-}
+// Two task titles for the same thing: identical once a bracketed note at the end (the guest's name, "(details unknown)")
+// is ignored. Deliberately strict: rewording is matched by the guest assistant itself, which sees the open tasks; a
+// loose match here would merge different problems ("Kitchen tap leaking" / "Kitchen ceiling leaking").
+const coreTitle = (t) => normName(String(t || '').replace(/\s*\([^()]*\)\s*$/, ''));
+const similarTitles = (a, b) => { const x = coreTitle(a), y = coreTitle(b); return x.length >= 3 && x === y; };
 const MT_OPEN = (t) => !['done', 'cancelled'].includes(t.status);
 // The open tasks at a flat, so the guest assistant can tell a problem that's already reported from a new one.
 async function assistantOpenTasks(req, env, ctx, url) {
@@ -2182,21 +2177,26 @@ async function assistantMaintenanceApi(req, env, ctx) {
   const sameKind = (t) => (t.kind === 'guest_request') === guestRequest;
   // Already reported: the open task the assistant said it is, or (as a safety net) an open task at this flat for
   // the same booking, or reported by the assistant in the last fortnight, with a title about the same thing.
-  const named = body.existingTaskId && tasks.find((t) => t.id === String(body.existingTaskId) && t.listingId === l.id && MT_OPEN(t));
-  const recent = (t) => Date.now() - Date.parse(t.createdAt) < 14 * 864e5;
-  const same = named || tasks.find((t) => t.listingId === l.id && MT_OPEN(t) && sameKind(t) && similarTitles(t.title, title)
-    && ((reservationId && t.reservationId === reservationId) || (t.reporterId === bot.id && recent(t))));
+  // Already reported: the open task the assistant said it is (same kind), or, as a safety net for an automatic report,
+  // an open task for the same booking with the same title. Never across bookings or guests, and never for a task a
+  // team member asked for in Slack (they asked for a new one).
+  const named = body.existingTaskId && tasks.find((t) => t.id === String(body.existingTaskId) && t.listingId === l.id && MT_OPEN(t) && sameKind(t));
+  const same = named || (!fromSlack && reservationId && tasks.find((t) => t.listingId === l.id && MT_OPEN(t) && sameKind(t) && t.reservationId === reservationId && similarTitles(t.title, title)));
   if (same) {
-    // The same guest message is only noted once, however many drafts mention it.
-    const fresh = messageIds.filter((m) => !(same.messageIds || []).includes(m));
-    if (fresh.length || !messageIds.length) {
-      same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: text(body.details, 2000) || 'The guest mentioned this again.' }];
+    // Each problem from a guest message is noted once, however many drafts mention it (two different problems from
+    // the same message are each noted).
+    const keys = (messageIds.length ? messageIds : ['']).map((m) => `${m}|${normName(title)}`);
+    const fresh = keys.filter((k) => !(same.notedKeys || []).includes(k));
+    const noted = Boolean(fresh.length || !messageIds.length);
+    if (noted) {
+      same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'note', text: (normName(title) !== normName(same.title) ? `${title}: ` : '') + (text(body.details, 2000) || 'The guest mentioned this again.') }];
       same.messageIds = [...new Set([...(same.messageIds || []), ...messageIds])];
+      same.notedKeys = [...new Set([...(same.notedKeys || []), ...keys])].slice(-200);
     }
-    const priority = MT_PRIORITY.includes(body.priority) ? body.priority : null;
-    if (priority && MT_PRIORITY.indexOf(priority) < MT_PRIORITY.indexOf(same.priority)) {
-      same.log.push({ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `Priority raised to ${priority} (the guest mentioned it again)` });
-      same.priority = priority;
+    // Only raised to urgent: a manager's own triage (e.g. "fix after checkout") isn't undone by a routine mention.
+    if (body.priority === 'urgent' && same.priority !== 'urgent') {
+      same.log.push({ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: 'Priority raised to urgent (the guest reported it as urgent)' });
+      same.priority = 'urgent';
     }
     // The guest changed the day: the task moves to it.
     const dueChanged = Boolean(due && due !== same.due);
@@ -2207,7 +2207,7 @@ async function assistantMaintenanceApi(req, env, ctx) {
     same.log = same.log.slice(-200);
     same.updatedAt = nowIso();
     await saveList(env, 'maintenance', tasks.slice(-2000));
-    return json({ task: { id: same.id, url: link(same), title: same.title, duplicate: true, due: same.due, dueChanged } });
+    return json({ task: { id: same.id, url: link(same), title: same.title, duplicate: true, noted, due: same.due, dueChanged } });
   }
   const t = {
     id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
