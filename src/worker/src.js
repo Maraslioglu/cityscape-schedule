@@ -244,6 +244,7 @@ function cleanUserInput(body, existing) {
   if (out.name !== undefined && !out.name) return { error: 'Add the person’s name.' };
   if (out.username !== undefined && (!USERNAME_RE.test(out.username) || out.username === 'owner')) return { error: 'Usernames use 2–32 lowercase letters, numbers, dots, dashes or underscores (and can’t be “owner”).' };
   if (out.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)) return { error: 'That email address doesn’t look right.' };
+  if (Array.isArray(out.buildings) && !out.buildings.length && 'buildings' in body) return { error: 'Pick at least one building, or All buildings.' };
   return { out };
 }
 // Supervisors manage only the people they add themselves — as supervisors or cleaners, within their own buildings,
@@ -311,9 +312,12 @@ async function usersApi(req, env, ctx, me, id) {
   const u = users.find((x) => x.id === id);
   if (!u) return json({ error: limited && all.some((x) => x.id === id) ? 'You can only manage people you added.' : 'That person no longer exists.' }, limited && all.some((x) => x.id === id) ? 403 : 404);
   if (limited && !withinReach(me, u)) return json({ error: `${u.name} has buildings or access you don’t. Ask an admin to change their account.` }, 403);
+  // Their phones stop getting notifications too.
+  const dropPush = (uid) => withLock('pushSubs', async () => { const subs = (await env.STORE.get('pushSubs', 'json')) || {}; if (subs[uid]) { delete subs[uid]; await env.STORE.put('pushSubs', JSON.stringify(subs)); } });
   if (req.method === 'DELETE') {
     if (u.id === me.id) return json({ error: 'You can’t delete your own account.' }, 400);
     await saveUsers(env, all.filter((x) => x.id !== id));
+    await dropPush(u.id);
     return json({ ok: true });
   }
   if (req.method === 'PUT') {
@@ -332,6 +336,7 @@ async function usersApi(req, env, ctx, me, id) {
     Object.assign(u, out, { updatedAt: new Date().toISOString() });
     if (signOut) u.epoch = (u.epoch || 1) + 1;
     await saveUsers(env, all);
+    if (signOut) await dropPush(u.id);
     return json({ user: publicUser(u) });
   }
   return json({ error: 'Not supported' }, 405);
@@ -468,8 +473,13 @@ function slimStay(r) {
 }
 
 let refreshing = null; // one refresh at a time per instance; bursts of Guesty events share it
+let refreshQueued = null;
 function refreshSnapshot(env, why = 'refresh') {
-  if (!refreshing) refreshing = doRefresh(env, why).finally(() => { refreshing = null; });
+  if (refreshing) { // something changed while a refresh was already fetching: run one more pass after it
+    if (!refreshQueued) refreshQueued = refreshing.catch(() => {}).then(() => { refreshQueued = null; return refreshSnapshot(env, why); });
+    return refreshQueued;
+  }
+  refreshing = doRefresh(env, why).finally(() => { refreshing = null; });
   return refreshing;
 }
 async function doRefresh(env, why) {
@@ -1131,7 +1141,7 @@ async function keynestAdminApi(req, env, ctx, me, parts) {
     const base = (env.PUBLIC_URL || '').replace(/\/$/, '');
     const snap = await getSnapshot(env, ctx);
     const flats = [...listingMap(snap.listings, config(env), allowBuildingFor(me)).values()].filter((l) => l.keyMode === 'keynest');
-    const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null,
+    const out = { connected: Boolean(env.KEYNEST_API_KEY), webhookUrl: base && !allowBuildingFor(me) ? `${base}/webhooks/keynest/${await webhookKeyFor(env, 'keynest')}` : null,
       lastHook: await env.STORE.get('keynestHook', 'json'), keys: [], flats: [], error: null };
     if (out.connected) { try { out.keys = await keynestKeys(env, true); } catch (e) { out.error = e.userMessage || e.message; } }
     for (const l of flats) {
@@ -1178,7 +1188,8 @@ async function notify(env, ctx, to, n) {
     const list = (await env.STORE.get('notifications', 'json')) || [];
     const cutoff = Date.now() - 60 * 864e5;
     const items = to.map((id) => ({ id: newId(), to: id, type: n.type, title: n.title, body: n.body || '', url: n.url || '/', at, read: false }));
-    const kept = list.filter((x) => Date.parse(x.at) > cutoff).concat(items).slice(-2000);
+    const per = new Map();
+    const kept = list.filter((x) => Date.parse(x.at) > cutoff).concat(items).reverse().filter((x) => { const n = (per.get(x.to) || 0) + 1; per.set(x.to, n); return n <= 200; }).reverse();
     await env.STORE.put('notifications', JSON.stringify(kept));
   });
   ctx.waitUntil(pushTo(env, to, { title: n.title, body: n.body || '', url: n.url || '/', tag: n.tag || n.type }).catch((e) => console.log('[push] failed', e.message)));
@@ -1385,6 +1396,18 @@ async function pushApi(req, env, me, parts) {
 // One cleaner per flat per day: { "date|listingId": { listingId, date, building, label, cleanerId, cleanerName, byId, byName, at } }.
 const dayLabel = (d) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(d + 'T00:00:00Z'));
 const ASSIGNABLE = ['cleaner', 'supervisor']; // Admins and Users run the operation; they aren't given cleanings
+// Does flat `l` have a clean on `date`: a check-out that day (not moved away), or a clean moved to that day?
+// Days outside the loaded bookings can't be checked, so they're allowed.
+async function hasCleanOn(env, ctx, l, date) {
+  const snap = await getSnapshot(env, ctx), cfg = config(env);
+  if (date < snap.from || date > snap.to) return true;
+  const all = snap.stays || [];
+  return all.some((r) => {
+    if (r.listingId !== l.id || !cfg.statuses.includes(r.status)) return false;
+    const m = moveFor(jobMv.map, r, all, cfg.statuses), moved = m && !m.void;
+    return moved ? m.mv.to === date : r.checkOutDateLocalized === date;
+  });
+}
 async function assignmentsApi(req, env, ctx, me, url) {
   const all = (await env.STORE.get('assignments', 'json')) || {};
   if (req.method === 'GET' && url.pathname === '/api/assignees') {
@@ -1416,6 +1439,7 @@ async function assignmentsApi(req, env, ctx, me, url) {
       if (!ASSIGNABLE.includes(cleaner.role)) return json({ error: 'Only cleaners and supervisors can be assigned a cleaning.' }, 400);
       if (!coversBuilding(cleaner, l.building)) return json({ error: `${cleaner.name} doesn’t cover ${l.building}. Add the building to their account first.` }, 400);
     }
+    if (cleaner && !(await hasCleanOn(env, ctx, l, date))) return json({ error: `There’s nothing to clean at ${l.label} on ${dayLabel(date)}.` }, 400);
     if (before && cleaner && before.cleanerId === cleaner.id) return json({ assignment: before });
     if (cleaner) all[key] = { listingId: l.id, date, building: l.building, label: l.label, cleanerId: cleaner.id, cleanerName: cleaner.name, byId: me.id, byName: me.name, at: nowIso() };
     else delete all[key];
@@ -1441,10 +1465,10 @@ async function keyPrecheck(req, env, ctx, parts) {
   const [, , , id, action] = parts;
   if (req.method !== 'POST' || action !== 'key' || !env.KEYNEST_API_KEY) return null;
   const body = await req.json().catch(() => ({}));
-  if (body.override === true) return null;
   const rec = (await loadList(env, 'cleanings')).find((c) => c.id === id);
   if (!rec || rec.keyMode !== 'keynest' || rec.status !== 'awaiting_key') return null;
   const l = await listingInfo(env, ctx, rec.listingId);
+  if (body.override === true) { try { return { override: true, link: l && await keynestLink(env, l) }; } catch (_) { return { override: true, link: null }; } } // just which key, for the record
   let link = null;
   try { link = l && await keynestLink(env, l); } catch (e) { return { error: e.userMessage || 'KeyNest isn’t answering right now. Try again in a minute.' }; }
   if (!link) return { link: null };
@@ -1521,6 +1545,12 @@ async function finishCleaning(env, ctx, list, rec, by) {
     });
   })());
 }
+// The key's latest hand-in at a store since this cleaning started, if it hasn't been collected again since.
+async function droppedSince(env, keyId, rec) {
+  const moves = (((await env.STORE.get('keynestMoves', 'json')) || {})[keyId] || []).filter((m) => Date.parse(m.at) >= Date.parse(rec.startedAt) - 60e3);
+  const last = moves[moves.length - 1];
+  return last && last.event === 'DROPPED' ? last : null;
+}
 // KeyNest says a key was handed in at a store: any cleaning of that key's flat waiting at the key step is done, without
 // anyone having to press anything or override. Runs after the webhook has been answered.
 async function finishOnKeyDrop(env, ctx, keyId, move) {
@@ -1531,10 +1561,14 @@ async function finishOnKeyDrop(env, ctx, keyId, move) {
     try { const l = await listingInfo(env, ctx, c.listingId); const link = l && await keynestLink(env, l); if (link && String(link.keyId) === String(keyId)) ids.push(c.id); } catch (_) { /* can't tell: leave it for the live check */ }
   }
   if (!ids.length) return;
+  // Trust KeyNest, not just the message: the key must show in a store now.
+  let chk = null;
+  try { chk = await keynestCheck(env, keyId); } catch (_) { return; } // KeyNest not answering: the cleaner's live check still works
+  if (!chk || !chk.ok) return;
   await withLock('cleanings', async () => {
     const list = await loadList(env, 'cleanings');
     for (const rec of list.filter((c) => ids.includes(c.id) && c.status === 'awaiting_key')) {
-      rec.key = { mode: 'keynest', keyId, status: move.status || 'In Store', store: move.store || null, droppedBy: move.who || null, confirmedAt: move.at, viaWebhook: true };
+      rec.key = { mode: 'keynest', keyId, status: chk.status || move.status || 'In Store', store: move.store || null, droppedBy: move.who || null, confirmedAt: move.at, viaWebhook: true };
       console.log(`[keynest] ${rec.label}: key handed in${move.store ? ' at ' + move.store : ''}, so cleaning ${rec.id} by ${rec.cleanerName} is complete`);
       await finishCleaning(env, ctx, list, rec, { id: 'keynest', name: 'KeyNest', tell: { title: `${rec.label} cleaning complete`, body: `KeyNest recorded the key handed in${move.store ? ' at ' + move.store : ''}. Thank you!` } });
     }
@@ -1548,8 +1582,9 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
 
   if (req.method === 'GET' && !id) {
     const date = url.searchParams.get('date');
-    const from = url.searchParams.get('from') || date;
-    const to = url.searchParams.get('to') || date;
+    const bare = !date && !url.searchParams.get('from') && !url.searchParams.get('to');
+    const from = url.searchParams.get('from') || date || (bare ? addDays(londonDate(), -14) : null);
+    const to = url.searchParams.get('to') || date || (bare ? addDays(londonDate(), 1) : null);
     const mine = list.filter((c) => c.cleanerId === me.id && c.status !== 'completed' && c.status !== 'cancelled');
     const visible = list.filter((c) => {
       if (c.cleanerId === me.id) return true;
@@ -1591,6 +1626,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
         forDate = job.date;
       }
     }
+    const busy = list.find((c) => c.cleanerId === me.id && c.listingId !== l.id && ['in_progress', 'checklist'].includes(c.status));
+    if (busy) return json({ error: `You’re still cleaning ${busy.label}. End that cleaning (or cancel it) first.` }, 409);
     if (active) {
       const at = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', minute: '2-digit' }).format(new Date(active.startedAt));
       return json({ error: `${active.cleanerName} already started cleaning ${l.label} at ${at}.`, cleaning: active }, 409);
@@ -1721,9 +1758,22 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     await saveList(env, 'cleanings', list);
     return json({ cleaning: rec });
   }
+  // KeyNest flats: if the key was already handed in at a store (KeyNest told us) before the video went up, finish now.
+  const keyAlreadyBack = async (l, mode) => {
+    if (mode !== 'keynest' || !l) return null;
+    // Only saved data here (we hold the cleanings lock): the flat's linked key, or a name match in the cached key list.
+    const linked = ((await env.STORE.get('keynestLinks', 'json')) || {})[l.id];
+    const want = new Set([normName(l.name), normName(l.label + l.building)]);
+    const named = !linked && knCache && knCache.keys ? knCache.keys.filter((k) => want.has(normName(k.name))) : [];
+    const link = linked ? { keyId: linked } : named.length === 1 ? { keyId: named[0].id } : null;
+    const move = link && await droppedSince(env, link.keyId, rec);
+    if (!move) return null;
+    rec.key = { mode: 'keynest', keyId: link.keyId, status: move.status || 'In Store', store: move.store || null, droppedBy: move.who || null, confirmedAt: move.at, viaWebhook: true };
+    return finish();
+  };
   // Final step: mark completed and tell Guesty the flat is clean (in the background).
-  const finish = async () => {
-    await finishCleaning(env, ctx, list, rec, rec.cleanerId !== me.id ? { id: me.id, name: me.name, tell: {
+  const finish = async (tell) => {
+    await finishCleaning(env, ctx, list, rec, rec.cleanerId !== me.id ? { id: me.id, name: me.name, tell: tell || {
       title: `${me.name} finished your cleaning · ${rec.label}`, body: rec.key && rec.key.overridden ? 'The KeyNest check was overridden.' : 'The key step was completed for you.' } } : null);
     return json({ cleaning: await withMedia(env, rec) });
   };
@@ -1745,28 +1795,33 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
       rec.keyMode = mode;
       rec.status = 'awaiting_key';
       await saveList(env, 'cleanings', list);
+      const done = await keyAlreadyBack(l, mode);
+      if (done) return done;
       return json({ cleaning: await withMedia(env, rec) });
     }
     return finish();
   }
   if (req.method === 'POST' && action === 'no-video') {
     // The cleaner's phone won't upload the walkthrough video: an Admin, User or supervisor can finish without it (recorded).
-    if (!stepIn) return deny('Only an Admin, User or supervisor can finish a cleaning without its video.');
+    if (!stepIn) return deny(can(me, 'step_in') ? 'That flat isn’t in your buildings.' : 'Only an Admin, User or supervisor can finish a cleaning without its video.');
     if (isMine) return deny('Upload the video of your own cleaning, or ask another Admin, User or supervisor to finish it without one.');
     if (rec.status !== 'awaiting_video') return json({ error: 'This cleaning isn’t waiting for its video.' }, 400);
     const body = await req.json().catch(() => ({}));
     rec.videoSkipped = { byId: me.id, byName: me.name, at: nowIso(), reason: String(body.reason || '').trim().slice(0, 300) || null };
     console.log(`[cleanings] ${me.name} finished the video step without a video for ${rec.label} (cleaning ${rec.id} by ${rec.cleanerName})`);
-    if (rec.cleanerId && rec.cleanerId !== me.id) await notify(env, ctx, [rec.cleanerId], { type: 'cleaned', title: `${me.name} skipped the video for you · ${rec.label}`, body: rec.videoSkipped.reason || 'The video step was finished without a video.', url: `/?view=day&date=${jobDay(rec)}&flat=${encodeURIComponent(rec.listingId)}`, tag: `cleaned-${rec.id}` }).catch(() => {});
+    const skipped = rec.videoSkipped.reason ? `Video skipped: ${rec.videoSkipped.reason}` : 'The video step was finished without a video.';
     const l = await listingInfo(env, ctx, rec.listingId);
     const mode = (l && l.keyMode) || null;
     if (mode) {
+      if (rec.cleanerId && rec.cleanerId !== me.id) await notify(env, ctx, [rec.cleanerId], { type: 'cleaned', title: `${me.name} skipped the video for you · ${rec.label}`, body: `${skipped} The key still needs returning.`, url: `/?view=day&date=${jobDay(rec)}&flat=${encodeURIComponent(rec.listingId)}`, tag: `cleaned-${rec.id}` }).catch(() => {});
       rec.keyMode = mode;
       rec.status = 'awaiting_key';
       await saveList(env, 'cleanings', list);
+      const done = await keyAlreadyBack(l, mode);
+      if (done) return done;
       return json({ cleaning: await withMedia(env, rec) });
     }
-    return finish();
+    return finish({ title: `${me.name} skipped the video for you · ${rec.label}`, body: `${skipped} The cleaning is complete.` });
   }
   // Count a cleaning that's already in the log for a check-out (e.g. it was started after midnight).
   if (req.method === 'POST' && action === 'for') {
@@ -1837,8 +1892,9 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
       if (!/^\d{4}$/.test(code)) return json({ error: 'Enter the new lockbox code: exactly 4 numbers.' }, 400);
       if (body.confirmCode !== undefined && String(body.confirmCode).trim() !== code) return json({ error: 'The two codes don’t match. Check the lockbox and enter it again.' }, 400);
       if (body.keyReturned !== true) return json({ error: 'Confirm the key is back in the lockbox.' }, 400);
-      rec.key = { mode: 'lockbox', code, returnedAt: nowIso() };
       const codes = (await env.STORE.get('lockboxCodes', 'json')) || {};
+      if (codes[rec.listingId] && codes[rec.listingId].code === code) return json({ error: 'That’s the old code. Set a new 4-digit code on the lockbox, then enter it here.' }, 400);
+      rec.key = { mode: 'lockbox', code, returnedAt: nowIso() };
       codes[rec.listingId] = { code, at: rec.key.returnedAt, by: me.name, cleaningId: rec.id };
       await env.STORE.put('lockboxCodes', JSON.stringify(codes));
       return finish();
@@ -1846,8 +1902,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     if (rec.keyMode === 'keynest' && body.override === true) {
       // Finishing without KeyNest confirming the key is back: Admin, User or supervisor only, and recorded.
       if (!stepIn) return json({ error: 'You don’t have permission to override the KeyNest check.' }, 403);
-      const l = await listingInfo(env, ctx, rec.listingId);
-      let keyId = null; try { keyId = l ? ((await keynestLink(env, l)) || {}).keyId || null : null; } catch (_) { /* KeyNest down: that's often why */ }
+      const keyId = (pre && pre.link && pre.link.keyId) || null; // looked up before the lock (KeyNest may be down: that's often why)
       rec.key = { mode: 'keynest', keyId, status: 'not checked', overridden: true, overriddenBy: me.name, overriddenById: me.id, confirmedAt: nowIso(),
         note: String(body.note || '').trim().slice(0, 300) || null };
       console.log(`[keynest] ${me.name} overrode the KeyNest check for ${rec.label} (cleaning ${rec.id} by ${rec.cleanerName})`);
@@ -1878,7 +1933,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   }
   if (req.method === 'POST' && (action === 'reset' || action === 'cancel')) {
     // Reset: the flat shows as not cleaned again. The record stays in the log, marked reset, with who, when and why.
-    if (!canReset) return deny(rec.status === 'completed' ? 'Only an Admin, User or supervisor can reset a finished cleaning.' : 'You don’t have permission to stop someone else’s cleaning.');
+    if (!canReset) return deny(can(me, 'reset_cleanings') ? 'That flat isn’t in your buildings.' : rec.status === 'completed' ? 'Only an Admin, User or supervisor can reset a finished cleaning.' : 'You don’t have permission to stop someone else’s cleaning.');
     if (rec.status === 'cancelled') return json({ cleaning: rec });
     const body = await req.json().catch(() => ({}));
     const from = rec.status, now = nowIso();
@@ -1998,10 +2053,17 @@ function addInterval(date, r) {
   return new Date(Date.UTC(y, m, Math.min(day, last))).toISOString().slice(0, 10);
 }
 const realDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '') && new Date(v + 'T00:00:00Z').toISOString().slice(0, 10) === v;
+// Keep the maintenance list bounded by dropping only the oldest finished tasks: open, waiting and repeating ones stay.
+function capMaintenance(tasks, max = 2000) {
+  if (tasks.length <= max) return tasks;
+  const done = tasks.filter((t) => ['done', 'cancelled'].includes(t.status)).sort((a, b) => String(a.doneAt || a.updatedAt || a.createdAt).localeCompare(String(b.doneAt || b.updatedAt || b.createdAt)));
+  const drop = new Set(done.slice(0, tasks.length - max).map((t) => t.id));
+  return tasks.filter((t) => !drop.has(t.id));
+}
 async function maintenanceApi(req, env, ctx, me, parts, url) {
   const [, , , id, action] = parts; // /api/maintenance/:id/:action
   const tasks = await loadList(env, 'maintenance');
-  const save = () => saveList(env, 'maintenance', tasks.slice(-2000));
+  const save = () => saveList(env, 'maintenance', capMaintenance(tasks));
   const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await req.json().catch(() => ({}));
   const mm = can(me, 'manage_maintenance'); // Admins and Users by default
   const manage = (t) => mm && inScope(me, t.building);
@@ -2065,6 +2127,7 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
   }
   if (!id && req.method === 'POST') {
     if (!mm && !can(me, 'report_maintenance')) return json({ error: 'You don’t have permission to report maintenance. Ask an admin.' }, 403);
+    if (!mm && tasks.filter((t) => t.reporterId === me.id && Date.now() - Date.parse(t.createdAt) < 3600e3).length >= 30) return json({ error: 'You’ve reported a lot of issues in the last hour. Try again later, or ask an admin.' }, 429);
     const l = await listingInfo(env, ctx, String(body.listingId || ''));
     if (!l) return json({ error: 'Pick the flat.' }, 400);
     if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
@@ -2132,7 +2195,7 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
         createdAt: nowIso(), updatedAt: nowIso(), reporterId: me.id, reporterName: me.name, log: [], damageId: null };
       log(next, `Repeats every ${t.repeat.every} ${t.repeat.every === 1 ? t.repeat.unit.replace(/s$/, '') : t.repeat.unit}: created when the last one was done`);
       tasks.push(next);
-      log(t, `Next one due ${next.due}`);
+      log(t, `Next one due ${dayLabel(next.due)}${next.due.slice(0, 4) !== londonDate().slice(0, 4) ? ' ' + next.due.slice(0, 4) : ''}`);
     }
     await save();
     if (s === 'done') {
@@ -2232,7 +2295,7 @@ async function assistantMaintenanceApi(req, env, ctx) {
     }
     same.log = same.log.slice(-200);
     same.updatedAt = nowIso();
-    await saveList(env, 'maintenance', tasks.slice(-2000));
+    await saveList(env, 'maintenance', capMaintenance(tasks));
     return json({ task: { id: same.id, url: link(same), title: same.title, duplicate: true, noted, due: same.due, dueChanged } });
   }
   const t = {
@@ -2245,7 +2308,7 @@ async function assistantMaintenanceApi(req, env, ctx) {
   };
   t.seriesId = t.id;
   tasks.push(t);
-  await saveList(env, 'maintenance', tasks.slice(-2000));
+  await saveList(env, 'maintenance', capMaintenance(tasks));
   const urgent = t.priority === 'urgent' ? 'Urgent: ' : '';
   const heading = guestRequest ? `Guest request · ${t.label}` : `${urgent}Maintenance reported · ${t.label}`;
   await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: heading, body: `${t.title} — ${origin}`, url: link(t), tag: `mt-${t.id}` });
@@ -2324,7 +2387,7 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
     const who = cleanerIds(c);
     if (!who.length || c.cleanerTold) return;
     c.cleanerTold = true;
-    await notify(env, ctx, [...new Set(who)], { type: 'complaint', title: `Complaint detected · ${c.label}`, body: `${c.categories.length ? c.categories.join(', ') + ' — ' : ''}${c.title}. About the cleaning on ${c.cleaning.date}.`, url: link(c), tag: `cp-${c.id}` });
+    await notify(env, ctx, [...new Set(who)], { type: 'complaint', title: `Complaint detected · ${c.label}`, body: `${c.categories.length ? c.categories.join(', ') + ' — ' : ''}${c.title}. About the cleaning on ${dayLabel(c.cleaning.forDate || c.cleaning.date)}.`, url: link(c), tag: `cp-${c.id}` });
   };
 
   if (!id && req.method === 'POST') {
@@ -2458,13 +2521,13 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
     if (body.categories !== undefined) c.categories = [...new Set((Array.isArray(body.categories) ? body.categories : []).map((x) => text(x, 40)).filter((x) => cats.includes(x)))];
     if (body.status !== undefined && CP_STATUS.includes(body.status) && body.status !== c.status) {
       c.status = body.status;
-      if (['resolved', 'dismissed'].includes(c.status)) { c.resolvedAt = nowIso(); c.resolvedBy = me.name; } else { c.resolvedAt = null; c.resolvedBy = null; }
+      if (['resolved', 'dismissed'].includes(c.status)) { c.resolvedAt = nowIso(); c.resolvedBy = me.name; } else { if (c.resolution) log(c, 'event', `Previous resolution: ${c.resolution}`); c.resolvedAt = null; c.resolvedBy = null; c.resolution = ''; }
     }
     if (body.upheld !== undefined) c.upheld = body.upheld === true ? true : body.upheld === false ? false : null;
     if (body.resolution !== undefined) c.resolution = text(body.resolution, 2000);
     if (body.compensation !== undefined) { const n = body.compensation === '' || body.compensation === null ? null : Math.round(Number(body.compensation) * 100) / 100; if (n !== null && !(n >= 0 && n < 100000)) throw userError('Compensation is an amount in pounds, like 25 or 40.50.', 400); c.compensation = n; }
     if (body.stay !== undefined) c.stay = body.stay && typeof body.stay === 'object' ? { code: text(body.stay.code, 40), checkIn: realDate(body.stay.checkIn) ? body.stay.checkIn : null, checkOut: realDate(body.stay.checkOut) ? body.stay.checkOut : null, guests: Number(body.stay.guests) || null } : null;
-    if (body.cleaningId !== undefined) {
+    if (body.cleaningId !== undefined && (body.cleaningId || null) !== (c.cleaning ? c.cleaning.id : null)) {
       // A cleaning chosen here replaces the one the guest assistant noted for reference (only if it changed: the
       // form sends the cleaning on every save).
       if ((body.cleaningId || null) !== (c.cleaning ? c.cleaning.id : null)) c.cleaningIfAbout = null;
@@ -2482,7 +2545,7 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
     if (!c.cleaning) return;
     const who = [c.cleaning.cleanerId, c.cleaning.assignedId].filter((x) => x && x !== me.id && !(before && [before.cleanerId, before.assignedId].includes(x)));
     if (!who.length) return;
-    await notify(env, ctx, [...new Set(who)], { type: 'complaint', title: `Complaint detected · ${c.label}`, body: `${c.categories.length ? c.categories.join(', ') + ' — ' : ''}${c.title}. About the cleaning on ${c.cleaning.date}.`, url: link(c), tag: `cp-${c.id}` });
+    await notify(env, ctx, [...new Set(who)], { type: 'complaint', title: `Complaint detected · ${c.label}`, body: `${c.categories.length ? c.categories.join(', ') + ' — ' : ''}${c.title}. About the cleaning on ${dayLabel(c.cleaning.forDate || c.cleaning.date)}.`, url: link(c), tag: `cp-${c.id}` });
   };
   // Cleaners see their side only: no compensation amounts.
   const shape = (c) => (manage(c) || can(me, 'view_complaints') ? { ...c, canManage: manage(c) } : { ...c, compensation: null, canManage: false });
@@ -2498,7 +2561,7 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
   if (id === 'categories') {
     if (req.method === 'GET') return json({ categories: cats });
     if (req.method !== 'PUT') return json({ error: 'Not supported' }, 405);
-    if (!can(me, 'manage_complaints')) return json({ error: 'You don’t have permission to change complaint categories.' }, 403);
+    if (!can(me, 'manage_complaints') || allowBuildingFor(me)) return json({ error: 'Only someone who covers every building can change the complaint categories.' }, 403);
     const next = [...new Set((Array.isArray(body.categories) ? body.categories : []).map((x) => text(x, 40)).filter(Boolean))].slice(0, 60);
     if (!next.length) return json({ error: 'Keep at least one category.' }, 400);
     await env.STORE.put('complaintCategories', JSON.stringify(next));
@@ -2507,7 +2570,7 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
   }
   if (id === 'export.csv' && req.method === 'GET') {
     if (!can(me, 'view_complaints')) return json({ error: 'You don’t have permission for that.' }, 403);
-    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const q = (v) => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; }; // no formulas from guest text
     const head = ['Date', 'Flat', 'Building', 'Categories', 'Severity', 'Source', 'What happened', 'Status', 'Upheld', 'Compensation (£)', 'Booking', 'Check-in', 'Cleaning date', 'Cleaned by', 'Assigned to', 'Resolution', 'Logged by', 'Logged at'];
     const rows = list.filter(canSee).sort((a, b) => b.date.localeCompare(a.date)).map((c) => [c.date, c.label, c.building, (c.categories || []).join('; '), c.severity, CP_SOURCES[c.source] || c.source, c.title + (c.details ? ' — ' + c.details : ''), c.status,
       c.upheld === true ? 'Yes' : c.upheld === false ? 'No' : '', c.compensation ?? '', c.stay ? c.stay.code : '', c.stay ? c.stay.checkIn : '', c.cleaning ? c.cleaning.date : '', c.cleaning ? c.cleaning.cleanerName : '', c.cleaning ? c.cleaning.assignedName || '' : '', c.resolution || '', c.createdByName, c.createdAt]);
@@ -2546,7 +2609,12 @@ async function complaintsApi(req, env, ctx, me, parts, url) {
   if (!c || !canSee(c)) return json({ error: 'That complaint isn’t available.' }, 404);
   if (req.method === 'GET' && !action) {
     const full = shape(await withMedia(env, c));
-    if (c.cleaning) { const rec = (await loadList(env, 'cleanings')).find((x) => x.id === c.cleaning.id); full.cleaningRecord = rec ? await withMedia(env, rec) : null; }
+    if (c.cleaning) {
+      const rec = (await loadList(env, 'cleanings')).find((x) => x.id === c.cleaning.id);
+      const fullOk = rec && (rec.cleanerId === me.id || (can(me, 'view_cleaning') && inScope(me, rec.building)));
+      full.cleaningRecord = !rec ? null : fullOk ? await withMedia(env, rec)
+        : { id: rec.id, status: rec.status, manual: rec.manual || null, checklist: rec.checklist || [], completedBy: rec.completedBy || null, reset: rec.reset ? { byName: rec.reset.byName } : null, key: rec.key ? { mode: rec.key.mode, overridden: Boolean(rec.key.overridden), viaWebhook: Boolean(rec.key.viaWebhook) } : null, media: [] };
+    }
     full.tasks = (await loadList(env, 'maintenance')).filter((t) => t.complaintId === c.id).map((t) => ({ id: t.id, title: t.title, status: t.status }));
     return json({ complaint: full, sources: CP_SOURCES });
   }
@@ -2607,10 +2675,13 @@ async function jobMovesApi(req, env, ctx, me) {
     return json({ error: `There’s no check-out at ${l.label} on ${dayLabel(from)}.` }, 404);
   }
   const oldDay = job.displayDay, force = body.force === true;
-  if (to === oldDay) return json({ ok: true, unchanged: true, move: job.moved });
+  const stored = moves[key] || null, voided = Boolean(stored && !job.moved); // a move a Guesty change cancelled: still stored
+  if (to === oldDay && !voided) return json({ ok: true, unchanged: true, move: job.moved });
   if (to !== from) {
     const days = Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 864e5);
-    if (Math.abs(days) > 14 || to < job.window.from || to > job.window.to) return json({ error: 'Pick a day within 2 weeks of the check-out.' }, 400);
+    if (to < from) return json({ error: `The guests leave on ${dayLabel(from)}, so the clean can only move later.` }, 400);
+    if (to < londonDate()) return json({ error: 'Pick today or a later day.' }, 400);
+    if (days > 14 || to < job.window.from || to > job.window.to) return json({ error: 'Pick a day within 2 weeks of the check-out.' }, 400);
     if (to <= job.checkIn) return json({ error: `Those guests only arrived on ${dayLabel(job.checkIn)}. Pick a day after that.` }, 400);
     const snap = await getSnapshot(env, ctx), cfg = config(env);
     const stays = (snap.stays || []).filter((r) => r.listingId === l.id && cfg.statuses.includes(r.status));
@@ -2626,14 +2697,18 @@ async function jobMovesApi(req, env, ctx, me) {
   }
   // Whoever is assigned moves with the clean.
   const assigned = (await env.STORE.get('assignments', 'json')) || {};
-  const aOld = assigned[`${oldDay}|${l.id}`] || null;
+  let fromKey = `${oldDay}|${l.id}`, aOld = assigned[fromKey] || null;
+  // After a cancelled move the assignment may still sit on the day the clean had been moved to.
+  if (!aOld && stored && assigned[`${stored.to}|${l.id}`] && assigned[`${stored.to}|${l.id}`].movedFrom) { fromKey = `${stored.to}|${l.id}`; aOld = assigned[fromKey]; }
   let bumped = null;
   if (aOld) {
-    delete assigned[`${oldDay}|${l.id}`];
+    delete assigned[fromKey];
     const tk = `${to}|${l.id}`;
-    // Nothing else is cleaned there that day (checked above), so an assignment already on it is a leftover: replace it.
-    if (assigned[tk] && assigned[tk].cleanerId !== aOld.cleanerId) bumped = assigned[tk];
-    assigned[tk] = { ...aOld, date: to, movedFrom: oldDay, byId: me.id, byName: me.name, at: nowIso() };
+    if (assigned[tk] && assigned[tk].cleanerId !== aOld.cleanerId) {
+      if (voided && to === from) bumped = aOld; // someone was assigned to the real day since: they keep it
+      else bumped = assigned[tk]; // nothing else is cleaned there that day (checked above), so it's a leftover: replace it
+    }
+    if (bumped !== aOld) assigned[tk] = { ...aOld, date: to, movedFrom: to === from ? null : oldDay, byId: me.id, byName: me.name, at: nowIso() };
   }
   const note = String(body.note || '').trim().slice(0, 300);
   if (to === from) delete moves[key];
@@ -2646,8 +2721,8 @@ async function jobMovesApi(req, env, ctx, me) {
   const link = `/?view=day&date=${to}&flat=${encodeURIComponent(l.id)}`;
   const title = to === from ? `${l.label} moved back to ${dayLabel(to)}` : `${l.label} moved to ${dayLabel(to)}`;
   const text = `Was ${dayLabel(oldDay)} · moved by ${me.name}${note ? ` — ${note}` : ''}`;
-  if (aOld) await notify(env, ctx, [aOld.cleanerId].filter((x) => x !== me.id), { type: 'moved', title, body: text, url: link, tag: `move-${key}` }).catch(() => {});
-  if (bumped) await notify(env, ctx, [bumped.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', title: `${l.label} on ${dayLabel(to)}`, body: `You’re no longer assigned: ${aOld.cleanerName} cleans it that day (moved from ${dayLabel(oldDay)} by ${me.name}).`, url: link, tag: `move-${key}` }).catch(() => {});
+  if (aOld && bumped !== aOld) await notify(env, ctx, [aOld.cleanerId].filter((x) => x !== me.id), { type: 'moved', title, body: text, url: link, tag: `move-${key}` }).catch(() => {});
+  if (bumped) { const keeper = assigned[`${to}|${l.id}`]; await notify(env, ctx, [bumped.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', title: `${l.label} on ${dayLabel(to)}`, body: `You’re no longer assigned: ${keeper ? keeper.cleanerName : 'someone else'} cleans it that day (${me.name}).`, url: link, tag: `move-${key}` }).catch(() => {}); }
   return json({ ok: true, move: moves[key] || null, to });
 }
 
@@ -2712,9 +2787,11 @@ async function handle(req, env, ctx) {
 
   if (p === '/login' && req.method === 'POST') {
     const form = await req.formData().catch(() => null);
-    const username = String((form && form.get('username')) || '').trim().toLowerCase();
+    const username = String((form && form.get('username')) || '').trim().toLowerCase().slice(0, 64);
     const tkey = ip + '|' + username, akey = 'acct|' + username;
-    if (throttled(tkey) || throttled(ip) || throttled(akey, 20)) return redirect('/login?e=locked');
+    // The account-wide limit only stops addresses that have already failed on that account, so strangers guessing
+    // can't lock the real person out.
+    if (throttled(tkey) || throttled(ip) || (throttled(akey, 20) && attempts.has(tkey))) return redirect('/login?e=locked');
     const user = await login(env, username, (form && form.get('password')) || '');
     if (!user) { recordFail(tkey); recordFail(ip); recordFail(akey); console.log(`[login] failed for "${username.slice(0, 40)}"`); return redirect('/login?e=1&u=' + encodeURIComponent(username)); }
     return redirect('/', { 'Set-Cookie': `cs_session=${await makeSession(env, user)}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}` });
@@ -2741,15 +2818,20 @@ async function handle(req, env, ctx) {
   if (p === '/api/me/password' && req.method === 'POST') {
     if (me.isOwner) return json({ error: 'The owner login uses the APP_PASSWORD variable in Railway. Change it there.' }, 400);
     const body = await req.json().catch(() => ({}));
-    const users = await loadUsers(env, true);
-    const u = users.find((x) => x.id === me.id);
-    if (!(await checkPassword(String(body.current || ''), u.pw))) return json({ error: 'Your current password isn’t right.' }, 400);
+    const u = (await loadUsers(env, true)).find((x) => x.id === me.id);
+    if (!u || !(await checkPassword(String(body.current || ''), u.pw))) return json({ error: 'Your current password isn’t right.' }, 400);
     const problem = passwordProblem(body.password);
     if (problem) return json({ error: problem }, 400);
-    u.pw = await hashPassword(body.password);
-    u.epoch = (u.epoch || 1) + 1;
-    await saveUsers(env, users);
-    return json({ ok: true }, 200, { 'Set-Cookie': `cs_session=${await makeSession(env, u)}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}` });
+    const checkedSalt = u.pw && u.pw.salt, pw = await hashPassword(body.password); // slow: done before taking the lock
+    return withLock('users', async () => { // save on the latest list, so an admin's change made meanwhile isn't lost
+      const fresh = await loadUsers(env, true), x = fresh.find((y) => y.id === me.id);
+      if (!x || x.active === false) return json({ error: 'Not signed in' }, 401);
+      if (!x.pw || x.pw.salt !== checkedSalt) return json({ error: 'Your password was changed just now. Sign in again.' }, 409);
+      x.pw = pw;
+      x.epoch = (x.epoch || 1) + 1;
+      await saveUsers(env, fresh);
+      return json({ ok: true }, 200, { 'Set-Cookie': `cs_session=${await makeSession(env, x)}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}` });
+    });
   }
   if (p === '/api/week') {
     if (!can(me, 'view_day') && !can(me, 'view_board')) return deny();

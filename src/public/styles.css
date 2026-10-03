@@ -102,7 +102,7 @@ body.is-loading #week-area .summary, body.is-loading #view-day, body.is-loading 
 .linen-row .total .v { font-size: 28px; color: var(--accent); }
 
 /* ---------- day strip ---------- */
-.strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; margin-bottom: 14px; }
+.strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
 .dbtn { position: relative; border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 9px 6px 10px; text-align: center; box-shadow: var(--shadow); }
 .dbtn .dn { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); }
 .dbtn .dd { font-size: 22px; font-weight: 720; letter-spacing: -.02em; line-height: 1.15; }
@@ -395,7 +395,7 @@ body.noscroll { overflow: hidden; }
 .up-bar { grid-column: 1 / -1; height: 4px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
 .up-bar i { display: block; height: 100%; background: var(--accent); transform-origin: left; transition: transform .2s; }
 .up.ok .up-bar i { background: var(--in); }
-.dmg-form label { display: block; font-size: 13.5px; font-weight: 650; margin: 12px 0 6px; }
+.dmg-form label:not(.btn) { display: block; font-size: 13.5px; font-weight: 650; margin: 12px 0 6px; }
 .dmg-form textarea, .dmg-form input[type=text] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); font: inherit; color: var(--ink); }
 .dmg-form .btn.big { margin-top: 6px; }
 .confirm-del { background: var(--out-soft); color: var(--ink); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; font-size: 14px; }
@@ -405,8 +405,8 @@ body.noscroll { overflow: hidden; }
 .active-bar b { font-variant-numeric: tabular-nums; }
 .ab-dot { width: 9px; height: 9px; border-radius: 50%; background: #f5b83d; animation: pulse 1.4s infinite; flex: none; }
 body:has(.active-bar:not(.hidden)) main { padding-bottom: 80px; }
-.cl-overlay { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 20px; animation: fade .15s; }
-.cl-card { width: 100%; max-width: 460px; text-align: center; display: flex; flex-direction: column; align-items: center; }
+.cl-overlay { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; align-items: flex-start; justify-content: center; padding: 20px; overflow-y: auto; overscroll-behavior: contain; animation: fade .15s; }
+.cl-card { width: 100%; max-width: 460px; text-align: center; display: flex; flex-direction: column; align-items: center; margin: auto 0; } /* centred, but scrolls on short screens */
 .cl-top { width: 100%; display: flex; justify-content: space-between; align-items: center; margin-bottom: 26px; }
 .cl-count { font-weight: 700; color: var(--ink-3); font-size: 13.5px; }
 .cl-dots { display: flex; gap: 6px; }
@@ -850,7 +850,7 @@ main > section:not(#week-area) > .weekbar { margin-top: 0; }
 .row.tap:focus-visible { outline-offset: -2px; }
 .r-flat { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .r-l { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.row .u { font: 600 15.5px var(--font); color: var(--ink); min-width: 0; }
+.row .u { font: 600 15.5px var(--font); color: var(--ink); min-width: 0; white-space: nowrap; flex: none; } /* never 'FL-' / '2' */
 .row .t { font-size: 12px; color: var(--ink-3); }
 .r-key { width: 15px; height: 15px; color: var(--ink-3); flex: none; }
 .new { background: var(--new-soft); color: var(--new); font: 600 9.5px var(--font); letter-spacing: .12em; padding: 3px 6px; border-radius: 6px; }
@@ -944,6 +944,7 @@ td.unit .u { font-weight: 600; }
 .sh-head h2 { margin: 0; font: 500 38px/1.05 var(--font-head); color: var(--ink); letter-spacing: -.015em; }
 .sh-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex: none; }
 .sh-head .btn { margin-left: 0; }
+.sh-head > .btn:last-child { margin-left: auto; } /* a lone close/back button sits top-right */
 .sh-head .btn svg { width: 17px; height: 17px; }
 .sh-sub { margin: 0; font-size: 13.5px; color: var(--ink-3); }
 .sh-times { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-bottom: 18px; }
@@ -1078,6 +1079,7 @@ td.unit .u { font-weight: 600; }
 .pe-form .form-actions .btn { margin-top: 0; }
 @media (max-width: 520px) { .pe-row { flex-direction: column; gap: 14px; } }
 .prow > span { white-space: nowrap; }
+.prow .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; } .prow .u { min-width: 0; } .prow .pedit { flex: none; }
 /* ---------- Forum ---------- */
 #view-forum .weekbar { gap: 10px; }
 .f-hint { font-size: 13px; margin: 0 0 14px; }
@@ -1175,7 +1177,7 @@ td.unit .u { font-weight: 600; }
 .mt-who { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--ink); }
 .mt-who em { font-style: normal; color: var(--ink-3); font-weight: 400; }
 .mt-who.none { color: var(--prog); }
-.mt-who .avatar.sm { width: 24px; height: 24px; font-size: 9.5px; background: var(--accent-soft); color: var(--accent-strong); }
+.mt-who .avatar.sm { width: 24px; height: 24px; flex: none; font-size: 9.5px; background: var(--accent-soft); color: var(--accent-strong); }
 .mt-who .avatar.ct svg { width: 13px; height: 13px; }
 .mt-due { font-size: 12.5px; color: var(--ink-2); }
 .mt-due.late, .mt-facts dd.late { color: var(--out); font-weight: 600; }
@@ -1187,7 +1189,7 @@ td.unit .u { font-weight: 600; }
 .mt-facts div { min-width: 0; }
 .mt-facts dt { font-size: 11.5px; color: var(--ink-3); margin-bottom: 3px; }
 .mt-facts dd { margin: 0; font-size: 14px; color: var(--ink); }
-.mt-tel { display: block; margin-top: 3px; font-weight: 600; font-size: 13px; text-decoration: none; }
+.mt-tel { display: block; margin-top: 3px; font-weight: 600; font-size: 13px; text-decoration: none; color: var(--accent); }
 .mt-log { list-style: none; margin: 0 0 16px; padding: 0; }
 .mt-log li { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line-2); font-size: 13.5px; color: var(--ink-2); }
 .mt-log li.note { color: var(--ink); }
@@ -1278,7 +1280,7 @@ td.unit .u { font-weight: 600; }
 .ptotals div { display: flex; flex-direction: column; }
 .ptotals b { font: 600 24px/1.2 var(--font-head); color: var(--ink); }
 .ptotals span { font-size: 12px; color: var(--ink-3); }
-.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 0 0 16px; }
+.cp-pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 0 0 16px; }
 .pcard2 { padding: 14px 16px; }
 .pcard2 h3 { margin: 0 0 10px; font: 500 10.5px var(--font-head); letter-spacing: .16em; text-transform: uppercase; color: var(--accent-strong); }
 .cpbar { display: grid; grid-template-columns: minmax(0, 9fr) minmax(0, 10fr) 28px; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
@@ -1320,3 +1322,73 @@ td.unit .u { font-weight: 600; }
 .cand .btn { margin: 0; flex: none; }
 .md-or { margin: 4px 0 8px; font-weight: 600; font-size: 14px; color: var(--ink); }
 @media (max-width: 520px) { .modal-card .md-grid { grid-template-columns: 1fr; } .cand { flex-direction: column; align-items: flex-start; } }
+
+/* ---- audit fixes ---- */
+/* Panels opened from inside a flat's panel (task, complaint, damage → task) go on top of it */
+#detail { z-index: 45; }
+/* Pop-ups never run off a short screen; toasts show above everything */
+.modal-card { max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; }
+.toast { z-index: 90; }
+/* Schedule rows stack (like on phones) whenever the day column is narrow: tablets, small laptops, the rail open */
+#daypanel { container-type: inline-size; }
+@container (max-width: 640px) {
+  .axis { display: none; }
+  .row.tap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "flat st" "line line" "who who"; gap: 10px 12px; padding: 14px 16px; }
+  .r-flat { grid-area: flat; flex-direction: row; align-items: baseline; gap: 8px; }
+  .r-line { grid-area: line; }
+  .r-who { grid-area: who; }
+  .r-who:empty { display: none; }
+  .r-st { grid-area: st; }
+}
+@media (min-width: 761px) and (max-width: 1080px) {
+  .dbtn { padding: 10px 6px; }
+  .dbtn .lbl, .dbtn .sep { display: none; }
+  .dbtn .dc { white-space: nowrap; }
+}
+.metric .s { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } /* two lines, not '2 same-…' */
+/* Users list: never clipped; side by side with the form it shows Name, Role, Edit only */
+.users-layout > .card:first-child { min-width: 0; overflow-x: auto; }
+.users-layout.editing { grid-template-columns: minmax(0, 1fr) 420px; }
+.users-layout.editing .utable .hide-sm { display: none; }
+@media (max-width: 1100px) { .utable .hide-sm { display: none; } }
+.utable td.empty { text-align: center !important; }
+/* Notes and long text fields everywhere look like the other inputs */
+.pe-form textarea, .fc-form textarea { width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2); font: 15px/1.5 var(--font); color: var(--ink); resize: vertical; }
+#cp-list, #mt-list, #dmg-list-view { display: grid; gap: 12px; }
+/* Red buttons stay readable on hover/tap */
+.btn.danger-solid:hover, .btn.danger-solid:active { background: color-mix(in srgb, var(--out) 88%, #000); border-color: transparent; color: #fff; }
+/* "Cleaner" picker: the label goes above the picker on phones so names stay readable */
+@media (max-width: 520px) { .assign-row { flex-wrap: wrap; } .assign-row label { flex-basis: calc(100% - 28px); white-space: normal; } .assign-row select { flex-basis: 100%; } }
+/* Week board: the sticky corner stays above the day headers when scrolled sideways */
+thead .first-col { z-index: 4; }
+/* Inline links inside notes don't make tall uneven lines */
+.moved-note .linkbtn, .reset-note .linkbtn { padding: 0 2px; min-height: 0; font-size: inherit; }
+/* Permission ticks keep their size when the label wraps */
+.checks label input { flex: none; }
+/* Settings headers: the description wraps under the status on phones */
+@media (max-width: 600px) { .set-head { flex-wrap: wrap; } .set-head > div { flex-basis: 100%; } }
+/* Panel headers on phones: status above the close button, so titles get the width */
+@media (max-width: 520px) { .sh-right { flex-direction: column-reverse; align-items: flex-end; gap: 6px; } .sh-head h2 { font-size: 26px; } }
+.eyebrow, .sh-sub { overflow-wrap: anywhere; }
+/* Links in tables and cards use the app colour */
+.set-card a:not(.btn), .card td a:not(.btn) { color: var(--accent); font-weight: 600; text-decoration: none; }
+/* someone else's cleaning waiting at the video or key step */
+.tc-wait { font-size: 14px; color: var(--ink-2); margin: 6px 0 2px; }
+.reset-note.warn { background: var(--out-soft); color: var(--out); }
+/* the summary shows its numbers only once the cleanings have loaded */
+.summary.loading .metric .v, .summary.loading .metric .s { opacity: .35; }
+/* forum: like / dislike / comments line up */
+.fp-foot .vote, .fp-foot .fp-c { margin: 0; vertical-align: middle; }
+/* segmented choices (priority, severity, post type) are comfortable to tap */
+.fkinds button, .range.fkinds button { min-height: 38px; }
+.form-msg:empty { display: none; }
+/* Cleaning log: a word like "under 1 min" fits the big number style */
+#cv-summary .metric .v { font-size: clamp(20px, 5vw, 30px); white-space: nowrap; }
+/* deactivated people's Edit button stays clearly usable */
+.utable tr.off td:last-child { opacity: 1; }
+/* complaint filters: on phones only the search shows until "Filters" is tapped */
+.cpf-more { display: none; }
+@media (max-width: 760px) {
+  .cpf-more { display: inline-flex; align-self: flex-end; height: 40px; }
+  #cp-filters:not(.open) .cpf:not(.grow) { display: none; }
+}
