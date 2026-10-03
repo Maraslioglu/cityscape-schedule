@@ -318,7 +318,8 @@ async function sweepMedia() {
       continue;
     }
     // A guest photo the assistant uploaded but never attached (its task or complaint failed): gone after 3 days.
-    if (m.byId === 'assistant' && age > 3 * 864e5 && !attachedMedia().has(m.id)) {
+    const sinceUsed = now - Math.max(Date.parse(m.createdAt || 0), Date.parse(m.reusedAt || 0) || 0);
+    if (m.byId === 'assistant' && sinceUsed > 3 * 864e5 && !attachedMedia().has(m.id)) {
       for (const f of [`${m.id}.orig`, `${m.id}.jpg`, `${m.id}.mp4`, `${m.id}.thumb.jpg`]) await fsp.rm(path.join(MEDIA, f), { force: true });
       metaCache.delete(m.id); await STORE.delete(k);
       if (m.sha256) await STORE.delete(`media-sha:${m.purpose}|${m.listingId}|${m.sha256}`);
@@ -491,7 +492,8 @@ async function mediaRoute(req, res, url) {
 const ASSISTANT_MAX = { photo: Number(process.env.ASSISTANT_MAX_PHOTO_MB || 25) * 1024 ** 2, video: Number(process.env.ASSISTANT_MAX_VIDEO_MB || 100) * 1024 ** 2 };
 const ASSISTANT_DAILY = Number(process.env.ASSISTANT_DAILY_UPLOAD_GB || 2) * 1024 ** 3;
 async function checkAssistant(req, listingId) {
-  const r = await worker.fetch(new Request(origin(req) + '/api/internal/assistant-media-check', {
+  // A fixed address, never one built from the request's own headers (X-Forwarded-Host could point it elsewhere).
+  const r = await worker.fetch(new Request('http://internal/api/internal/assistant-media-check', {
     method: 'POST',
     headers: { authorization: req.headers.authorization || '', 'content-type': 'application/json', 'x-internal': INTERNAL_KEY },
     body: JSON.stringify(listingId ? { listingId } : {}),
@@ -512,9 +514,12 @@ async function assistantMediaRoute(req, res, url) {
   const type = safeMediaType(req.headers['content-type']);
   const size = Number(req.headers['content-length']);
   const refuse = (status, error) => { req.resume(); return sendJson(res, status, { error }); };
+  if (!q.get('listingId')) return refuse(400, 'Say which flat (listingId).');
   const c = await checkAssistant(req, q.get('listingId'));
   if (c.status === 401) return refuse(401, 'unauthorised');
-  if (!c.ok) return refuse(404, c.error || 'Unknown or hidden listing.');
+  if (c.status >= 500) return refuse(503, 'Try again shortly.');
+  // 422, not 404: one hidden flat mustn't look like the whole endpoint is missing.
+  if (!c.ok || !c.listingId) return refuse(422, c.error || 'Unknown or hidden listing.');
   if (!kind || !purpose) return refuse(400, 'kind must be photo or video, and purpose maintenance or complaint.');
   if (!type || !type.startsWith(kind === 'photo' ? 'image/' : 'video/')) return refuse(415, 'Only photos and videos.');
   if (!(size > 0)) return refuse(411, 'Send the file with its Content-Length.');
@@ -527,6 +532,8 @@ async function assistantMediaRoute(req, res, url) {
     name: String(q.get('name') || kind).slice(0, 120), type, size, received: 0, uploaded: false, status: 'uploading',
     byId: 'assistant', byName: 'Guest assistant (AI)', createdAt: new Date().toISOString(), source: 'guest_message',
   };
+  // The assistant may have given up while the check ran: nothing more will arrive, so don't wait for it.
+  if (req.destroyed || req.readableAborted || req.readableEnded) return;
   const f = fileFor(m, 'orig');
   const hash = crypto.createHash('sha256');
   const out = fs.createWriteStream(f);
@@ -547,9 +554,12 @@ async function assistantMediaRoute(req, res, url) {
   // Already uploaded for this flat and purpose: the same id again (nothing stored twice).
   const shaKey = `media-sha:${purpose}|${m.listingId}|${sha256}`;
   const earlier = await STORE.get(shaKey);
-  if (earlier && (await getMeta(earlier))) {
+  const e = earlier ? await getMeta(earlier) : null;
+  if (e) {
     await fsp.rm(f, { force: true });
-    const e = await getMeta(earlier);
+    // Used again now: the clean-up of unattached uploads counts from here, so it can't vanish before it's attached.
+    e.reusedAt = new Date().toISOString();
+    await putMeta(e);
     return sendJson(res, 200, { media: { id: e.id, kind: e.kind, type: e.type, size: e.size, status: e.status, duplicate: true } });
   }
   Object.assign(m, { received: n, uploaded: true, status: 'queued', origType: type, sha256 });
@@ -611,10 +621,10 @@ http.createServer(async (req, res) => {
     }
     if (url.pathname.startsWith('/api/internal/')) return sendJson(res, 404, { error: 'Not found' });
     // Before the 1 MB limit below: the body is a whole photo or video.
-    if (url.pathname === '/api/integrations/media') return assistantMediaRoute(req, res, url);
+    if (url.pathname === '/api/integrations/media') return await assistantMediaRoute(req, res, url);
 
     if (url.pathname === '/status') return sendStatus(res);
-    if (url.pathname.startsWith('/api/admin/backups')) return backupsRoute(req, res, url);
+    if (url.pathname.startsWith('/api/admin/backups')) return await backupsRoute(req, res, url);
 
     // Everything except video/photo uploads is small: refuse bodies over 1 MB before reading them into memory.
     if (Number(req.headers['content-length'] || 0) > MAX_BODY) { req.resume(); return sendJson(res, 413, { error: 'That request is too large.' }); }
