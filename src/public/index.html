@@ -197,6 +197,7 @@
         <div class="card pad acct-more hidden" id="acct-more"><h3>More</h3><div class="acct-links"><button class="btn" id="acct-props">Properties<span class="ndot hidden" id="nd-props2" title="A KeyNest flat needs linking"></span></button><button class="btn" id="acct-forum">Forum<span class="ndot hidden" id="nd-forum2" title="New posts"></span></button></div></div>
         <div class="card pad acct-admin hidden" id="acct-admin"><h3>Admin</h3><div class="acct-links"><button class="btn" id="acct-users">Users</button><button class="btn" id="acct-settings">Settings</button></div></div>
       </div>
+      <div class="card pad hidden" id="pw-owner"><h3>Password</h3><p class="muted">This is the recovery login. Its password is the APP_PASSWORD setting on the server (Railway), not set here. Changing it there signs everyone out and changes the Guesty and KeyNest webhook addresses, so only change it if you need to.</p></div>
       <form class="card pad" id="pw-form">
         <h3>Change password</h3>
         <label for="pw-cur">Current password</label><input id="pw-cur" type="password" autocomplete="current-password" required>

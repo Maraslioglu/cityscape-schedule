@@ -244,7 +244,7 @@ function cleanUserInput(body, existing) {
   if (out.name !== undefined && !out.name) return { error: 'Add the person’s name.' };
   if (out.username !== undefined && (!USERNAME_RE.test(out.username) || out.username === 'owner')) return { error: 'Usernames use 2–32 lowercase letters, numbers, dots, dashes or underscores (and can’t be “owner”).' };
   if (out.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)) return { error: 'That email address doesn’t look right.' };
-  if (Array.isArray(out.buildings) && !out.buildings.length && 'buildings' in body) return { error: 'Pick at least one building, or All buildings.' };
+  if (Array.isArray(out.buildings) && !out.buildings.length && 'buildings' in body) return { error: 'Pick at least one building.' };
   return { out };
 }
 // Supervisors manage only the people they add themselves — as supervisors or cleaners, within their own buildings,
@@ -307,6 +307,8 @@ async function usersApi(req, env, ctx, me, id) {
     const problem = passwordProblem(body.password);
     if (problem) return json({ error: problem }, 400);
     const d = roleDefaults(out.role);
+    const bl = out.buildings !== undefined ? out.buildings : d.buildings;
+    if (Array.isArray(bl) && !bl.length) return json({ error: limited ? 'Pick at least one of your buildings.' : 'Pick at least one building, or All buildings.' }, 400);
     const user = {
       id: crypto.randomUUID().replace(/-/g, '').slice(0, 16), active: true, perms: d.perms, buildings: d.buildings, ...out,
       pw: await hashPassword(body.password), epoch: 1, createdAt: new Date().toISOString(), createdBy: me.username, createdById: me.id,
@@ -1439,6 +1441,7 @@ async function assignmentsApi(req, env, ctx, me, url) {
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
     if (!inScope(me, l.building)) return json({ error: 'That property isn’t one of your buildings.' }, 403);
     const key = `${date}|${l.id}`, before = all[key] || null;
+    if (body.cleanerId && date < londonDate()) return json({ error: 'That day has passed, so there’s no one to assign.' }, 400);
     let cleaner = null;
     if (body.cleanerId) {
       cleaner = (await loadUsers(env)).find((u) => u.id === String(body.cleanerId) && u.active !== false);
@@ -1919,7 +1922,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     return json({ nearest, nearest24, usual });
   }
   if (req.method === 'POST' && action === 'key') {
-    if (!isMine && !stepIn) return deny('Only the cleaner, or an Admin, User or supervisor, can finish this cleaning.');
+    if (!isMine && !stepIn) return deny(can(me, 'step_in') && !inScope(me, rec.building) ? 'That flat isn’t in your buildings.' : 'Only the cleaner, or an Admin, User or supervisor, can finish this cleaning.');
     if (rec.status !== 'awaiting_key') return json({ error: rec.status === 'completed' ? 'This cleaning is already complete.' : 'Upload the video first.' }, 400);
     const body = await req.json().catch(() => ({}));
     if (rec.keyMode === 'lockbox') {
@@ -2834,7 +2837,9 @@ async function handle(req, env, ctx) {
 
   if (p === '/login' && req.method === 'GET') { // already signed in (e.g. Back to an old sign-in page): straight to the app
     if (await sessionUser(env, cookie(req, 'cs_session'))) return redirect('/');
-    return asset(req, 'login.html');
+    const r = asset(req, 'login.html');
+    r.headers.set('Cache-Control', 'no-store'); // never restored from the back/forward cache with an old error showing
+    return r;
   }
   if (['/styles.css', '/favicon.svg', '/favicon.png', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'].includes(p)) return asset(req, p.slice(1));
   if (p === '/favicon.ico') return asset(req, 'favicon.png');
