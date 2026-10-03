@@ -295,7 +295,7 @@
     box.className = 'modal';
     box.innerHTML = `<form class="modal-card" role="dialog" aria-modal="true" aria-labelledby="md-t" novalidate>
       <h3 id="md-t">${u.lockbox ? 'Change' : 'Add'} the lockbox code</h3>
-      <p>${esc(u.label)}${u.lockbox ? ` · the code now is <b>${esc(u.lockbox.code)}</b>` : ''}. Everyone sees the new code straight away.</p>
+      <p>${esc(u.label)}${u.building ? ` · ${esc(u.building)}` : ''}${u.lockbox ? ` · the code now is <b>${esc(u.lockbox.code)}</b>` : ''}. Everyone sees the new code straight away.</p>
       <label class="md-l" for="md-code">New code</label>
       <input id="md-code" class="md-code" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4 numbers">
       <p class="md-err" id="md-err" role="alert"></p>
@@ -389,8 +389,9 @@
       $('pe-review').innerHTML = `<div class="confirm-box"><b>Save these changes to ${esc(u.label)}?</b><ul>${diff.map((k) => `<li>${esc(WORD[k])}: ${esc(before[k] || '—')} → <b>${esc(after[k] || '—')}</b></li>`).join('')}</ul><p class="muted">Everyone sees the change on the schedule straight away. Guesty itself isn’t changed.</p>
         <div class="form-actions"><button type="button" class="btn" id="pe-back">Back</button><button type="button" class="btn primary" id="pe-save">Save changes</button></div></div>`;
       $('pe-go').disabled = true;
+      $('pe-review').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       $('pe-back').onclick = () => { $('pe-review').innerHTML = ''; $('pe-go').disabled = false; };
-      $('pe-save').onclick = () => save({ fields: f }, `${u.label} updated`);
+      $('pe-save').onclick = () => save({ fields: f }, `${f.label || (u.guesty && u.guesty.label) || u.label} updated`);
     };
     if ($('pe-reset')) $('pe-reset').onclick = async () => (await askConfirm({ title: 'Reset to Guesty?', text: `Use Guesty’s details for ${u.label} again? Your changes to this flat are removed.`, yes: 'Reset to Guesty', danger: true })) && save({ reset: true }, `${u.label} is back to Guesty’s details`);
   }
@@ -411,7 +412,7 @@
     return days < 0 ? `Overdue by ${-days} day${days === -1 ? '' : 's'}` : days === 0 ? 'Due today' : days === 1 ? 'Due tomorrow' : `Due ${WD_LONG.format(D(t.due))}`;
   }
   const whoHtml = (a) => (!a ? '<span class="mt-who none">Not assigned</span>'
-    : a.type === 'contractor' ? `<span class="mt-who"><span class="avatar sm ct" aria-hidden="true">${ICONS.tool}</span>${esc(a.name)}${a.trade ? ` <em>· ${esc(a.trade)}</em>` : ''}</span>`
+    : a.type === 'contractor' ? `<span class="mt-who"><span class="avatar sm ct" aria-hidden="true">${ICONS.tool}</span><span>${esc(a.name)}${a.trade ? ` <em>· ${esc(a.trade)}</em>` : ''}</span></span>`
     : `<span class="mt-who"><span class="avatar sm">${esc(initials(a.name))}</span>${a.id === me.id ? 'You' : esc(a.name)}</span>`);
   const mtCard = (t) => `<button class="card mtask${t.overdue ? ' late' : ''}" data-task="${esc(t.id)}">
       <span class="mt-top">${t.kind === 'guest_request' ? '<span class="mt-kind">Guest request</span>' : ''}<span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${t.repeat ? `<span class="mt-rep" title="${esc(everyText(t.repeat))}">${ICONS.repeat}${esc(everyText(t.repeat))}</span>` : ''}<span class="mt-flat">${esc(t.label)} · ${esc(t.building)}</span></span>
@@ -425,6 +426,7 @@
   }
   function renderMaintenance() {
     $('mt-new').classList.toggle('hidden', !can('report_maintenance') && !can('manage_maintenance'));
+    $('mt-new').lastChild.textContent = can('manage_maintenance') ? 'New task' : 'Report an issue'; // the form it opens says the same
     $('mt-mine').classList.toggle('hidden', !can('manage_maintenance') && me.role !== 'supervisor'); // a cleaner's list is already only theirs
     if (!mtCache) return;
     const list = mtCache.tasks.filter((t) => !mtMine || (t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id) || t.reporterId === me.id)
@@ -553,6 +555,7 @@
   async function openComplaint(id) {
     try {
       const { complaint: c, sources } = await getJSON(`/api/complaints/${encodeURIComponent(id)}`);
+      const keep = !$('detail').classList.contains('hidden') && $('detail-body').dataset.cp === id ? $('detail-body').scrollTop : 0; // after an action, stay where you were
       const rec = c.cleaningRecord, cl = c.cleaning, mineToo = cl && (cl.cleanerId === me.id || cl.assignedId === me.id);
       const moves = !c.canManage ? [] : ['resolved', 'dismissed'].includes(c.status) ? [['open', 'Reopen']] : [...(c.status !== 'investigating' ? [['investigating', 'Investigating']] : []), ['resolved', 'Resolved'], ['dismissed', 'Dismiss']];
       const span = (a, b) => (cl && cl.manual ? cleanedWhen(cl) : a && b ? `${fmtClock(a)}–${fmtClock(b)} · ${durWords(Date.parse(b) - Date.parse(a))}` : '');
@@ -574,7 +577,7 @@
             <div class="cp-cl-h"><span class="avatar">${esc(initials(cl.cleanerName))}</span><div><b>Cleaned by ${cl.cleanerId === me.id ? 'you' : esc(cl.cleanerName)}</b><span>${esc(longDate(cl.date))}${span(cl.startedAt, cl.endedAt) ? ' · ' + esc(span(cl.startedAt, cl.endedAt)) : ''}</span></div></div>
             <div class="cp-cl-s">Assigned to: <b>${cl.assignedName ? esc(cl.assignedName) : 'nobody'}</b>${rec && rec.manual ? ` · marked cleaned by ${esc(rec.manual.byName)}` : rec ? ` · checklist ${rec.checklist ? rec.checklist.length : 0}/${checklistDef.length || 5}${keyNote(rec)}${rec.completedBy ? ` · finished by ${esc(rec.completedBy)}` : ''}` : ''}${rec && rec.reset ? ` · <span class="warn">later reset by ${esc(rec.reset.byName)}</span>` : ''}</div>
             ${rec && (rec.media || []).length ? mediaTiles(rec.media) : '<p class="muted">No videos from this cleaning.</p>'}
-            <a class="linkbtn" href="/?view=day&date=${esc(cl.forDate || cl.date)}&flat=${esc(c.listingId)}">Open the flat on that day</a>
+            <a class="linkbtn" data-applink href="/?view=day&date=${esc(cl.forDate || cl.date)}&flat=${esc(c.listingId)}">Open the flat on that day</a>
           </div>` : '<div class="card empty"><b>No cleaning linked</b>Edit the complaint to pick the cleaning it was about.</div>'}
         ${(c.media || []).length ? `<h3 class="sh-h3">Guest’s photos</h3>${mediaTiles(c.media)}` : ''}
         ${(c.tasks || []).length || (c.canManage && can('manage_maintenance')) ? `<h3 class="sh-h3">Maintenance</h3>
@@ -584,6 +587,7 @@
         <ol class="mt-log">${(c.log || []).slice().reverse().map((l) => `<li class="${esc(l.kind)}"><span class="mt-lt">${l.kind === 'note' ? `<b>${esc(l.byName)}</b> ${esc(l.text)}` : `${esc(l.text)} <span class="muted">· ${esc(l.byName)}</span>`}</span><em>${esc(fmtWhen(l.at))}</em></li>`).join('')}</ol>
         ${c.canManage || mineToo ? `<form class="pe-form" id="cp-note"><textarea id="cp-note-t" rows="2" maxlength="2000" placeholder="${mineToo && !c.canManage ? 'Your side: what happened at this cleaning?' : 'Add a note'}"></textarea><div class="form-actions"><span class="spacer"></span><button class="btn primary" type="submit">Add note</button></div></form>` : ''}
         ${c.canManage ? '<div class="form-actions"><span class="spacer"></span><button class="btn danger" id="cp-del">Delete complaint</button></div>' : ''}`);
+      $('detail-body').dataset.cp = id; $('detail-body').scrollTop = keep;
       const after = (msg) => { toast(msg); loadComplaints(); openComplaint(id); };
       $('detail-body').querySelectorAll('[data-cpmove]').forEach((b) => b.onclick = async () => {
         const to = b.dataset.cpmove;
@@ -595,7 +599,7 @@
         try { await send('PUT', `/api/complaints/${encodeURIComponent(id)}`, { status: to, ...extra }); after(`Marked ${CP_ST[to].toLowerCase()}`); } catch (e) { toast(e.message); }
       });
       if ($('cp-edit')) $('cp-edit').onclick = () => complaintForm(c);
-      if ($('cp-mt')) $('cp-mt').onclick = () => taskForm({ listingId: c.listingId, label: c.label, building: c.building, title: c.title, complaintId: c.id, mediaIds: (c.media || []).map((m) => m.id) });
+      if ($('cp-mt')) $('cp-mt').onclick = () => taskForm({ listingId: c.listingId, label: c.label, building: c.building, title: c.title, complaintId: c.id, mediaIds: (c.media || []).map((m) => m.id), back: () => openComplaint(c.id) });
       $('detail-body').querySelectorAll('[data-cptask]').forEach((b) => b.onclick = () => openTask(b.dataset.cptask));
       if ($('cp-note')) $('cp-note').onsubmit = async (e) => { e.preventDefault(); try { await send('POST', `/api/complaints/${encodeURIComponent(id)}/notes`, { text: $('cp-note-t').value }); after('Note added'); } catch (err) { toast(err.message); } };
       if ($('cp-del')) $('cp-del').onclick = async () => {
@@ -622,7 +626,7 @@
         <div class="pe-f"><label for="cp-title">What did the guest complain about?</label><input id="cp-title" maxlength="160" required value="${esc(c.title || '')}" placeholder="e.g. Hair in the shower, no towels in the bathroom"></div>
         <div class="pe-f"><label for="cp-details">Details <span class="muted">(optional)</span></label><textarea id="cp-details" rows="3" maxlength="4000" placeholder="What they said, where exactly, anything else useful">${esc(c.details || '')}</textarea></div>
         <div class="pe-f"><span class="pe-l">Categories <span class="muted">(pick all that apply)</span></span><div class="cp-cats" id="cp-cats">${cats.map((x) => `<label class="cp-cat"><input type="checkbox" value="${esc(x)}" ${(c.categories || []).includes(x) ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('')}</div>
-          <button type="button" class="linkbtn" id="cp-cats-edit">Edit categories</button></div>
+          ${me.buildings === 'all' ? '<button type="button" class="linkbtn" id="cp-cats-edit">Edit categories</button>' : ''}</div>
         <div class="pe-row">
           <div class="pe-f"><span class="pe-l">Severity</span><div class="range fkinds" role="radiogroup" aria-label="Severity">${Object.entries(CP_SEV).reverse().map(([k, w]) => `<button type="button" role="radio" data-sev="${k}" aria-checked="${c.severity === k}" aria-selected="${c.severity === k}">${w}</button>`).join('')}</div></div>
           <div class="pe-f"><label for="cp-source">Where it came from</label><select id="cp-source">${Object.entries(sources).map(([k, w]) => `<option value="${k}" ${c.source === k ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></div>
@@ -663,7 +667,7 @@
     if (!edit) $('cp-flat').onchange = () => { if (picker) picker.reset(); lookup(); };
     $('cp-date').onchange = lookup;
     if (edit || c.listingId) lookup();
-    $('cp-cats-edit').onclick = async () => {
+    if ($('cp-cats-edit')) $('cp-cats-edit').onclick = async () => {
       const now = [...$('cp-cats').querySelectorAll('input')].map((i) => i.value);
       const ticked = new Set([...$('cp-cats').querySelectorAll('input:checked')].map((i) => i.value));
       const box = document.createElement('div'); box.className = 'modal';
@@ -736,7 +740,7 @@
     const t = pre.id ? pre : null, mgr = can('manage_maintenance');
     if (mgr && !(mtCache && mtCache.contractors)) { try { mtCache = await getJSON('/api/maintenance?status=open'); } catch (_) {} }
     const flats = pre.listingId ? null : await flatsForForm();
-    setTimeout(() => { if ($('mt-back')) $('mt-back').onclick = () => openTask(t.id); }, 0);
+    setTimeout(() => { if ($('mt-back')) $('mt-back').onclick = () => (t ? openTask(t.id) : pre.back()); }, 0);
     openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Maintenance</span><h2>${t ? 'Edit task' : mgr ? 'New task' : 'Report an issue'}</h2><div class="sh-sub">${pre.listingId ? `${esc(pre.label || '')} · ${esc(pre.building || '')}` : 'Pick the flat, then say what needs doing.'}</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
       <form class="pe-form" id="mt-form" autocomplete="off">
         ${flats ? `<div class="pe-f"><label for="mt-flat">Flat</label><select id="mt-flat" required><option value="">Pick a flat…</option>${flats.map((f) => `<option value="${esc(f.id)}">${esc(f.label)} · ${esc(f.building)}</option>`).join('')}</select></div>` : ''}
@@ -754,10 +758,10 @@
           <div class="pe-f"><label for="mt-cost">Cost £ <span class="muted">(optional)</span></label><input id="mt-cost" type="number" min="0" step="0.01" inputmode="decimal" value="${t && t.cost !== null && t.cost !== undefined ? esc(t.cost) : ''}"></div></div>
         <label class="pe-check"><input type="checkbox" id="mt-rep" ${t && t.repeat ? 'checked' : ''}> Repeats (e.g. gas safety every 12 months)</label>
         <div class="pe-row mt-repbox ${t && t.repeat ? '' : 'hidden'}" id="mt-repbox"><div class="pe-f"><label for="mt-every">Every</label><input id="mt-every" type="number" min="1" max="60" value="${esc((t && t.repeat && t.repeat.every) || 12)}"></div>
-          <div class="pe-f"><label for="mt-unit">&nbsp;</label><select id="mt-unit">${UNITS.map(([k, w]) => `<option value="${k}" ${((t && t.repeat && t.repeat.unit) || 'months') === k ? 'selected' : ''}>${w}</option>`).join('')}</select></div></div>` : ''}
+          <div class="pe-f mt-unitf"><label for="mt-unit">&nbsp;</label><select id="mt-unit" aria-label="Unit">${UNITS.map(([k, w]) => `<option value="${k}" ${((t && t.repeat && t.repeat.unit) || 'months') === k ? 'selected' : ''}>${w}</option>`).join('')}</select></div></div>` : ''}
         ${t ? '' : `<div class="pe-f"><span class="pe-l">Photos or videos <span class="muted">(optional)</span></span><div id="mt-media"></div></div>`}
         <div class="form-msg" id="mt-msg"></div>
-        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" ${t ? 'id="mt-back"' : 'data-close-detail'}>Cancel</button><button type="submit" class="btn primary" id="mt-go">${t ? 'Save' : mgr ? 'Create task' : 'Send report'}</button></div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" ${t || pre.back ? 'id="mt-back"' : 'data-close-detail'}>Cancel</button><button type="submit" class="btn primary" id="mt-go">${t ? 'Save' : mgr ? 'Create task' : 'Send report'}</button></div>
       </form>`);
     let prio = pre.priority || 'normal';
     $('mt-form').querySelectorAll('[data-p]').forEach((b) => b.onclick = () => { prio = b.dataset.p; $('mt-form').querySelectorAll('[data-p]').forEach((x) => { x.setAttribute('aria-checked', x === b); x.setAttribute('aria-selected', x === b); }); });
@@ -908,7 +912,7 @@
     if (o) openPost(o.dataset.open);
   });
   $('f-new').onclick = () => newPost();
-  const openDrawer = (html) => { detailId = null; postId = null; const was = !$('detail').classList.contains('hidden'); $('detail').classList.remove('hidden'); document.body.classList.add('noscroll'); $('detail-body').innerHTML = html; $('detail-body').scrollTop = 0; if (!was) pushNav('detail'); };
+  const openDrawer = (html) => { detailId = null; postId = null; delete $('detail-body').dataset.cp; $('detail').classList.remove('hidden'); document.body.classList.add('noscroll'); $('detail-body').innerHTML = html; $('detail-body').scrollTop = 0; };
   const CLOSE_BTN = '<button class="btn sq" data-close-detail aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>';
   function newPost() {
     openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Forum</span><h2>New post</h2><div class="sh-sub">Everyone on the team can see it. Admins are told straight away.</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
@@ -980,7 +984,7 @@
       box.innerHTML = `<div class="set-head"><div><h3>Backups</h3>
           <p class="muted">The app saves a copy of all its data every day and keeps the last 14. Download one to keep your own copy somewhere safe (it holds everything, including sign-in details, so treat it like a password). Videos and photos aren’t included.</p></div></div>
         <div class="set-actions"><a class="btn primary" href="/api/admin/backups/now" download>Download today’s data</a><span class="muted">${r.backups.length} daily cop${r.backups.length === 1 ? 'y' : 'ies'} kept</span></div>
-        ${r.backups.length ? `<table class="kn-table"><thead><tr><th>Day</th><th>Size</th><th></th></tr></thead><tbody>${r.backups.map((b) => `<tr><td>${esc(new Date(b.day + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))}</td><td>${esc(kb(b.size))}</td><td style="text-align:right"><a href="/api/admin/backups/${encodeURIComponent(b.name)}" download>Download</a></td></tr>`).join('')}</tbody></table>` : ''}`;
+        ${r.backups.length ? `<table class="kn-table"><thead><tr><th>Day</th><th>Size</th><th></th></tr></thead><tbody>${r.backups.map((b) => `<tr><td>${esc(new Date(b.day + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))}</td><td>${esc(kb(b.size))}</td><td style="text-align:right"><a class="btn" href="/api/admin/backups/${encodeURIComponent(b.name)}" download>Download</a></td></tr>`).join('')}</tbody></table>` : ''}`;
     } catch (e) { if (e.message !== 'signed out') box.innerHTML = `<h3>Backups</h3><div class="banner error">${esc(e.message)}</div>`; }
   }
   async function loadSettings() {
@@ -1088,7 +1092,7 @@
     const changed = v !== view;
     view = v;
     store.set('cs_view', v);
-    if (changed) { window.scrollTo(0, 0); if (navReady) pushNav('view'); }
+    if (changed) { window.scrollTo(0, 0); if (navReady) pushNav(); }
     if (v === 'day' || v === 'board') { lastSched = v; store.set('cs_sched', v); }
     document.querySelectorAll('.snav [data-nav]').forEach((b) => { if (b.dataset.nav === NAV_OF[v]) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     document.querySelectorAll('.range [data-range]').forEach((b) => b.setAttribute('aria-selected', b.dataset.range === v));
@@ -1375,7 +1379,7 @@
     if (store.get('cs_who') !== me.id) { store.set('cs_who', me.id); view = 'day'; } // someone else signed in on this phone
     setView(deep && allowed(q0.get('view')) ? q0.get('view') : view);
     try { history.replaceState({ cs: 'view', v: view }, '', location.href); } catch (_) {}
-    navReady = true;
+    navReady = true; syncNav();
     if (can('view_day') || can('view_board')) {
       const w = q0.get('week') || (deep && q0.get('date'));
       showWeek(/^\d{4}-\d{2}-\d{2}$/.test(w || '') ? w : '').then(() => { checkVersion(); if (deep) openLink(deep); });
@@ -1493,7 +1497,7 @@
     document.querySelectorAll('[data-achip]').forEach((el) => {
       const a = assignments[`${selected}|${el.dataset.achip}`];
       el.innerHTML = a ? `<span class="achip${a.cleanerId === me.id ? ' mine' : ''}" title="Assigned to ${esc(a.cleanerName)}"><span class="avatar sm">${esc(initials(a.cleanerName))}</span>${a.cleanerId === me.id ? 'You' : esc(a.cleanerName.split(' ')[0])}</span>`
-        : el.dataset.needs && can('assign_cleanings') ? '<span class="achip none"><span class="avatar sm dash" aria-hidden="true">+</span>Assign</span>' : '';
+        : el.dataset.needs && can('assign_cleanings') && !(data && selected < data.today) ? '<span class="achip none"><span class="avatar sm dash" aria-hidden="true">+</span>Assign</span>' : '';
     });
     renderSummary();
     renderRail();
@@ -1512,7 +1516,7 @@
   const seesCleaning = () => isManager() || can('view_cleaning');
   function renderSummary() {
     if (!data) return;
-    $('m-done-box').closest('.summary').classList.toggle('loading', cRange !== cleaningRange());
+    $('m-done-box').closest('.summary').classList.toggle('c-loading', cRange !== cleaningRange());
     const s = dayStats();
     const firstIn = s.arrivals.map((u) => u.checkIn.timeRaw || '').filter(Boolean).sort()[0];
     const turns = s.cleans.filter((u) => u.checkIn).length;
@@ -1618,7 +1622,14 @@
     const step = a.status === 'in_progress' ? `<b data-since="${esc(a.startedAt)}">${fmtDur(Date.now() - Date.parse(a.startedAt))}</b>` : a.status === 'checklist' ? 'Checklist to finish' : a.status === 'awaiting_key' ? 'Key to return' : 'Video needed';
     bar.innerHTML = `<div class="wrap"><span class="ab-dot"></span><span>Cleaning <b>${esc(a.label)}</b> · ${step}</span><button class="btn primary" id="ab-open">Open</button></div>`;
     bar.classList.remove('hidden');
-    $('ab-open').onclick = () => openSheet(a.listingId);
+    $('ab-open').onclick = async () => { // on the cleaning's own day, whichever day is picked
+      const d = cleanFor(a);
+      if (data && d !== selected && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+        if (!data.dates.includes(d)) await showWeek(d);
+        if (data.dates.includes(d)) { selected = d; renderStrip(); renderDay(); setPageHead(); }
+      }
+      openSheet(a.listingId);
+    };
   }
 
   // Tapping a flat in the Day view opens its panel.
@@ -1636,13 +1647,11 @@
   }
   function openSheet(listingId) {
     if (!$('detail').classList.contains('hidden')) closeDetail(); // a detail drawer would otherwise sit on top of it
-    const wasOpen = !$('sheet').classList.contains('hidden');
     sheetListing = listingId; sheetMode = 'main';
     $('sheet').classList.remove('hidden');
     document.body.classList.add('noscroll');
     renderSheet();
     $('sheet-body').scrollTop = 0;
-    if (!wasOpen) pushNav('sheet');
   }
   function closeSheet() {
     if (uploadsBusy()) { toast('An upload is still running — keep this open until it finishes'); return false; }
@@ -1650,23 +1659,49 @@
     clearInterval(keyPoll); keyPoll = null; // stop checking KeyNest for a panel nobody is looking at
     $('sheet').classList.add('hidden');
     document.body.classList.remove('noscroll');
-    dropNav('sheet');
     return true;
   }
   // ---- the phone's Back button closes the open panel, or goes back to the previous screen (instead of leaving the app) ----
-  let navPopping = false, navSkip = 0;
-  function pushNav(kind) { if (navPopping) return; try { history.pushState({ cs: kind, v: view }, '', location.href); } catch (_) {} }
-  function dropNav(kind) { if (navPopping || !history.state || history.state.cs !== kind) return; navSkip++; history.back(); } // closed with ✕: take its Back step away too
+  // While a panel or drawer is open there's one extra history entry ('panel'); it's put back or taken away after every
+  // open and close (watched below), so switching straight from one panel to another never loses or doubles it.
+  let navPopping = false, navSkip = 0, navTimer = null, navWait = 0;
+  const OVERLAYS = ['sheet', 'detail', 'notif', 'checklist'];
+  const panelOpen = () => OVERLAYS.some((id) => !$(id).classList.contains('hidden'));
+  function syncNav() {
+    clearTimeout(navTimer);
+    navTimer = setTimeout(() => {
+      if (!navReady) return;
+      if (navSkip && navWait++ < 20) return syncNav(); // our own Back step hasn't landed yet
+      navWait = 0;
+      const has = history.state && history.state.cs === 'panel', want = panelOpen();
+      try {
+        if (want && !has) history.pushState({ cs: 'panel', v: view }, '', location.href);
+        else if (!want && has) { navSkip++; history.back(); } // closed with ✕: take its Back step away too
+      } catch (_) {}
+    }, 30);
+  }
+  function pushNav() { if (navPopping) return; try { history.pushState({ cs: 'view', v: view }, '', location.href); } catch (_) {} }
+  const navWatch = new MutationObserver(syncNav);
+  for (const id of OVERLAYS) navWatch.observe($(id), { attributes: true, attributeFilter: ['class'] });
+  // Back and Escape close what's on top, one layer at a time.
+  function closeTop() {
+    if (!$('notif').classList.contains('hidden')) closeNotifs();
+    else if (!$('checklist').classList.contains('hidden')) $('checklist').classList.add('hidden'); // same as "Not done yet"
+    else if (!$('detail').classList.contains('hidden')) closeDetail();
+    else if (!$('sheet').classList.contains('hidden')) {
+      if (sheetMode === 'damage') { if ($('dmg-back')) $('dmg-back').click(); else { sheetMode = 'main'; renderSheet(); } } // back to the flat, like its ←
+      else closeSheet(); // refused while a video uploads: the Back step comes back
+    } else return false;
+    return true;
+  }
   window.addEventListener('popstate', (e) => {
     if (navSkip) { navSkip--; return; }
+    if (document.querySelector('.modal')) { navSkip++; history.go(1); return; } // finish or cancel the pop-up first
     navPopping = true;
     try {
-      if (document.querySelector('.modal')) { pushNav('modal'); return; } // finish or cancel the pop-up first
-      if (!$('detail').classList.contains('hidden')) { closeDetail(); return; }
-      if (!$('sheet').classList.contains('hidden')) { if (!closeSheet()) { navPopping = false; pushNav('sheet'); } return; }
-      const v = e.state && e.state.v;
-      if (v && v !== view && allowed(v)) setView(v);
+      if (!closeTop()) { const v = e.state && e.state.v; if (v && v !== view && allowed(v)) setView(v); }
     } finally { navPopping = false; }
+    syncNav();
   });
   $('sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet' || e.target.closest('[data-close]')) closeSheet(); });
 
@@ -1682,7 +1717,7 @@
     if (!media || !media.length) return '';
     return `<div class="media-grid">${media.map((m) => m.kind === 'video'
       ? `<div class="mt video">${m.status === 'ready' ? `<video controls preload="none" playsinline poster="/media/${m.id}/thumb" src="/media/${m.id}"></video>` : `<div class="mt-wait">Processing video…</div>`}${m.duration ? `<span class="mt-d">${fmtDur(m.duration * 1000)}</span>` : ''}</div>${videoBar(m)}`
-      : `<a class="mt photo" href="/media/${m.id}${m.hasOrig ? '/orig' : ''}" target="_blank" rel="noopener"><img loading="lazy" src="/media/${m.id}/thumb" onerror="this.src='/media/${m.id}'" alt="Photo"></a>`).join('')}</div>`;
+      : `<a class="mt photo" href="/media/${m.id}${m.hasOrig ? '/orig' : ''}" target="_blank" rel="noopener"><img loading="lazy" src="/media/${m.id}/thumb" onerror="this.onerror=null;this.src='/media/${m.id}'" alt="Photo"></a>`).join('')}</div>`;
   }
 
   // A cleaner can back out of their own cleaning at any step until it's complete.
@@ -1696,6 +1731,8 @@
   const assignees = new Map(); // listingId → [{ id, name, role }]
   function assignBlock() {
     const a = assignments[`${selected}|${sheetListing}`];
+    const du = data && unitOn(sheetListing, selected);
+    if (data && !a && !(du && du.checkOut)) return ''; // nothing to clean that day
     const day = selected === (data && data.today) ? 'today' : esc(longDate(selected));
     if (!can('assign_cleanings')) return a ? `<div class="assign-row ro">${PERSON_ICON}<span>${a.cleanerId === me.id ? '<b>Assigned to you</b>' : `Assigned to <b>${esc(a.cleanerName)}</b>`} ${day}</span></div>` : '';
     return `<div class="assign-row">${PERSON_ICON}<label for="as-sel">Cleaner ${selected === (data && data.today) ? 'today' : esc(`${WD_SHORT.format(D(selected))} ${shortDate(selected)}`)}</label>
@@ -1737,7 +1774,7 @@
     let body = '';
 
     if (sheetMode === 'damage') return renderDamageForm(u);
-    const typed = $('ks-code') ? { id: active && active.id, c1: $('ks-code').value, c2: $('ks-code2') && $('ks-code2').value, back: $('ks-back') && $('ks-back').checked } : null;
+    const typed = $('ks-code') ? { id: $('ks-code').closest('[data-cid]') && $('ks-code').closest('[data-cid]').dataset.cid, c1: $('ks-code').value, c2: $('ks-code2') && $('ks-code2').value, back: $('ks-back') && $('ks-back').checked } : null;
 
     if (active && mine && active.status === 'in_progress') {
       body = `<div class="timer-card">
@@ -1800,7 +1837,7 @@
       </div>` : '';
     const pill = active ? `<span class="cb running"><i></i>${esc(STEP_WORD[active.status] || 'Cleaning')}</span>` : done.length ? '<span class="cb done">✓ Cleaned</span>' : o ? '<span class="cb todo">To clean</span>' : '';
     $('sheet-body').innerHTML = `
-      <div class="sh-head"><div class="sh-title"><span class="eyebrow">${esc(u.building || '')}${u.postcode ? ` · ${esc(u.postcode)}` : ''}</span><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(shortType(u.unitType || ''))}</div></div>
+      <div class="sh-head"><div class="sh-title"><span class="eyebrow">${esc(u.building || '')}${u.postcode ? ` · <span class="nw">${esc(u.postcode)}</span>` : ''}</span><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(shortType(u.unitType || ''))}</div></div>
         <div class="sh-right">${pill}<button class="btn sq" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div></div>
       ${times}${nothing}
       ${(du.keyMode || u.keyMode) === 'lockbox' && can('view_cleaning') ? '<div id="sh-lbx"></div>' : ''}
@@ -1852,7 +1889,7 @@
     on('open-checklist', openChecklist);
     on('reset-active', () => resetCleaning(active));
     on('no-video', async () => {
-      const r = await askConfirm({ title: 'Finish without the video?', text: `${active.cleanerName}’s cleaning of ${u.label} will go on without a walkthrough video. This is recorded with your name.`, yes: 'Finish without video', no: 'Cancel', note: 'Why? (optional)' });
+      const r = await askConfirm({ title: 'Finish without the video?', text: `${active.cleanerName}’s cleaning of ${u.label} will go on without a walkthrough video. This is recorded with your name.`, yes: 'Finish without the video', no: 'Cancel', note: 'Reason (optional)' });
       if (!r) return;
       try { await send('POST', `/api/cleanings/${active.id}/no-video`, { reason: r.note }); toast('Video step finished'); await refreshCleanings(); } catch (e) { toast(e.message); }
     });
@@ -1882,7 +1919,7 @@
       ? await askConfirm({ title: `Reset ${c.label}?`, text: `${c.label} will show as not cleaned for ${longDate(day)}. ${c.manual ? `The record “Marked cleaned by ${c.manual.byName}”` : `${c.cleanerName}’s cleaning (${cleanedWhen(c)})`} stays in the Cleaning log marked “Reset”${c.manual ? '' : ', with its videos and photos'}.${c.cleanerId && c.cleanerId !== me.id ? ` ${first} will be told.` : ''}${info.linkedComplaints ? ` ${info.linkedComplaints} complaint${info.linkedComplaints === 1 ? ' is' : 's are'} linked to this cleaning and will stay linked.` : ''} Are you sure?`,
         yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Why? (optional, the cleaner sees this)', check: info.guestyEligible ? { label: 'Also set it back to dirty in Guesty', checked: true } : null })
       : await askConfirm({ title: `Stop ${first}’s cleaning?`, text: `${c.cleanerName} started ${c.label} at ${fmtClock(c.startedAt)} and is at “${STEP_WORD[c.status] || c.status}”. Resetting stops it: it won’t count as cleaned and ${first} will be told. Anything already uploaded is kept. Are you sure?`,
-        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Why? (optional)' });
+        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Reason (optional)' });
     if (!r) return;
     try {
       await send('POST', `/api/cleanings/${encodeURIComponent(c.id)}/reset`, { reason: r.note, guesty: Boolean(r.checked) });
@@ -1903,6 +1940,7 @@
     document.addEventListener('keydown', onKey);
     box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) close(); });
     const form = box.querySelector('form');
+    form.addEventListener('input', () => { box.querySelector('#md-err').textContent = ''; });
     form.onsubmit = async (e) => {
       e.preventDefault();
       const go = form.querySelector('[type=submit]'); if (go) go.disabled = true;
@@ -2139,7 +2177,7 @@
       </div>`;
     }
     if (a.keyMode === 'lockbox') {
-      return `<div class="evidence keystep">
+      return `<div class="evidence keystep" data-cid="${esc(a.id)}">
         <div class="ev-head"><b>Last step: the key.</b> <span class="req">Required</span></div>
         <ol class="ks-steps"><li>Put the key back in the lockbox.</li><li>Set a <b>new 4-digit code</b> on the lockbox and close it.</li><li>Enter the new code below.</li></ol>
         <label class="ks-l" for="ks-code">New lockbox code</label>
@@ -2164,6 +2202,7 @@
   function wireKey(a) {
     clearInterval(keyPoll); keyPoll = null;
     const done = $('ks-done');
+    let checking = false, finishing = false, autoTried = false;
     const finish = async (payload) => {
       done.disabled = true;
       try {
@@ -2173,7 +2212,10 @@
         toast('Cleaning complete ✓');
         await refreshCleanings();
         if (sheetListing === a.listingId && sheetMode === 'main') closeSheet(); // not if they've since opened another flat
-      } catch (e) { toast(e.message); done.disabled = false; finishing = false; if (a.keyMode === 'keynest') check(); }
+      } catch (e) { // e.g. someone else finished or reset it meanwhile: show what the cleaning is now
+        toast(e.message); done.disabled = false; finishing = false;
+        refreshCleanings();
+      }
     };
     if (a.keyMode === 'lockbox' && !$('ks-code')) { // no new code for this flat: just confirm the key is back
       const back = $('ks-back');
@@ -2221,7 +2263,6 @@
         n24 && n24.id === n.id ? storeCard('Nearest KeyNest · open 24 hours', n) : storeCard('Nearest KeyNest to the flat', n) + (n24 ? storeCard('Nearest open 24 hours', n24) : '')}${
         stores.usual ? storeCard('Where this key usually goes', stores.usual) : ''}`;
     };
-    let checking = false, finishing = false;
     const check = async () => {
       if (!$('kn-status') || $('kn-status') !== box || sheetListing !== a.listingId || $('sheet').classList.contains('hidden')) { clearInterval(keyPoll); keyPoll = null; return; }
       if (document.hidden) return;
@@ -2232,7 +2273,7 @@
         box.className = 'kn-status ' + (r.ok ? 'ok' : r.error ? 'err' : 'wait');
         text.textContent = r.error ? r.error : r.ok ? `Key is in KeyNest ✓ (${r.status})` : `Waiting for the key · KeyNest shows: ${r.status}`;
         done.disabled = !r.ok;
-        if (r.ok && a.cleanerId === me.id && !finishing) { finishing = true; checking = false; return finish({}); } // it's back: done
+        if (r.ok && a.cleanerId === me.id && !finishing && !autoTried) { autoTried = true; finishing = true; checking = false; return finish({}); } // it's back: done (once; after that the button)
         showStores(!r.ok && !r.error);
       } catch (e) { box.className = 'kn-status err'; text.textContent = e.message; done.disabled = true; }
       checking = false; again.disabled = false; again.textContent = 'Check again';
@@ -2304,7 +2345,7 @@
     if (!list) return;
     const mine = [...uploads.entries()].filter(([, u]) => u.ownerId === a.id);
     list.innerHTML = mine.map(([k, u]) => `<div class="up ${u.error ? 'err' : u.done ? 'ok' : ''}" data-up="${k}">
-      <span class="up-k">${u.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(u.file.name || u.kind)} · ${(u.file.size / 1e6).toFixed(u.file.size > 1e7 ? 0 : 1)} MB</span>
+      <span class="up-k">${u.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(u.file.name || u.kind)} · ${u.file.size >= 1e6 ? `${(u.file.size / 1e6).toFixed(u.file.size > 1e7 ? 0 : 1)} MB` : `${Math.max(1, Math.round(u.file.size / 1e3))} KB`}</span>
       <span class="up-s">${u.error ? esc(u.error) : u.done ? 'Uploaded ✓' : u.waiting ? 'Waiting for signal…' : Math.floor(u.progress * 100) + '%'}</span>
       <span class="up-bar"><i style="transform:scaleX(${u.done ? 1 : u.progress})"></i></span>
       ${u.kind === 'video' && isLowQuality(u.info) ? lowQualityNote(u.info) : ''}</div>`).join('');
@@ -2312,7 +2353,7 @@
     const busy = mine.some(([, u]) => !u.done && !u.error);
     const req = document.querySelector('.evidence .req'), note = document.querySelector('.evidence .ev-note');
     if (req) req.classList.toggle('hidden', hasVideo);
-    if (note) note.textContent = hasVideo && !busy ? 'Video uploaded ✓ You can finish the cleaning.' : busy ? 'Keep this screen open until the upload finishes.' : 'A video is needed to finish. Keep this screen open until uploads finish.';
+    if (note) note.textContent = hasVideo && !busy ? (a.keyMode === 'lockbox' || a.keyMode === 'keynest' ? 'Video uploaded ✓ Next, return the key.' : 'Video uploaded ✓ You can finish the cleaning.') : busy ? 'Keep this screen open until the upload finishes.' : 'A video is needed to finish. Keep this screen open until uploads finish.';
     const btn = $('ev-finish');
     btn.disabled = !hasVideo || busy;
     const next = a.keyMode ? 'Next: return the key' : 'Finish cleaning';
@@ -2475,7 +2516,7 @@
 
   // ---------------- Cleaning tab (admins, supervisors, users) ----------------
   let cvDate = null;
-  const STEP = { in_progress: 'Cleaning', checklist: 'Final checks', awaiting_video: 'Uploading video', awaiting_key: 'Returning key' };
+  const STEP = { in_progress: 'Cleaning', checklist: 'Final checks', awaiting_video: 'Video to upload', awaiting_key: 'Key to return' };
   async function loadCleaningView() {
     cvDate = cvDate || (data && data.today) || new Date().toISOString().slice(0, 10);
     $('cv-date').value = cvDate;
@@ -2575,14 +2616,20 @@
       if ($('dt-reset')) $('dt-reset').onclick = () => resetCleaning(c);
     } catch (e) { if (e.message !== 'signed out') $('detail-body').innerHTML = `<div class="sh-head"><h2>Cleaning</h2><button class="btn sq" data-close-detail aria-label="Close">✕</button></div><div class="banner error">${esc(e.message)}</div>`; }
   }
-  function closeDetail() { detailId = null; postId = null; $('detail').classList.add('hidden'); if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll'); dropNav('detail'); }
-  $('detail').addEventListener('click', (e) => { if (e.target.id === 'detail' || e.target.closest('[data-close-detail]')) closeDetail(); });
+  function closeDetail() {
+    detailId = null; postId = null; $('detail').classList.add('hidden');
+    if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll');
+    else if (sheetMode === 'main') renderSheet(); // a task changed on top of the panel shows its new state
+  }
+  $('detail').addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-applink]');
+    if (a) { e.preventDefault(); closeDetail(); openLink(a.getAttribute('href')); return; } // stays in the app, Back still works
+    if (e.target.id === 'detail' || e.target.closest('[data-close-detail]')) closeDetail();
+  });
   // Escape closes whatever is on top: a pop-up handles itself; then a detail drawer, the flat panel, the copy menu.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || document.querySelector('.modal')) return;
-    if (!$('detail').classList.contains('hidden')) closeDetail();
-    else if (!$('sheet').classList.contains('hidden')) closeSheet();
-    else if (!$('copy-menu').classList.contains('hidden')) closeCopyMenu();
+    if (!closeTop() && !$('copy-menu').classList.contains('hidden')) closeCopyMenu();
   });
 
   // ---------- Damage reports (their own page) ----------
@@ -2630,7 +2677,7 @@
   }
   $('cv-date').onchange = (e) => { cvDate = e.target.value; loadCleaningView(); };
   $('cv-prev').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
-  $('cv-next').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
+  $('cv-next').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); const nx = d.toISOString().slice(0, 10); if (data && nx > data.today) return; cvDate = nx; loadCleaningView(); };
 
   // =====================================================================
   // Notifications: bell with unread count + list, and phone notifications (Web Push)
@@ -2680,7 +2727,6 @@
   function closeNotifs() { $('notif').classList.add('hidden'); }
   $('bell').onclick = () => ($('notif').classList.contains('hidden') ? openNotifs() : closeNotifs());
   $('notif').addEventListener('click', (e) => { if (e.target.id === 'notif') closeNotifs(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNotifs(); });
   setInterval(() => { if (!document.hidden) loadNotifs(); }, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifs(); });
 
@@ -2711,7 +2757,7 @@
     const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
     if (!supported && isIOS && !standalone) return { state: 'setup', html: `<b>Phone notifications</b><span>On iPhone, first add this app to your Home Screen: tap <b>Share</b> › <b>Add to Home Screen</b>, then open it from there and turn notifications on.</span>` };
     if (!supported) return { state: 'off', html: '<b>Phone notifications</b><span>This browser can’t show notifications.</span>' };
-    if (Notification.permission === 'denied') return { state: 'off', html: '<b>Phone notifications are blocked</b><span>Allow notifications for this app in your phone’s Settings, then come back here.</span>' };
+    if (Notification.permission === 'denied') return { state: 'off', html: '<b>Phone notifications are blocked</b><span>Allow notifications for this app in your phone’s or browser’s settings, then come back here.</span>' };
     if (pushOn) return { state: 'on', html: '<b>Phone notifications are on</b><span>You’ll get alerts even when the app is closed.</span><span class="np-btns"><button class="linkbtn inline" id="np-test">Send a test</button><button class="linkbtn inline" id="np-off">Turn off</button></span>' };
     return { state: 'offer', html: '<b>Get alerts on this phone</b><span>Even when the app is closed.</span><button class="btn primary" id="np-on">Turn on</button>' };
   }

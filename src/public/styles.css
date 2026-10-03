@@ -1342,13 +1342,22 @@ td.unit .u { font-weight: 600; }
 }
 @media (min-width: 761px) and (max-width: 1080px) {
   .dbtn { padding: 10px 6px; }
-  .dbtn .lbl, .dbtn .sep { display: none; }
+  .dbtn .lbl { display: none; } /* "4 · 2": the dot keeps the two numbers apart */
   .dbtn .dc { white-space: nowrap; }
+  .dbtn .dtoday { display: none; } /* too wide for the chip here: today's name turns green instead */
+  .dbtn.today .dn { color: var(--accent); }
+  .dbtn.today[aria-selected="true"] .dn { color: #cfe3d8; }
+  .page-title { font-size: 30px; }
+}
+@media (min-width: 761px) and (max-width: 960px) {
+  .summary, .summary:has(#m-done-box.hidden) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .summary .metric:nth-child(3) { border-left: 0; }
+  .summary .metric:nth-child(n+3) { border-top: 1px solid var(--line-2); }
 }
 .metric .s { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } /* two lines, not '2 same-…' */
 /* Users list: never clipped; side by side with the form it shows Name, Role, Edit only */
 .users-layout > .card:first-child { min-width: 0; overflow-x: auto; }
-.users-layout.editing { grid-template-columns: minmax(0, 1fr) 420px; }
+@media (min-width: 861px) { .users-layout.editing { grid-template-columns: minmax(0, 1fr) 420px; } }
 .users-layout.editing .utable .hide-sm { display: none; }
 @media (max-width: 1100px) { .utable .hide-sm { display: none; } }
 .utable td.empty { text-align: center !important; }
@@ -1360,7 +1369,7 @@ td.unit .u { font-weight: 600; }
 /* "Cleaner" picker: the label goes above the picker on phones so names stay readable */
 @media (max-width: 520px) { .assign-row { flex-wrap: wrap; } .assign-row label { flex-basis: calc(100% - 28px); white-space: normal; } .assign-row select { flex-basis: 100%; } }
 /* Week board: the sticky corner stays above the day headers when scrolled sideways */
-thead .first-col { z-index: 4; }
+table.board thead th.first-col { z-index: 4; } /* the corner stays on top of the day headers when scrolled sideways */
 /* Inline links inside notes don't make tall uneven lines */
 .moved-note .linkbtn, .reset-note .linkbtn { padding: 0 2px; min-height: 0; font-size: inherit; }
 /* Permission ticks keep their size when the label wraps */
@@ -1376,7 +1385,7 @@ thead .first-col { z-index: 4; }
 .tc-wait { font-size: 14px; color: var(--ink-2); margin: 6px 0 2px; }
 .reset-note.warn { background: var(--out-soft); color: var(--out); }
 /* the summary shows its numbers only once the cleanings have loaded */
-.summary.loading .metric .v, .summary.loading .metric .s { opacity: .35; }
+.summary.c-loading .metric .v, .summary.c-loading .metric .s { opacity: .35; }
 /* forum: like / dislike / comments line up */
 .fp-foot .vote, .fp-foot .fp-c { margin: 0; vertical-align: middle; }
 /* segmented choices (priority, severity, post type) are comfortable to tap */
@@ -1392,3 +1401,28 @@ thead .first-col { z-index: 4; }
   .cpf-more { display: inline-flex; align-self: flex-end; height: 40px; }
   #cp-filters:not(.open) .cpf:not(.grow) { display: none; }
 }
+
+/* ---- re-check fixes (Oct 2026) ---- */
+.r-l { flex: none; } /* the flat name and its badges never squash the details next to them */
+.row .t { min-width: 0; }
+#user-form { scroll-margin-top: 72px; } /* clear of the top bar when scrolled to on phones */
+@media (min-width: 761px) and (max-width: 1100px) { #cv-summary .metric .v { font-size: 20px; white-space: normal; line-height: 1.15; } }
+@media (max-width: 520px) {
+  .lbx { flex-wrap: wrap; }
+  .lbx-by { order: 3; flex-basis: 100%; white-space: normal; overflow: visible; }
+  .mt-unitf > label { display: none; }
+  /* a long status (e.g. INVESTIGATING) sits under the title instead of squeezing it */
+  .sh-head:has(> .sh-right > .mst, > .sh-right > .cb) { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 10px; align-items: start; }
+  .sh-head:has(> .sh-right > .mst, > .sh-right > .cb) > .sh-right { display: contents; }
+  .sh-head:has(> .sh-right > .mst, > .sh-right > .cb) > .sh-title { grid-column: 1; grid-row: 1; }
+  .sh-head:has(> .sh-right > .mst, > .sh-right > .cb) > .sh-right > .btn { grid-column: 2; grid-row: 1; }
+  .sh-head:has(> .sh-right > .mst, > .sh-right > .cb) > .sh-right > :is(.mst, .cb) { grid-column: 1; grid-row: 2; justify-self: start; margin-top: 0; }
+  .assign-row.ro { flex-wrap: nowrap; }
+  .assign-row.ro > span { min-width: 0; }
+}
+@media (max-width: 760px) { .sh-times b { font-size: clamp(13.5px, 4vw, 17px); white-space: nowrap; } }
+.mt-who > span:last-child { min-width: 0; }
+#settings-backups .set-actions { margin-top: 0; }
+#settings-backups .kn-table { margin-top: 16px; }
+.kn-table td .btn { height: 34px; padding: 0 14px; font-size: 13.5px; }
+.nw { white-space: nowrap; }
