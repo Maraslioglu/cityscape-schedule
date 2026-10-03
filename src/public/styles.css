@@ -1428,7 +1428,7 @@ table.board thead th.first-col { z-index: 4; } /* the corner stays on top of the
 .nw { white-space: nowrap; }
 /* lockbox "set by …" moves to its own line when the card is too narrow, instead of being cut */
 .lbx { flex-wrap: wrap; }
-.lbx-by { flex: none; overflow: visible; }
+.lbx-by { flex: 0 1 auto; min-width: 0; white-space: normal; overflow: visible; overflow-wrap: anywhere; } /* long key instructions wrap too */
 /* phone day rows: the flat's details go under its name when they don't fit beside it */
 @media (max-width: 760px) { .r-flat { flex-wrap: wrap; row-gap: 2px; } }
 .fc-del { padding: 6px 8px !important; margin-right: -8px; } /* a comfortable tap target */
@@ -1438,11 +1438,14 @@ table.board thead th.first-col { z-index: 4; } /* the corner stays on top of the
 .cpbar { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) 28px; }
 .cpbar .pl { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3; }
 /* summary in two columns up to 1100px: four squeezed tiles wrap their lines mid-phrase */
-@media (min-width: 961px) and (max-width: 1100px) {
+@media (min-width: 961px) and (max-width: 1140px) {
   .summary, .summary:has(#m-done-box.hidden) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .summary .metric:nth-child(3) { border-left: 0; }
   .summary .metric:nth-child(n+3) { border-top: 1px solid var(--line-2); }
 }
-.mt.photo.broken { display: grid; place-items: center; background: var(--surface-2); color: var(--ink-3); font-size: 12px; }
+.mt.photo.broken { display: grid; place-items: center; padding: 6px; background: var(--surface-2); color: var(--ink-3); font-size: 12px; text-align: center; text-decoration: none; pointer-events: none; }
 .mt.photo.broken img { display: none; }
 .mt.photo.broken::after { content: "Photo unavailable"; }
+.assign-row.ro #as-remove { margin-left: auto; flex: none; }
+/* lockbox box: code and Edit code on the first line, "set by …" always on its own line under them */
+.lbx-by:not(.lbx-i) { order: 3; flex-basis: 100%; }

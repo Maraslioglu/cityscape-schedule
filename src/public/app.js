@@ -286,7 +286,7 @@
     const b = e.target.closest('[data-edit], [data-code]');
     if (!b || !props) return;
     const id = b.dataset.edit || b.dataset.code;
-    for (const g of props.buildings) { const u = g.units.find((x) => x.id === id); if (u) return b.dataset.code ? askCode(u) : openPropEditor(u); }
+    for (const g of props.buildings) { const u = g.units.find((x) => x.id === id); if (u) return b.dataset.code ? askCode({ building: g.name, ...u }) : openPropEditor(u); }
   });
 
   // ---------- changing a lockbox code by hand (anyone who sees codes, cleaners included) ----------
@@ -302,7 +302,7 @@
       <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary" id="md-save">Save code</button></div></form>`;
     document.body.appendChild(box);
     const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const onKey = (e) => { if (e.key === 'Escape' && isTopModal(box)) close(); };
     document.addEventListener('keydown', onKey);
     box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) close(); });
     const input = $('md-code');
@@ -567,7 +567,7 @@
         <dl class="mt-facts">
           <div><dt>Categories</dt><dd>${(c.categories || []).map((x) => `<span class="fk">${esc(x)}</span>`).join(' ') || '—'}</dd></div>
           <div><dt>Severity</dt><dd>${esc(CP_SEV[c.severity] || '—')}</dd></div>
-          <div><dt>Booking</dt><dd>${c.stay ? `${esc(c.stay.code || 'No code')} · <span class="nw">${esc(shortDate(c.stay.checkIn))}–${esc(shortDate(c.stay.checkOut))}</span>${c.stay.guests ? ` · ${c.stay.guests} guest${c.stay.guests > 1 ? 's' : ''}` : ''}` : '—'}</dd></div>
+          <div><dt>Booking</dt><dd>${c.stay ? `${esc(c.stay.code || 'No code')} · <span class="nw">${esc(shortDate(c.stay.checkIn))}–${esc(shortDate(c.stay.checkOut))}</span>${c.stay.guests ? ` · <span class="nw">${c.stay.guests} guest${c.stay.guests > 1 ? 's' : ''}</span>` : ''}` : '—'}</dd></div>
           <div><dt>Upheld</dt><dd>${c.upheld === true ? 'Yes, the guest was right' : c.upheld === false ? 'No' : 'Not decided'}</dd></div>
           ${c.compensation !== null && c.compensation !== undefined ? `<div><dt>Compensation</dt><dd>£${esc(Number(c.compensation).toFixed(2))}</dd></div>` : ''}
           ${c.resolution ? `<div class="wide"><dt>Resolution${c.resolvedBy ? ` · ${esc(c.resolvedBy)}` : ''}</dt><dd>${esc(c.resolution)}</dd></div>` : ''}
@@ -1128,6 +1128,10 @@
   // ---------- who's signed in ----------
   const initials = (n) => (n || '?').split(/\s+/).filter((w) => /^[a-z]/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   function applyPermissions() {
+    const adminWord = me.role === 'supervisor' ? 'Your team' : 'Admin'; // supervisors manage their own people here
+    $('acct-admin').querySelector('h3').textContent = adminWord;
+    document.querySelectorAll('.nlbl[data-group="admin"]').forEach((el) => { el.textContent = adminWord; });
+    GROUP.users = adminWord; GROUP.settings = adminWord;
     document.querySelectorAll('.snav [data-nav]').forEach((b) => b.classList.toggle('hidden', !navAllowed(b.dataset.nav)));
     document.querySelectorAll('.snav .nlbl').forEach((l) => l.classList.toggle('hidden', !document.querySelector(`.snav [data-nav][data-group="${l.dataset.group}"]:not(.hidden)`)));
     document.querySelector('.range [data-range="day"]').classList.toggle('hidden', !allowed('day'));
@@ -1156,7 +1160,6 @@
     $('acct-users').classList.toggle('hidden', !navAllowed('users'));
     $('acct-settings').classList.toggle('hidden', !navAllowed('settings'));
     $('acct-admin').classList.toggle('hidden', !navAllowed('users') && !navAllowed('settings'));
-    $('acct-admin').querySelector('h3').textContent = me.role === 'admin' ? 'Admin' : 'Team'; // supervisors manage their people here
     $('acct-props').classList.toggle('hidden', !navAllowed('props'));
     $('acct-forum').classList.toggle('hidden', !navAllowed('forum'));
     $('acct-more').classList.toggle('hidden', !navAllowed('props') && !navAllowed('forum'));
@@ -1530,7 +1533,7 @@
     if (isManager()) {
       $('m-third-k').textContent = 'Not assigned';
       $('m-third').textContent = s.unassigned.length;
-      $('m-third').classList.toggle('warnv', s.unassigned.length > 0);
+      $('m-third').classList.toggle('warnv', s.unassigned.length > 0 && !(data && selected < data.today));
       $('m-third-s').textContent = s.unassigned.length ? s.unassigned.map((x) => x.u.label).slice(0, 4).join(' · ') + (s.unassigned.length > 4 ? ' …' : '') : 'Everyone has a cleaner';
     } else {
       const mine = s.st.filter((x) => x.a && x.a.cleanerId === me.id);
@@ -1568,7 +1571,7 @@
         const c = x.active || x.done, k = c && c.cleanerId ? c.cleanerId : x.a ? x.a.cleanerId : '', nm = c && c.cleanerId ? c.cleanerName : x.a ? x.a.cleanerName : '';
         if (!by.has(k)) by.set(k, { name: nm, items: [] }); by.get(k).items.push(x);
       }
-      const line = (x) => x.active ? `${x.u.label} ${x.active.status === 'in_progress' ? `cleaning since ${fmtClock(x.active.startedAt)}` : (STEP_WORD[x.active.status] || 'in progress').toLowerCase()}`
+      const line = (x) => x.active ? `${x.u.label} ${x.active.status === 'in_progress' ? `cleaning since ${fmtClock(x.active.startedAt)}` : stepWord(x.active).toLowerCase()}`
         : x.done ? `${x.u.label} done${x.done.manual && !x.done.manual.timeKnown ? '' : ' ' + fmtClock(x.done.endedAt)}` : `${x.u.label} to clean`;
       const rows = [...by.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : 0)).map(([id, g]) => id
         ? `<div class="rrow"><span class="avatar">${esc(initials(g.name))}</span><span class="rtxt"><b>${id === me.id ? 'You' : esc(g.name)}</b><span>${esc(g.items.map(line).join(' · '))}</span></span><em>${g.items.filter((x) => x.done).length}/${g.items.length}</em></div>`
@@ -1691,7 +1694,7 @@
   function closeTop() {
     if (!$('notif').classList.contains('hidden')) closeNotifs();
     else if (!$('checklist').classList.contains('hidden')) $('checklist').classList.add('hidden'); // same as "Not done yet"
-    else if (!$('detail').classList.contains('hidden')) closeDetail();
+    else if (!$('detail').classList.contains('hidden')) { const back = $('mt-back') || $('cp-back'); if (back) back.click(); else closeDetail(); } // a form's own Cancel goes back to where it came from
     else if (!$('sheet').classList.contains('hidden')) {
       if (sheetMode === 'damage') { if ($('dmg-back')) $('dmg-back').click(); else { sheetMode = 'main'; renderSheet(); } } // back to the flat, like its ←
       else closeSheet(); // refused while a video uploads: the Back step comes back
@@ -1707,7 +1710,11 @@
     } finally { navPopping = false; }
     syncNav();
   });
-  $('sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet' || e.target.closest('[data-close]')) closeSheet(); });
+  $('sheet').addEventListener('click', (e) => {
+    if (e.target.id !== 'sheet' && !e.target.closest('[data-close]')) return;
+    if (sheetMode === 'damage' && $('dmg-back')) $('dmg-back').click(); // asks before throwing a started report away
+    else closeSheet();
+  });
 
   // "4K", "1080p"… from the uploaded video's shorter side (works for upright and sideways videos).
   const qualityName = (m) => { const s = Math.min(m.width, m.height); return s >= 2160 ? '4K' : s >= 1080 ? '1080p' : s >= 720 ? '720p' : `${m.width}×${m.height}`; };
@@ -1737,12 +1744,19 @@
     const a = assignments[`${selected}|${sheetListing}`];
     const du = data && unitOn(sheetListing, selected);
     if (data && !a && (!(du && du.checkOut) || selected < data.today)) return ''; // nothing to clean that day, or it's passed
+    if (data && a && selected < data.today && can('assign_cleanings')) { // the day has passed: it can only be taken off
+      return `<div class="assign-row ro">${PERSON_ICON}<span>Assigned to <b>${esc(a.cleanerName)}</b> ${esc(longDate(selected))}</span><button class="linkbtn" id="as-remove">Remove</button></div>`;
+    }
     const day = selected === (data && data.today) ? 'today' : esc(longDate(selected));
     if (!can('assign_cleanings')) return a ? `<div class="assign-row ro">${PERSON_ICON}<span>${a.cleanerId === me.id ? '<b>Assigned to you</b>' : `Assigned to <b>${esc(a.cleanerName)}</b>`} ${day}</span></div>` : '';
     return `<div class="assign-row">${PERSON_ICON}<label for="as-sel">Cleaner ${selected === (data && data.today) ? 'today' : esc(`${WD_SHORT.format(D(selected))} ${shortDate(selected)}`)}</label>
       <select id="as-sel" data-cur="${esc(a ? a.cleanerId : '')}"><option value="">${a ? esc(a.cleanerName) : 'Not assigned'}</option></select></div>`;
   }
   async function wireAssign() {
+    if ($('as-remove')) $('as-remove').onclick = async () => {
+      const listingId = sheetListing, date = selected;
+      try { await send('PUT', '/api/assignments', { listingId, date, cleanerId: null }); delete assignments[`${date}|${listingId}`]; toast('Assignment removed'); decorateDay(); renderSheet(); } catch (e) { toast(e.message); }
+    };
     const sel = $('as-sel');
     if (!sel) return;
     const listingId = sheetListing, date = selected;
@@ -1933,6 +1947,7 @@
       if (detailId === c.id) openDetail(c.id);
     } catch (e) { toast(e.message); }
   }
+  const isTopModal = (box) => [...document.querySelectorAll('.modal')].pop() === box; // Escape closes only the pop-up on top
   // A small form in a pop-up. fill(box) wires it; submit(form) returns true to close, or throws to show the error.
   function formModal(title, html, submit, fill) {
     const box = document.createElement('div');
@@ -1940,7 +1955,7 @@
     box.innerHTML = `<form class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="md-t" novalidate><h3 id="md-t">${esc(title)}</h3>${html}<p class="md-err" id="md-err" role="alert"></p></form>`;
     document.body.appendChild(box);
     const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const onKey = (e) => { if (e.key === 'Escape' && isTopModal(box)) close(); };
     document.addEventListener('keydown', onKey);
     box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) close(); });
     const form = box.querySelector('form');
@@ -2054,7 +2069,7 @@
         <div class="form-actions"><span class="spacer"></span><button class="btn" data-md="no">${esc(no)}</button><button class="btn ${danger ? 'danger-solid' : 'primary'}" data-md="yes">${esc(yes)}</button></div></div>`;
       document.body.appendChild(box);
       const done = (ok) => { const n = box.querySelector('#md-note'), c = box.querySelector('#md-check'); box.remove(); document.removeEventListener('keydown', esc_); resolve(ok ? { note: n ? n.value.trim() : '', checked: c ? c.checked : false } : null); };
-      const esc_ = (e) => { if (e.key === 'Escape') done(false); };
+      const esc_ = (e) => { if (e.key === 'Escape' && isTopModal(box)) done(false); };
       document.addEventListener('keydown', esc_);
       box.addEventListener('click', (e) => { if (e.target === box) done(false); const b = e.target.closest('[data-md]'); if (b) done(b.dataset.md === 'yes'); });
       box.querySelector('[data-md="no"]').focus();
@@ -2174,6 +2189,9 @@
     return c.key.overridden ? ` · KeyNest check overridden by ${esc(c.key.overriddenBy || '')}${c.key.status && c.key.status !== 'not checked' ? ` (KeyNest showed: ${esc(c.key.status)})` : ''}` : c.key.viaWebhook ? ` · key handed in at ${esc(c.key.store || 'KeyNest')}` : ' · key back in KeyNest';
   }
   let keyPoll = null;
+  // KeyNest key steps from the last 36 hours finish by themselves (the server's rule too); older ones need the button,
+  // so the next guests' drop-off can't finish a cleaning that's been stuck for days.
+  const keyAuto = (a) => Date.now() - Date.parse(a.videoAt || a.endedAt || a.startedAt) < 36 * 3600e3;
   function keyStep(a) {
     if (a.keyMode === 'lockbox' && a.keyNoCode) {
       return `<div class="evidence keystep">
@@ -2196,8 +2214,7 @@
         <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
       </div>`;
     }
-    // The server finishes key steps from the last 36 hours by itself; older ones need the button.
-    const auto = Date.now() - Date.parse(a.videoAt || a.endedAt || a.startedAt) < 36 * 3600e3;
+    const auto = keyAuto(a);
     const knNote = a.cleanerId !== me.id
       ? `${esc(a.cleanerName)} needs to hand the key in at KeyNest. ${auto ? 'Once KeyNest shows it in the store, this cleaning completes by itself.' : 'Once KeyNest shows it in the store, press Complete cleaning.'}`
       : auto ? 'If you collected the key from KeyNest, hand it back in at the store. As soon as KeyNest records it there, this cleaning completes by itself: you don’t need to come back to the app.'
@@ -2286,7 +2303,7 @@
         box.className = 'kn-status ' + (r.ok ? 'ok' : r.error ? 'err' : 'wait');
         text.textContent = r.error ? r.error : r.ok ? `Key is in KeyNest ✓ (${r.status})` : `Waiting for the key · KeyNest shows: ${r.status}`;
         done.disabled = !r.ok;
-        if (r.ok && a.cleanerId === me.id && !finishing && !autoTried) { autoTried = true; finishing = true; checking = false; return finish({}); } // it's back: done (once; after that the button)
+        if (r.ok && a.cleanerId === me.id && keyAuto(a) && !finishing && !autoTried) { autoTried = true; finishing = true; checking = false; return finish({}); } // it's back: done (once; after that the button)
         showStores(!r.ok && !r.error);
       } catch (e) { box.className = 'kn-status err'; text.textContent = e.message; done.disabled = true; }
       checking = false; again.disabled = false; again.textContent = 'Check again';
@@ -2699,7 +2716,7 @@
     }
     renderRail();
   }
-  $('cv-date').onchange = (e) => { cvDate = e.target.value; loadCleaningView(); };
+  $('cv-date').onchange = (e) => { cvDate = data && e.target.value > data.today ? data.today : e.target.value; loadCleaningView(); };
   $('cv-prev').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
   $('cv-next').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); const nx = d.toISOString().slice(0, 10); if (data && nx > data.today) return; cvDate = nx; loadCleaningView(); };
 
@@ -2779,10 +2796,10 @@
   let pushOn = false;
   function pushState() {
     const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-    if (!supported && isIOS && !standalone) return { state: 'setup', html: `<b>Phone notifications</b><span>On iPhone, first add this app to your Home Screen: tap <b>Share</b> › <b>Add to Home Screen</b>, then open it from there and turn notifications on.</span>` };
-    if (!supported) return { state: 'off', html: '<b>Phone notifications</b><span>This browser can’t show notifications.</span>' };
+    if (!supported && isIOS && !standalone) return { state: 'setup', html: `<b>Notifications</b><span>On iPhone, first add this app to your Home Screen: tap <b>Share</b> › <b>Add to Home Screen</b>, then open it from there and turn notifications on.</span>` };
+    if (!supported) return { state: 'off', html: '<b>Notifications</b><span>This browser can’t show notifications.</span>' };
     if (Notification.permission === 'denied') return { state: 'off', html: '<b>Notifications are blocked</b><span>Allow notifications for this app in your phone’s or browser’s settings, then come back here.</span>' };
-    if (pushOn) return { state: 'on', html: '<b>Phone notifications are on</b><span>You’ll get alerts even when the app is closed.</span><span class="np-btns"><button class="linkbtn inline" id="np-test">Send a test</button><button class="linkbtn inline" id="np-off">Turn off</button></span>' };
+    if (pushOn) return { state: 'on', html: '<b>Notifications are on</b><span>You’ll get alerts even when the app is closed.</span><span class="np-btns"><button class="linkbtn inline" id="np-test">Send a test</button><button class="linkbtn inline" id="np-off">Turn off</button></span>' };
     return { state: 'offer', html: '<b>Get alerts on this device</b><span>Even when the app is closed.</span><button class="btn primary" id="np-on">Turn on</button>' };
   }
   async function initPush() {
@@ -2807,7 +2824,7 @@
       await send('POST', '/api/push/subscribe', { subscription: sub.toJSON() });
       pushOn = true; renderNotifs();
       send('POST', '/api/push/test').catch(() => {});
-      toast('Phone notifications on ✓');
+      toast('Notifications on ✓');
     } catch (e) { toast('Couldn’t turn on notifications: ' + (e.message || 'unknown error')); }
   }
   // Signing out: this phone stops getting the person's notifications (it may be a shared or borrowed phone).
@@ -2828,7 +2845,7 @@
       const sub = reg && await reg.pushManager.getSubscription();
       if (sub) { await send('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
     } catch (_) {}
-    pushOn = false; renderNotifs(); toast('Phone notifications off');
+    pushOn = false; renderNotifs(); toast('Notifications off');
   }
 
 })();

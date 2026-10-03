@@ -862,7 +862,8 @@ async function listingInfo(env, ctx, listingId) {
 // Changing a flat's lockbox code by hand (from Properties): anyone who can see codes, cleaners included, in their buildings.
 async function lockboxCodeApi(req, env, ctx, me, id) {
   const l = await listingInfo(env, ctx, id);
-  if (!l || !inScope(me, l.building) || !can(me, 'edit_lockbox')) return json({ error: 'You don’t have permission for that. Ask an admin.' }, 403);
+  if (l && can(me, 'edit_lockbox') && !inScope(me, l.building)) return json({ error: 'That flat isn’t in your buildings.' }, 403);
+  if (!l || !can(me, 'edit_lockbox')) return json({ error: 'You don’t have permission for that. Ask an admin.' }, 403);
   if (l.keyMode !== 'lockbox' || l.lockboxNoCode) return json({ error: `${l.label} doesn’t use a lockbox code.` }, 400);
   const body = await req.json().catch(() => ({}));
   const code = String(body.code || '').trim();
@@ -1708,7 +1709,7 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
     const body = await req.json().catch(() => ({}));
     const l = await listingInfo(env, ctx, String(body.listingId || ''));
     if (!l) return json({ error: 'That property wasn’t found.' }, 404);
-    if (!inScope(me, l.building) || !can(me, 'mark_cleaned')) return deny();
+    if (!inScope(me, l.building) || !can(me, 'mark_cleaned')) return deny(can(me, 'mark_cleaned') ? 'That flat isn’t in your buildings.' : undefined);
     const forDate = String(body.forDate || ''), date = String(body.date || '');
     const job = realDate(forDate) ? await jobFor(env, ctx, l, forDate) : null;
     if (!job) return json({ error: `There’s no check-out at ${l.label} on ${realDate(forDate) ? dayLabel(forDate) : 'that day'} to mark cleaned.` }, 400);
