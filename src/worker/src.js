@@ -265,12 +265,14 @@ function limitForSupervisor(me, out, existing) {
   out.perms = Object.fromEntries(PERMS.map(([k]) => [k, k !== 'manage_users' && Boolean(base[k]) && Boolean(mine[k])]));
   // Buildings: only ones the supervisor covers.
   if (out.buildings !== undefined || !existing) {
-    let b = out.buildings !== undefined ? out.buildings : roleDefaults(role).buildings;
+    const given = out.buildings !== undefined; // sent by the form (the role defaults shown in the form come through here too)
+    let b = given ? out.buildings : roleDefaults(role).buildings;
     if (b === 'all' && me.buildings !== 'all') b = [...(me.buildings || [])];
     if (Array.isArray(b)) {
       const outside = b.filter((x) => !coversBuilding(me, x));
-      if (outside.length) return `You can only give people your own buildings (not ${outside.join(', ')}).`;
-      if (!b.length) return 'Pick at least one of your buildings.';
+      if (given && outside.length) return `You can only give people your own buildings (not ${outside.join(', ')}).`;
+      b = b.filter((x) => coversBuilding(me, x));
+      if (given && !b.length) return 'Pick at least one of your buildings.';
     }
     out.buildings = b;
   }
@@ -1475,7 +1477,7 @@ async function keyPrecheck(req, env, ctx, parts) {
   const l = await listingInfo(env, ctx, rec.listingId);
   if (body.override === true) { // which key, and what KeyNest showed, for the record (KeyNest may well be down: that's often why)
     let link = null, chk = null;
-    try { link = l && await keynestLink(env, l); if (link) chk = await keynestCheck(env, link.keyId); } catch (_) { /* recorded as not checked */ }
+    try { link = l && await keynestLink(env, l); if (link) chk = await Promise.race([keynestCheck(env, link.keyId), new Promise((r) => setTimeout(() => r(null), 3000))]); } catch (_) { /* recorded as not checked */ }
     return { override: true, link, chk };
   }
   let link = null;
@@ -1564,9 +1566,13 @@ async function droppedSince(env, keyId, rec) {
 // anyone having to press anything or override. Runs after the webhook has been answered.
 // Every 5 minutes: a KeyNest cleaning waiting for the key finishes once KeyNest shows the key in a store, the same check
 // the cleaner's own app makes, so it completes even with the app closed and no webhook message.
+// Only key steps reached in the last 36 hours: one stuck longer (the key went to guests, say) could see the next guests'
+// drop-off, and finishing it then would mark a flat clean in Guesty that has just been left. A person sorts those out.
+const KEY_AUTO_MS = 36 * 3600e3;
+const keyStepRecent = (c, at = Date.now()) => at - Date.parse(c.videoAt || c.endedAt || c.startedAt) < KEY_AUTO_MS;
 async function sweepKeySteps(env, ctx) {
   if (!env.KEYNEST_API_KEY) return;
-  const waiting = (await loadList(env, 'cleanings')).filter((c) => c.status === 'awaiting_key' && c.keyMode === 'keynest');
+  const waiting = (await loadList(env, 'cleanings')).filter((c) => c.status === 'awaiting_key' && c.keyMode === 'keynest' && keyStepRecent(c));
   const ok = [];
   for (const c of waiting) { // KeyNest first, outside the lock: it can be slow
     try {
@@ -1589,7 +1595,7 @@ async function sweepKeySteps(env, ctx) {
 }
 
 async function finishOnKeyDrop(env, ctx, keyId, move) {
-  const waiting = (await loadList(env, 'cleanings')).filter((c) => c.status === 'awaiting_key' && c.keyMode === 'keynest' && Date.parse(c.startedAt) <= Date.parse(move.at) + 60e3);
+  const waiting = (await loadList(env, 'cleanings')).filter((c) => c.status === 'awaiting_key' && c.keyMode === 'keynest' && Date.parse(c.startedAt) <= Date.parse(move.at) + 60e3 && keyStepRecent(c, Date.parse(move.at)));
   if (!waiting.length) return;
   const ids = [];
   for (const c of waiting) { // which of them are for this key (looked up before taking the lock: KeyNest can be slow)
@@ -2763,7 +2769,11 @@ async function jobMovesApi(req, env, ctx, me) {
   const title = to === from ? `${l.label} moved back to ${dayLabel(to)}` : `${l.label} moved to ${dayLabel(to)}`;
   const text = `Was ${dayLabel(staleKey && fromKey === staleKey ? stored.to : oldDay)} · moved by ${me.name}${note ? ` — ${note}` : ''}`;
   if (aOld && fromKey !== tk) await notify(env, ctx, [aOld.cleanerId].filter((x) => x !== me.id), { type: 'moved', title, body: text, url: link, tag: `move-${key}` }).catch(() => {});
-  if (stale) await notify(env, ctx, [stale.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', title: `${l.label}: ${dayLabel(stored.to)} cancelled`, body: `The clean is back on ${dayLabel(to)}, and ${aOld.cleanerName} cleans it (${me.name}).`, url: link, tag: `move-${key}` }).catch(() => {});
+  if (stale) {
+    const said = to === stored.to ? { title: `${l.label} on ${dayLabel(to)}`, body: `You’re no longer assigned: ${aOld.cleanerName} cleans it (${me.name}).` }
+      : { title: `${l.label}: ${dayLabel(stored.to)} cancelled`, body: `The clean is ${to === from ? 'back' : 'now'} on ${dayLabel(to)}, and ${aOld.cleanerName} cleans it (${me.name}).` };
+    await notify(env, ctx, [stale.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', ...said, url: link, tag: `move-${key}` }).catch(() => {});
+  }
   if (bumped) { const keeper = assigned[`${to}|${l.id}`]; await notify(env, ctx, [bumped.cleanerId].filter((x) => x !== me.id), { type: 'unassigned', title: `${l.label} on ${dayLabel(to)}`, body: `You’re no longer assigned: ${keeper ? keeper.cleanerName : 'someone else'} cleans it that day (${me.name}).`, url: link, tag: `move-${key}` }).catch(() => {}); }
   return json({ ok: true, move: moves[key] || null, to });
 }

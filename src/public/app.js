@@ -1239,7 +1239,7 @@
       </fieldset>
       <fieldset><legend>Buildings they can see</legend>
         <div class="radio"><label class="${U.canAllBuildings === false ? 'hidden' : ''}"><input type="radio" name="uf-bmode" value="all" ${allB ? 'checked' : ''}>All buildings</label><label><input type="radio" name="uf-bmode" value="some" ${allB ? '' : 'checked'}>Only these</label></div>
-        <div class="checks ${allB ? 'hidden' : ''}" id="uf-blist">${U.buildings.map((b) => `<label><input type="checkbox" data-b="${esc(b)}" ${!allB && u.buildings.includes(b) ? 'checked' : ''}>${esc(b)}</label>`).join('')}</div>
+        <div class="checks ${allB ? 'hidden' : ''}" id="uf-blist">${U.buildings.map((b) => `<label><input type="checkbox" data-b="${esc(b)}" ${!allB && (u.buildings || []).includes(b) ? 'checked' : ''}>${esc(b)}</label>`).join('')}</div>
       </fieldset>
       ${isNew ? '' : `<fieldset><legend>Status</legend><div class="radio"><label><input type="radio" name="uf-active" value="1" ${u.active ? 'checked' : ''}>Active</label><label><input type="radio" name="uf-active" value="0" ${u.active ? '' : 'checked'}>Deactivated</label></div></fieldset>`}
       <div class="form-msg" id="uf-msg"></div>
@@ -1664,7 +1664,8 @@
   // ---- the phone's Back button closes the open panel, or goes back to the previous screen (instead of leaving the app) ----
   // While a panel or drawer is open there's one extra history entry ('panel'); it's put back or taken away after every
   // open and close (watched below), so switching straight from one panel to another never loses or doubles it.
-  let navPopping = false, navSkip = 0, navTimer = null, navWait = 0;
+  let navPopping = false, navSkip = 0, navTimer = null, navWait = 0, navSkipT = null;
+  const skipNext = () => { navSkip++; clearTimeout(navSkipT); navSkipT = setTimeout(() => { navSkip = 0; }, 1000); }; // our own history step's popstate
   const OVERLAYS = ['sheet', 'detail', 'notif', 'checklist'];
   const panelOpen = () => OVERLAYS.some((id) => !$(id).classList.contains('hidden'));
   function syncNav() {
@@ -1676,7 +1677,7 @@
       const has = history.state && history.state.cs === 'panel', want = panelOpen();
       try {
         if (want && !has) history.pushState({ cs: 'panel', v: view }, '', location.href);
-        else if (!want && has) { navSkip++; history.back(); } // closed with ✕: take its Back step away too
+        else if (!want && has) { skipNext(); history.back(); } // closed with ✕: take its Back step away too
       } catch (_) {}
     }, 30);
   }
@@ -1696,7 +1697,7 @@
   }
   window.addEventListener('popstate', (e) => {
     if (navSkip) { navSkip--; return; }
-    if (document.querySelector('.modal')) { navSkip++; history.go(1); return; } // finish or cancel the pop-up first
+    if (document.querySelector('.modal')) { skipNext(); history.go(1); return; } // finish or cancel the pop-up first
     navPopping = true;
     try {
       if (!closeTop()) { const v = e.state && e.state.v; if (v && v !== view && allowed(v)) setView(v); }
@@ -1903,7 +1904,7 @@
     loadSheetMaint(sheetListing);
     if (active && mine && active.status === 'awaiting_video') wireEvidence(active);
     if (typed && active && typed.id === active.id && $('ks-code')) { $('ks-code').value = typed.c1 || ''; if ($('ks-code2')) $('ks-code2').value = typed.c2 || ''; if ($('ks-back')) $('ks-back').checked = Boolean(typed.back); }
-    if (active && (mine || stepsIn()) && active.status === 'awaiting_key') { wireKey(active); if (typed && $('ks-code')) $('ks-code').dispatchEvent(new Event('input')); }
+    if (active && (mine || stepsIn()) && active.status === 'awaiting_key') { wireKey(active); if (typed && $('ks-code2')) $('ks-code2').dispatchEvent(new Event('input')); }
     loadSheetDamages(sheetListing);
   }
 
