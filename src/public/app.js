@@ -5,7 +5,7 @@
   const fmt = (opts) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', ...opts });
   const WD_SHORT = fmt({ weekday: 'short' }), WD_LONG = fmt({ weekday: 'long' }), MON = fmt({ month: 'long' }), MON_S = fmt({ month: 'short' });
   const ordinal = (n) => n + ((n % 100 >= 11 && n % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'));
-  const longDate = (s) => `${WD_LONG.format(D(s))}, ${ordinal(D(s).getUTCDate())} ${MON.format(D(s))}`;
+  const longDate = (s) => `${WD_LONG.format(D(s))}, ${D(s).getUTCDate()} ${MON.format(D(s))}`;
   const shortDate = (s) => `${D(s).getUTCDate()} ${MON_S.format(D(s))}`;
   const compact = (t) => (t || '').replace(' ', '');
   const shortType = (t) => ({ 'Studio': 'Studio', '1 Bedroom': '1 bed', '2 Bedroom': '2 bed', '3 Bedroom': '3 bed' }[t] || t);
@@ -13,7 +13,7 @@
   const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 200));
 
   let data = null;          // week on screen
-  let view = store.get('cs_view') || 'day';
+  let view = store.get('cs_view') || 'day', navReady = false;
   let me = null;            // signed-in person and their permissions
   const can = (perm) => Boolean(me && me.perms && me.perms[perm]);
   const VIEW_PERM = { day: 'view_day', board: 'view_board', props: 'view_properties', cleaning: 'view_cleaning', damage: 'view_cleaning', users: 'manage_users', settings: null, account: null, forum: null, maintenance: null, complaints: null };
@@ -90,7 +90,7 @@
     const weekChanged = !data || data.weekStart !== w.weekStart;
     data = w;
     if (weekChanged || !data.dates.includes(selected)) selected = data.dates.includes(data.today) ? data.today : data.dates[0];
-    history.replaceState(null, '', data.dates.includes(data.today) ? location.pathname : `?week=${data.weekStart}`);
+    history.replaceState(history.state, '', data.dates.includes(data.today) ? location.pathname : `?week=${data.weekStart}`);
     if (same && !weekChanged) { renderFoot(); return; } // nothing changed: don't touch the screen
     boardDirty = true;
     render();
@@ -229,7 +229,8 @@
           else if (c.out) h += `<span class="mark out" title="Check-out ${esc(c.out.time)}">${esc(compact(c.out.time))}</span>`;
           else if (c.in) h += `<span class="mark in" title="Check-in ${esc(c.in.time)}">${esc(compact(c.in.time))}</span>`;
           if (c.movedOut && !c.out) h += `<span class="mark moved-away" title="Clean moved to ${esc(longDate(c.movedOut.to))}">→ ${esc(WD_SHORT.format(D(c.movedOut.to)))}</span>`;
-          return `<td class="cell${dates[i] === today ? ' today' : ''}">${h}</td>`;
+          const tap = c.out || c.in || c.movedOut;
+          return `<td class="cell${dates[i] === today ? ' today' : ''}${tap ? ' tap' : ''}"${tap ? ` data-flat="${esc(u.listingId)}" data-date="${dates[i]}" title="Open ${esc(u.label)} on ${esc(longDate(dates[i]))}"` : ''}>${h}</td>`;
         }).join('')}
       </tr>`).join('')}`).join('');
     const foot = `<tfoot>
@@ -239,6 +240,8 @@
     $('board').innerHTML = head + `<tbody>${body}</tbody>` + foot;
   }
   $('board').addEventListener('click', (e) => {
+    const cell = e.target.closest('td.cell[data-flat]');
+    if (cell) { openLink(`/?view=day&date=${cell.dataset.date}&flat=${encodeURIComponent(cell.dataset.flat)}`); return; }
     const b = e.target.closest('thead button');
     if (!b) return;
     selected = b.dataset.date;
@@ -286,7 +289,7 @@
     const b = e.target.closest('[data-edit], [data-code]');
     if (!b || !props) return;
     const id = b.dataset.edit || b.dataset.code;
-    for (const g of props.buildings) { const u = g.units.find((x) => x.id === id); if (u) return b.dataset.code ? askCode(u) : openPropEditor(u); }
+    for (const g of props.buildings) { const u = g.units.find((x) => x.id === id); if (u) return b.dataset.code ? askCode({ building: g.name, ...u }) : openPropEditor(u); }
   });
 
   // ---------- changing a lockbox code by hand (anyone who sees codes, cleaners included) ----------
@@ -295,14 +298,14 @@
     box.className = 'modal';
     box.innerHTML = `<form class="modal-card" role="dialog" aria-modal="true" aria-labelledby="md-t" novalidate>
       <h3 id="md-t">${u.lockbox ? 'Change' : 'Add'} the lockbox code</h3>
-      <p>${esc(u.label)}${u.lockbox ? ` · the code now is <b>${esc(u.lockbox.code)}</b>` : ''}. Everyone sees the new code straight away.</p>
+      <p>${esc(u.label)}${u.building ? ` · ${esc(u.building)}` : ''}${u.lockbox ? ` · the code now is <b>${esc(u.lockbox.code)}</b>` : ''}. Everyone sees the new code straight away.</p>
       <label class="md-l" for="md-code">New code</label>
       <input id="md-code" class="md-code" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4 numbers">
       <p class="md-err" id="md-err" role="alert"></p>
       <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary" id="md-save">Save code</button></div></form>`;
     document.body.appendChild(box);
     const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const onKey = (e) => { if (e.key === 'Escape' && isTopModal(box)) close(); };
     document.addEventListener('keydown', onKey);
     box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) close(); });
     const input = $('md-code');
@@ -316,7 +319,7 @@
       $('md-save').disabled = true;
       try {
         await send('PUT', `/api/lockbox/${encodeURIComponent(u.id)}`, { code });
-        close(); toast(`${u.label}’s lockbox code is now ${code}`);
+        close(); toast(`${u.label}${u.building ? ` (${u.building})` : ''}: the lockbox code is now ${code}`);
         loadProps(); // redraws in place, so the page stays where it was
       } catch (err) { $('md-err').textContent = err.message; $('md-save').disabled = false; }
     };
@@ -389,10 +392,11 @@
       $('pe-review').innerHTML = `<div class="confirm-box"><b>Save these changes to ${esc(u.label)}?</b><ul>${diff.map((k) => `<li>${esc(WORD[k])}: ${esc(before[k] || '—')} → <b>${esc(after[k] || '—')}</b></li>`).join('')}</ul><p class="muted">Everyone sees the change on the schedule straight away. Guesty itself isn’t changed.</p>
         <div class="form-actions"><button type="button" class="btn" id="pe-back">Back</button><button type="button" class="btn primary" id="pe-save">Save changes</button></div></div>`;
       $('pe-go').disabled = true;
+      $('pe-review').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       $('pe-back').onclick = () => { $('pe-review').innerHTML = ''; $('pe-go').disabled = false; };
-      $('pe-save').onclick = () => save({ fields: f }, `${u.label} updated`);
+      $('pe-save').onclick = () => save({ fields: f }, `${f.label || (u.guesty && u.guesty.label) || u.label} updated`);
     };
-    if ($('pe-reset')) $('pe-reset').onclick = () => confirm(`Use Guesty’s details for ${u.label} again? Your changes to this flat are removed.`) && save({ reset: true }, `${u.label} is back to Guesty’s details`);
+    if ($('pe-reset')) $('pe-reset').onclick = async () => (await askConfirm({ title: 'Reset to Guesty?', text: `Use Guesty’s details for ${u.label} again? Your changes to this flat are removed.`, yes: 'Reset to Guesty', danger: true })) && save({ reset: true }, `${(u.guesty && u.guesty.label) || u.label} is back to Guesty’s details`);
   }
 
   function fmtWhen(iso) { return new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
@@ -407,11 +411,11 @@
   function dueText(t) {
     if (!t.due) return '';
     const days = Math.round((D(t.due) - D(todayStr())) / 864e5);
-    if (['done', 'cancelled'].includes(t.status) || days > 6) return `Due ${WD_SHORT.format(D(t.due))} ${shortDate(t.due)}`;
+    if (['done', 'cancelled'].includes(t.status) || days > 6) return `Due ${WD_SHORT.format(D(t.due))} ${shortDate(t.due)}${t.due.slice(0, 4) !== todayStr().slice(0, 4) ? ' ' + t.due.slice(0, 4) : ''}`;
     return days < 0 ? `Overdue by ${-days} day${days === -1 ? '' : 's'}` : days === 0 ? 'Due today' : days === 1 ? 'Due tomorrow' : `Due ${WD_LONG.format(D(t.due))}`;
   }
   const whoHtml = (a) => (!a ? '<span class="mt-who none">Not assigned</span>'
-    : a.type === 'contractor' ? `<span class="mt-who"><span class="avatar sm ct" aria-hidden="true">${ICONS.tool}</span>${esc(a.name)}${a.trade ? ` <em>· ${esc(a.trade)}</em>` : ''}</span>`
+    : a.type === 'contractor' ? `<span class="mt-who"><span class="avatar sm ct" aria-hidden="true">${ICONS.tool}</span><span>${esc(a.name)}${a.trade ? ` <em>· ${esc(a.trade)}</em>` : ''}</span></span>`
     : `<span class="mt-who"><span class="avatar sm">${esc(initials(a.name))}</span>${a.id === me.id ? 'You' : esc(a.name)}</span>`);
   const mtCard = (t) => `<button class="card mtask${t.overdue ? ' late' : ''}" data-task="${esc(t.id)}">
       <span class="mt-top">${t.kind === 'guest_request' ? '<span class="mt-kind">Guest request</span>' : ''}<span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span><span class="mst ${esc(t.status)}">${esc(MT_ST[t.status])}</span>${t.repeat ? `<span class="mt-rep" title="${esc(everyText(t.repeat))}">${ICONS.repeat}${esc(everyText(t.repeat))}</span>` : ''}<span class="mt-flat">${esc(t.label)} · ${esc(t.building)}</span></span>
@@ -425,6 +429,8 @@
   }
   function renderMaintenance() {
     $('mt-new').classList.toggle('hidden', !can('report_maintenance') && !can('manage_maintenance'));
+    $('mt-new').lastChild.textContent = can('manage_maintenance') ? 'New task' : 'Report an issue'; // the form it opens says the same
+    $('mt-mine').classList.toggle('hidden', !can('manage_maintenance') && me.role !== 'supervisor'); // a cleaner's list is already only theirs
     if (!mtCache) return;
     const list = mtCache.tasks.filter((t) => !mtMine || (t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id) || t.reporterId === me.id)
       .sort((a, b) => (mtFilter === 'done' ? (b.doneAt || '').localeCompare(a.doneAt || '') : (b.overdue - a.overdue) || (MT_ORDER[a.priority] - MT_ORDER[b.priority]) || (a.due || '9999').localeCompare(b.due || '9999') || b.createdAt.localeCompare(a.createdAt)));
@@ -447,7 +453,7 @@
     } catch (_) {}
   }
   // ---------- Complaints (own page, under Maintenance in the menu): logged against the stay and the cleaning that prepared it ----------
-  let cpCache = null, cpStatus = 'open', cpPatterns = false;
+  let cpCache = null, cpStatus = 'open', cpPatterns = false, cpFiltersOpen = false;
   const cpF = { cat: '', building: '', flat: '', cleaner: '', period: '90', q: '' };
   const CP_ST = { open: 'Open', investigating: 'Investigating', resolved: 'Resolved', dismissed: 'Dismissed' };
   const CP_SEV = { high: 'High', medium: 'Medium', low: 'Low' };
@@ -485,7 +491,10 @@
       ${opt('building', 'Building', uniq(all.map((c) => [c.building, c.building])))}
       ${opt('flat', 'Flat', uniq(all.filter((c) => !cpF.building || c.building === cpF.building).map((c) => [c.listingId, `${c.label} · ${c.building}`])))}
       ${cpCache.seesAll ? opt('cleaner', 'Cleaner', uniq(all.flatMap((c) => (c.cleaning ? [[c.cleaning.cleanerId, c.cleaning.cleanerName], [c.cleaning.assignedId, c.cleaning.assignedName]] : [])))) : ''}
-      <label class="cpf grow"><span>Search</span><input data-cpf="q" type="search" value="${esc(cpF.q)}" placeholder="Words, flat, booking…"></label>`;
+      <label class="cpf grow"><span>Search</span><input data-cpf="q" type="search" value="${esc(cpF.q)}" placeholder="Words, flat, booking…"></label>
+      <button type="button" class="btn cpf-more" id="cpf-more" aria-expanded="${cpFiltersOpen}">${cpFiltersOpen ? 'Fewer filters' : `Filters${[cpF.cat, cpF.building, cpF.flat, cpF.cleaner].filter(Boolean).length ? ` (${[cpF.cat, cpF.building, cpF.flat, cpF.cleaner].filter(Boolean).length})` : ''}`}</button>`;
+    $('cp-filters').classList.toggle('open', cpFiltersOpen);
+    $('cpf-more').onclick = () => { cpFiltersOpen = !cpFiltersOpen; renderComplaints(); };
     $('cp-filters').querySelectorAll('[data-cpf]').forEach((el) => el[el.tagName === 'INPUT' ? 'oninput' : 'onchange'] = () => {
       cpF[el.dataset.cpf] = el.value; if (el.dataset.cpf === 'building') cpF.flat = '';
       if (el.tagName === 'INPUT') { drawCpList(); drawPatterns(); } else renderComplaints();
@@ -517,7 +526,7 @@
         <div><b>${list.length}</b><span>complaints</span></div><div><b>${decided ? Math.round((upheld / decided) * 100) + '%' : '–'}</b><span>upheld (${upheld} of ${decided} decided)</span></div>
         <div><b>£${comp.toLocaleString('en-GB', { maximumFractionDigits: 2 })}</b><span>compensation</span></div><div><b>${repeat.length}</b><span>flat${repeat.length === 1 ? '' : 's'} with 3 or more</span></div></div>
       <div class="card pcard2 pmonths"><h3>By month</h3><div class="pcols">${byMonth.map(([m, n]) => `<div class="pcol" title="${n} in ${esc(m)}"><b>${n || ''}</b><i style="height:${(n / maxM) * 100}%"></i><span>${esc(MON_S.format(D(m + '-01')))}</span></div>`).join('')}</div></div>
-      <div class="pgrid">
+      <div class="cp-pgrid">
         ${bars('By category', count((c) => c.categories && c.categories.length ? c.categories : ['Not categorised']))}
         ${bars('By flat', count((c) => `${c.label} · ${c.building}`))}
         ${bars('By cleaner', count((c) => (c.cleaning ? c.cleaning.cleanerName : 'No cleaning linked')))}
@@ -529,23 +538,39 @@
   document.querySelectorAll('[data-cps]').forEach((b) => b.onclick = () => { cpStatus = b.dataset.cps; document.querySelectorAll('[data-cps]').forEach((x) => x.setAttribute('aria-selected', x === b)); drawCpList(); });
   $('cp-pat').onclick = () => { cpPatterns = !cpPatterns; $('cp-pat').setAttribute('aria-pressed', cpPatterns); drawPatterns(); };
   $('cp-new').onclick = () => complaintForm({});
+  $('cp-csv').onclick = (e) => {
+    e.preventDefault();
+    if (!cpCache) return;
+    const q = (v) => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
+    const head = ['Date', 'Flat', 'Building', 'Categories', 'Severity', 'Source', 'What happened', 'Status', 'Upheld', 'Compensation (£)', 'Booking', 'Check-in', 'Cleaning date', 'Cleaned by', 'Assigned to', 'Resolution'];
+    const cap = (w) => (w ? w[0].toUpperCase() + w.slice(1) : '');
+    const rows = cpFiltered(false).map((c) => [c.date, c.label, c.building, (c.categories || []).join('; '), cap(c.severity), (cpCache.sources || {})[c.source] || c.source, c.title + (c.details ? ' — ' + c.details : ''), CP_ST[c.status] || c.status,
+      c.upheld === true ? 'Yes' : c.upheld === false ? 'No' : '', c.compensation ?? '', c.stay ? c.stay.code : '', c.stay ? c.stay.checkIn : '', c.cleaning ? c.cleaning.date : '', c.cleaning ? c.cleaning.cleanerName : '', c.cleaning ? c.cleaning.assignedName || '' : '', c.resolution || '']);
+    const csv = '\ufeff' + [head, ...rows].map((r) => r.map(q).join(',')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `complaints-${todayStr()}.csv`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast(`${rows.length} complaint${rows.length === 1 ? '' : 's'} exported`);
+  };
   $('cp-list').addEventListener('click', (e) => { const b = e.target.closest('[data-cp]'); if (b) openComplaint(b.dataset.cp); });
 
   async function openComplaint(id) {
     try {
       const { complaint: c, sources } = await getJSON(`/api/complaints/${encodeURIComponent(id)}`);
+      const keep = !$('detail').classList.contains('hidden') && $('detail-body').dataset.cp === id ? $('detail-body').scrollTop : 0; // after an action, stay where you were
       const rec = c.cleaningRecord, cl = c.cleaning, mineToo = cl && (cl.cleanerId === me.id || cl.assignedId === me.id);
       const moves = !c.canManage ? [] : ['resolved', 'dismissed'].includes(c.status) ? [['open', 'Reopen']] : [...(c.status !== 'investigating' ? [['investigating', 'Investigating']] : []), ['resolved', 'Resolved'], ['dismissed', 'Dismiss']];
-      const span = (a, b) => (cl && cl.manual ? cleanedWhen(cl) : a && b ? `${fmtClock(a)}–${fmtClock(b)} · ${durWords(Date.parse(b) - Date.parse(a))}` : '');
+      const span = (a, b) => (cl && cl.manual ? cleanedWhen(cl) : a && b ? `${fmtClock(a)}–${fmtClock(b)} · ${durWords(Date.parse(b) - Date.parse(a)).replace(/ /g, '\u00a0')}` : '');
       openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Complaint · ${esc(c.label)} · ${esc(c.building)}</span><h2 class="fp-h">${esc(c.title)}</h2>
           <div class="sh-sub">${esc(sources[c.source] || c.source)} · ${esc(longDate(c.date))} · logged by ${esc(c.createdByName)}</div></div><div class="sh-right"><span class="mst">${esc(CP_ST[c.status])}</span>${CLOSE_BTN}</div></div>
-        ${mineToo && !c.canManage ? `<p class="stepin-note cp-yours">This complaint is about the cleaning on ${esc(longDate(cl.date))}${cl.cleanerId === me.id ? ' that you did' : ' you were assigned to'}. You can add your side below.</p>` : ''}
+        ${mineToo && !c.canManage ? `<p class="stepin-note cp-yours">This complaint is about the cleaning on ${esc(longDate(cl.forDate || cl.date))}${cl.cleanerId === me.id ? ' that you did' : ' you were assigned to'}. You can add your side below.</p>` : ''}
         ${moves.length ? `<div class="mt-moves">${moves.map(([s, w]) => `<button class="btn ${s === 'resolved' ? 'primary' : ''}" data-cpmove="${s}">${esc(w)}</button>`).join('')}<span class="spacer"></span><button class="btn" id="cp-edit">Edit</button></div>` : ''}
         ${c.details ? `<p class="cp-details">${esc(c.details)}</p>` : ''}
         <dl class="mt-facts">
           <div><dt>Categories</dt><dd>${(c.categories || []).map((x) => `<span class="fk">${esc(x)}</span>`).join(' ') || '—'}</dd></div>
           <div><dt>Severity</dt><dd>${esc(CP_SEV[c.severity] || '—')}</dd></div>
-          <div><dt>Booking</dt><dd>${c.stay ? `${esc(c.stay.code || 'No code')} · ${esc(shortDate(c.stay.checkIn))}–${esc(shortDate(c.stay.checkOut))}${c.stay.guests ? ` · ${c.stay.guests} guest${c.stay.guests > 1 ? 's' : ''}` : ''}` : '—'}</dd></div>
+          <div><dt>Booking</dt><dd>${c.stay ? `${esc(c.stay.code || 'No code')} · <span class="nw">${esc(shortDate(c.stay.checkIn))}–${esc(shortDate(c.stay.checkOut))}</span>${c.stay.guests ? ` · <span class="nw">${c.stay.guests} guest${c.stay.guests > 1 ? 's' : ''}</span>` : ''}` : '—'}</dd></div>
           <div><dt>Upheld</dt><dd>${c.upheld === true ? 'Yes, the guest was right' : c.upheld === false ? 'No' : 'Not decided'}</dd></div>
           ${c.compensation !== null && c.compensation !== undefined ? `<div><dt>Compensation</dt><dd>£${esc(Number(c.compensation).toFixed(2))}</dd></div>` : ''}
           ${c.resolution ? `<div class="wide"><dt>Resolution${c.resolvedBy ? ` · ${esc(c.resolvedBy)}` : ''}</dt><dd>${esc(c.resolution)}</dd></div>` : ''}
@@ -555,7 +580,7 @@
             <div class="cp-cl-h"><span class="avatar">${esc(initials(cl.cleanerName))}</span><div><b>Cleaned by ${cl.cleanerId === me.id ? 'you' : esc(cl.cleanerName)}</b><span>${esc(longDate(cl.date))}${span(cl.startedAt, cl.endedAt) ? ' · ' + esc(span(cl.startedAt, cl.endedAt)) : ''}</span></div></div>
             <div class="cp-cl-s">Assigned to: <b>${cl.assignedName ? esc(cl.assignedName) : 'nobody'}</b>${rec && rec.manual ? ` · marked cleaned by ${esc(rec.manual.byName)}` : rec ? ` · checklist ${rec.checklist ? rec.checklist.length : 0}/${checklistDef.length || 5}${keyNote(rec)}${rec.completedBy ? ` · finished by ${esc(rec.completedBy)}` : ''}` : ''}${rec && rec.reset ? ` · <span class="warn">later reset by ${esc(rec.reset.byName)}</span>` : ''}</div>
             ${rec && (rec.media || []).length ? mediaTiles(rec.media) : '<p class="muted">No videos from this cleaning.</p>'}
-            <a class="linkbtn" href="/?view=day&date=${esc(cl.forDate || cl.date)}&flat=${esc(c.listingId)}">Open the flat on that day</a>
+            <a class="linkbtn" data-applink href="/?view=day&date=${esc(cl.forDate || cl.date)}&flat=${esc(c.listingId)}">Open the flat on that day</a>
           </div>` : '<div class="card empty"><b>No cleaning linked</b>Edit the complaint to pick the cleaning it was about.</div>'}
         ${(c.media || []).length ? `<h3 class="sh-h3">Guest’s photos</h3>${mediaTiles(c.media)}` : ''}
         ${(c.tasks || []).length || (c.canManage && can('manage_maintenance')) ? `<h3 class="sh-h3">Maintenance</h3>
@@ -565,6 +590,7 @@
         <ol class="mt-log">${(c.log || []).slice().reverse().map((l) => `<li class="${esc(l.kind)}"><span class="mt-lt">${l.kind === 'note' ? `<b>${esc(l.byName)}</b> ${esc(l.text)}` : `${esc(l.text)} <span class="muted">· ${esc(l.byName)}</span>`}</span><em>${esc(fmtWhen(l.at))}</em></li>`).join('')}</ol>
         ${c.canManage || mineToo ? `<form class="pe-form" id="cp-note"><textarea id="cp-note-t" rows="2" maxlength="2000" placeholder="${mineToo && !c.canManage ? 'Your side: what happened at this cleaning?' : 'Add a note'}"></textarea><div class="form-actions"><span class="spacer"></span><button class="btn primary" type="submit">Add note</button></div></form>` : ''}
         ${c.canManage ? '<div class="form-actions"><span class="spacer"></span><button class="btn danger" id="cp-del">Delete complaint</button></div>' : ''}`);
+      $('detail-body').dataset.cp = id; $('detail-body').scrollTop = keep;
       const after = (msg) => { toast(msg); loadComplaints(); openComplaint(id); };
       $('detail-body').querySelectorAll('[data-cpmove]').forEach((b) => b.onclick = async () => {
         const to = b.dataset.cpmove;
@@ -576,7 +602,7 @@
         try { await send('PUT', `/api/complaints/${encodeURIComponent(id)}`, { status: to, ...extra }); after(`Marked ${CP_ST[to].toLowerCase()}`); } catch (e) { toast(e.message); }
       });
       if ($('cp-edit')) $('cp-edit').onclick = () => complaintForm(c);
-      if ($('cp-mt')) $('cp-mt').onclick = () => taskForm({ listingId: c.listingId, title: c.title, complaintId: c.id, mediaIds: (c.media || []).map((m) => m.id) });
+      if ($('cp-mt')) $('cp-mt').onclick = () => taskForm({ listingId: c.listingId, label: c.label, building: c.building, title: c.title, complaintId: c.id, mediaIds: (c.media || []).map((m) => m.id), back: () => openComplaint(c.id) });
       $('detail-body').querySelectorAll('[data-cptask]').forEach((b) => b.onclick = () => openTask(b.dataset.cptask));
       if ($('cp-note')) $('cp-note').onsubmit = async (e) => { e.preventDefault(); try { await send('POST', `/api/complaints/${encodeURIComponent(id)}/notes`, { text: $('cp-note-t').value }); after('Note added'); } catch (err) { toast(err.message); } };
       if ($('cp-del')) $('cp-del').onclick = async () => {
@@ -603,7 +629,7 @@
         <div class="pe-f"><label for="cp-title">What did the guest complain about?</label><input id="cp-title" maxlength="160" required value="${esc(c.title || '')}" placeholder="e.g. Hair in the shower, no towels in the bathroom"></div>
         <div class="pe-f"><label for="cp-details">Details <span class="muted">(optional)</span></label><textarea id="cp-details" rows="3" maxlength="4000" placeholder="What they said, where exactly, anything else useful">${esc(c.details || '')}</textarea></div>
         <div class="pe-f"><span class="pe-l">Categories <span class="muted">(pick all that apply)</span></span><div class="cp-cats" id="cp-cats">${cats.map((x) => `<label class="cp-cat"><input type="checkbox" value="${esc(x)}" ${(c.categories || []).includes(x) ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('')}</div>
-          <button type="button" class="linkbtn" id="cp-cats-edit">Edit categories</button></div>
+          ${me.buildings === 'all' ? '<button type="button" class="linkbtn" id="cp-cats-edit">Edit categories</button>' : ''}</div>
         <div class="pe-row">
           <div class="pe-f"><span class="pe-l">Severity</span><div class="range fkinds" role="radiogroup" aria-label="Severity">${Object.entries(CP_SEV).reverse().map(([k, w]) => `<button type="button" role="radio" data-sev="${k}" aria-checked="${c.severity === k}" aria-selected="${c.severity === k}">${w}</button>`).join('')}</div></div>
           <div class="pe-f"><label for="cp-source">Where it came from</label><select id="cp-source">${Object.entries(sources).map(([k, w]) => `<option value="${k}" ${c.source === k ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></div>
@@ -614,9 +640,10 @@
           </div>
           <div class="pe-f"><label for="cp-res">Resolution <span class="muted">(optional)</span></label><textarea id="cp-res" rows="2" maxlength="2000">${esc(c.resolution || '')}</textarea></div>` : `<div class="pe-f"><span class="pe-l">Guest’s photos <span class="muted">(optional)</span></span>${picker.html}</div>`}
         <div class="form-msg" id="cp-msg"></div>
-        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="cp-go">${edit ? 'Save' : 'Log complaint'}</button></div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" ${edit ? 'id="cp-back"' : 'data-close-detail'}>Cancel</button><button type="submit" class="btn primary" id="cp-go">${edit ? 'Save' : 'Log complaint'}</button></div>
       </form>`);
     if (picker) picker.wire($('cp-form'));
+    if ($('cp-back')) $('cp-back').onclick = () => openComplaint(c.id);
     let sev = c.severity, look = null;
     $('cp-form').querySelectorAll('[data-sev]').forEach((b) => b.onclick = () => { sev = b.dataset.sev; $('cp-form').querySelectorAll('[data-sev]').forEach((x) => { x.setAttribute('aria-checked', x === b); x.setAttribute('aria-selected', x === b); }); });
     const flatId = () => (edit ? c.listingId : $('cp-flat').value);
@@ -626,6 +653,8 @@
       const stays = look.stays, cls = look.cleanings;
       const curStay = edit ? (c.stay && c.stay.code) || '' : (look.stay && look.stay.code) || '';
       const curClean = edit ? (c.cleaning && c.cleaning.id) || '' : look.suggestedCleaningId || '';
+      if (edit && c.cleaning && !cls.some((x) => x.id === c.cleaning.id)) cls.unshift({ ...c.cleaning, cleanerName: `${c.cleaning.cleanerName} (current)` });
+      if (edit && c.stay && c.stay.code && !stays.some((x) => x.code === c.stay.code)) stays.unshift(c.stay);
       box.innerHTML = `<div class="pe-row">
         <div class="pe-f"><label for="cp-stay">Booking</label><select id="cp-stay"><option value="">No booking / not sure</option>${stays.map((s, i) => `<option value="${i}" ${s.code === curStay ? 'selected' : ''}>${esc(s.code || 'Booking')} · ${esc(shortDate(s.checkIn))}–${esc(shortDate(s.checkOut))}</option>`).join('')}</select></div>
         <div class="pe-f"><label for="cp-clean">Cleaning it’s about</label><select id="cp-clean"><option value="">No cleaning / not sure</option>${cls.map((x) => `<option value="${esc(x.id)}" ${x.id === curClean ? 'selected' : ''}>${esc(WD_SHORT.format(D(x.date)))} ${esc(shortDate(x.date))} · ${esc(x.cleanerName)}${x.assignedName && x.assignedName !== x.cleanerName ? ` (assigned ${esc(x.assignedName)})` : ''}</option>`).join('')}</select>
@@ -638,10 +667,10 @@
       try { look = await getJSON(`/api/complaints/lookup?listingId=${encodeURIComponent(id)}&date=${encodeURIComponent(date)}`); drawLink(); }
       catch (e) { $('cp-link').innerHTML = `<p class="form-msg err">${esc(e.message)}</p>`; }
     };
-    if (!edit) $('cp-flat').onchange = lookup;
+    if (!edit) $('cp-flat').onchange = () => { if (picker) picker.reset(); lookup(); };
     $('cp-date').onchange = lookup;
     if (edit || c.listingId) lookup();
-    $('cp-cats-edit').onclick = async () => {
+    if ($('cp-cats-edit')) $('cp-cats-edit').onclick = async () => {
       const now = [...$('cp-cats').querySelectorAll('input')].map((i) => i.value);
       const ticked = new Set([...$('cp-cats').querySelectorAll('input:checked')].map((i) => i.value));
       const box = document.createElement('div'); box.className = 'modal';
@@ -672,7 +701,8 @@
       try {
         const r = edit ? await send('PUT', `/api/complaints/${encodeURIComponent(c.id)}`, b) : await send('POST', '/api/complaints', b);
         if (picker) picker.clear();
-        toast(edit ? 'Saved' : r.complaint.cleaning ? `Complaint logged · ${r.complaint.cleaning.cleanerName} has been told` : 'Complaint logged');
+        const told = r.complaint.cleaning ? [...new Set([r.complaint.cleaning.cleanerId && r.complaint.cleaning.cleanerId !== me.id ? r.complaint.cleaning.cleanerName : null, r.complaint.cleaning.assignedId && r.complaint.cleaning.assignedId !== me.id ? r.complaint.cleaning.assignedName : null].filter(Boolean))] : [];
+        toast(edit ? 'Saved' : told.length ? `Complaint logged · ${told.join(' and ')} ${told.length > 1 ? 'have' : 'has'} been told` : 'Complaint logged');
         loadComplaints(); openComplaint(r.complaint.id);
       } catch (err) { $('cp-msg').className = 'form-msg err'; $('cp-msg').textContent = err.message; $('cp-go').disabled = false; }
     };
@@ -690,12 +720,15 @@
         if (l) l.innerHTML = keys.map((k) => { const x = uploads.get(k); return `<div class="up ${x.error ? 'err' : x.done ? 'ok' : ''}"><span class="up-k">${x.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(x.file.name || x.kind)}</span><span class="up-s">${x.error ? esc(x.error) : x.done ? 'Uploaded ✓' : Math.floor(x.progress * 100) + '%'}</span><span class="up-bar"><i style="transform:scaleX(${x.done ? 1 : x.progress})"></i></span></div>`; }).join('');
         onChange && onChange(busy());
       };
+      api.reset = () => { if (!keys.length) return; keys.forEach((k) => uploads.delete(k)); keys.length = 0; draw(); toast('Photos cleared: add them again for this flat'); };
       root.querySelectorAll('[data-mp]').forEach((inp) => inp.onchange = (e) => {
+        if (!listingId()) { e.target.value = ''; return toast('Pick the flat first'); }
         for (const f of e.target.files) { const key = Math.random().toString(36).slice(2); uploads.set(key, { file: f, kind: (f.type || '').startsWith('image') ? 'photo' : 'video', progress: 0, done: false, error: null, purpose, listingId: listingId() }); keys.push(key); runUpload(key, draw); }
         e.target.value = ''; draw();
       });
     };
-    return { html, wire, busy, ids, clear: () => keys.forEach((k) => uploads.delete(k)) };
+    const api = { html, wire, busy, ids, clear: () => keys.forEach((k) => uploads.delete(k)), reset: () => {} };
+    return api;
   }
   let mtFlats = null;
   async function flatsForForm() {
@@ -708,7 +741,9 @@
   // New task (anyone) or editing one (Admin/User). Triage fields — who, due, repeat, cost — are for Admins and Users.
   async function taskForm(pre) {
     const t = pre.id ? pre : null, mgr = can('manage_maintenance');
+    if (mgr && !(mtCache && mtCache.contractors)) { try { mtCache = await getJSON('/api/maintenance?status=open'); } catch (_) {} }
     const flats = pre.listingId ? null : await flatsForForm();
+    setTimeout(() => { if ($('mt-back')) $('mt-back').onclick = () => (t ? openTask(t.id) : pre.back()); }, 0);
     openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Maintenance</span><h2>${t ? 'Edit task' : mgr ? 'New task' : 'Report an issue'}</h2><div class="sh-sub">${pre.listingId ? `${esc(pre.label || '')} · ${esc(pre.building || '')}` : 'Pick the flat, then say what needs doing.'}</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
       <form class="pe-form" id="mt-form" autocomplete="off">
         ${flats ? `<div class="pe-f"><label for="mt-flat">Flat</label><select id="mt-flat" required><option value="">Pick a flat…</option>${flats.map((f) => `<option value="${esc(f.id)}">${esc(f.label)} · ${esc(f.building)}</option>`).join('')}</select></div>` : ''}
@@ -726,10 +761,10 @@
           <div class="pe-f"><label for="mt-cost">Cost £ <span class="muted">(optional)</span></label><input id="mt-cost" type="number" min="0" step="0.01" inputmode="decimal" value="${t && t.cost !== null && t.cost !== undefined ? esc(t.cost) : ''}"></div></div>
         <label class="pe-check"><input type="checkbox" id="mt-rep" ${t && t.repeat ? 'checked' : ''}> Repeats (e.g. gas safety every 12 months)</label>
         <div class="pe-row mt-repbox ${t && t.repeat ? '' : 'hidden'}" id="mt-repbox"><div class="pe-f"><label for="mt-every">Every</label><input id="mt-every" type="number" min="1" max="60" value="${esc((t && t.repeat && t.repeat.every) || 12)}"></div>
-          <div class="pe-f"><label for="mt-unit">&nbsp;</label><select id="mt-unit">${UNITS.map(([k, w]) => `<option value="${k}" ${((t && t.repeat && t.repeat.unit) || 'months') === k ? 'selected' : ''}>${w}</option>`).join('')}</select></div></div>` : ''}
+          <div class="pe-f mt-unitf"><label for="mt-unit">&nbsp;</label><select id="mt-unit" aria-label="Unit">${UNITS.map(([k, w]) => `<option value="${k}" ${((t && t.repeat && t.repeat.unit) || 'months') === k ? 'selected' : ''}>${w}</option>`).join('')}</select></div></div>` : ''}
         ${t ? '' : `<div class="pe-f"><span class="pe-l">Photos or videos <span class="muted">(optional)</span></span><div id="mt-media"></div></div>`}
         <div class="form-msg" id="mt-msg"></div>
-        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-close-detail>Cancel</button><button type="submit" class="btn primary" id="mt-go">${t ? 'Save' : mgr ? 'Create task' : 'Send report'}</button></div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" ${t || pre.back ? 'id="mt-back"' : 'data-close-detail'}>Cancel</button><button type="submit" class="btn primary" id="mt-go">${t ? 'Save' : mgr ? 'Create task' : 'Send report'}</button></div>
       </form>`);
     let prio = pre.priority || 'normal';
     $('mt-form').querySelectorAll('[data-p]').forEach((b) => b.onclick = () => { prio = b.dataset.p; $('mt-form').querySelectorAll('[data-p]').forEach((x) => { x.setAttribute('aria-checked', x === b); x.setAttribute('aria-selected', x === b); }); });
@@ -755,7 +790,7 @@
         } catch (_) {}
       };
       loadPeople();
-      if ($('mt-flat')) $('mt-flat').onchange = loadPeople;
+      if ($('mt-flat')) $('mt-flat').onchange = () => { if (picker) picker.reset(); loadPeople(); };
       sel.onchange = () => $('mt-ct').classList.toggle('hidden', sel.value !== 'c');
       $('mt-cname').oninput = () => { const c = ((mtCache && mtCache.contractors) || []).find((x) => x.name === $('mt-cname').value); if (c) { $('mt-cphone').value = c.phone; if (!$('mt-ctrade').value) $('mt-ctrade').value = c.trade || ''; } };
       $('mt-rep').onchange = () => $('mt-repbox').classList.toggle('hidden', !$('mt-rep').checked);
@@ -777,7 +812,7 @@
         const r = t ? await send('PUT', `/api/maintenance/${encodeURIComponent(t.id)}`, b) : await send('POST', '/api/maintenance', b);
         if (picker) picker.clear();
         toast(t ? 'Saved' : mgr ? 'Task created' : 'Reported — thank you');
-        mtCache = null; if (view === 'maintenance') loadMaintenance(); refreshBadges();
+        mtCache = null; if (view === 'maintenance') loadMaintenance(); if (view === 'damage' && pre.damageId) loadDamageView(); refreshBadges();
         if (sheetListing && !$('sheet').classList.contains('hidden')) loadSheetMaint(sheetListing);
         openTask(r.task.id);
       } catch (err) { $('mt-msg').className = 'form-msg err'; $('mt-msg').textContent = err.message; $('mt-go').disabled = false; }
@@ -796,7 +831,7 @@
         ${moves.length ? `<div class="mt-moves">${moves.map(([s, w]) => `<button class="btn ${s === 'done' ? 'primary' : ''}" data-move="${s}">${esc(w)}</button>`).join('')}</div>` : ''}
         <dl class="mt-facts">
           ${t.kind === 'guest_request' ? '<div><dt>Type</dt><dd><span class="mt-kind">Guest request</span></dd></div>' : ''}<div><dt>Priority</dt><dd><span class="prio ${esc(t.priority)}">${esc(PRIO[t.priority])}</span></dd></div>
-          <div><dt>Due</dt><dd class="${t.overdue ? 'late' : ''}">${t.due ? esc(dueText(t)) : '—'}</dd></div>
+          <div><dt>Due</dt><dd class="${t.overdue ? 'late' : ''}">${t.due ? esc(dueText(t).replace(/^Due /, '')) : '—'}</dd></div>
           <div><dt>Who</dt><dd>${whoHtml(t.assignee)}${t.assignee && t.assignee.type === 'contractor' && t.assignee.phone ? ` <a class="mt-tel" href="tel:${esc(t.assignee.phone.replace(/[^\d+]/g, ''))}">${esc(t.assignee.phone)}</a>` : ''}</dd></div>
           <div><dt>Repeats</dt><dd>${t.repeat ? esc(everyText(t.repeat)) : 'No'}</dd></div>
           ${t.cost !== null && t.cost !== undefined ? `<div><dt>Cost</dt><dd>£${esc(Number(t.cost).toFixed(2))}</dd></div>` : ''}
@@ -811,10 +846,10 @@
       taskId = id;
       if ($('mn-form')) note.wire($('mn-form'));
       $('detail-body').querySelectorAll('[data-move]').forEach((b) => b.onclick = async () => {
-        if (b.dataset.move === 'cancelled' && !confirm('Cancel this task?')) return;
+        if (b.dataset.move === 'cancelled' && !(await askConfirm({ title: 'Cancel this task?', text: 'It moves to Done as cancelled. You can reopen it later.', yes: 'Cancel task', no: 'Keep it', danger: true }))) return;
         try {
           const r = await send('POST', `/api/maintenance/${encodeURIComponent(id)}/status`, { status: b.dataset.move });
-          toast(r.next ? `Done — next one due ${shortDate(r.next.due)}` : `Marked ${MT_ST[b.dataset.move].toLowerCase()}`);
+          toast(r.next ? `Done — next one due ${shortDate(r.next.due)}${r.next.due.slice(0, 4) !== todayStr().slice(0, 4) ? ' ' + r.next.due.slice(0, 4) : ''}` : `Marked ${MT_ST[b.dataset.move].toLowerCase()}`);
           mtCache = null; if (view === 'maintenance') loadMaintenance(); refreshBadges(); openTask(id);
         } catch (e) { toast(e.message); }
       });
@@ -826,7 +861,7 @@
       };
       if ($('mt-edit')) $('mt-edit').onclick = () => taskForm(t);
       if ($('mt-del')) $('mt-del').onclick = async () => {
-        if (!confirm('Delete this task and its updates? This can’t be undone.')) return;
+        if (!(await askConfirm({ title: 'Delete this task?', text: 'The task and its updates are deleted. This can’t be undone.', yes: 'Delete', no: 'Keep it', danger: true }))) return;
         try { await send('DELETE', `/api/maintenance/${encodeURIComponent(id)}`); toast('Task deleted'); closeDetail(); mtCache = null; if (view === 'maintenance') loadMaintenance(); refreshBadges(); } catch (e) { toast(e.message); }
       };
     } catch (e) { if (e.message !== 'signed out') toast(e.message); }
@@ -880,7 +915,7 @@
     if (o) openPost(o.dataset.open);
   });
   $('f-new').onclick = () => newPost();
-  const openDrawer = (html) => { detailId = null; postId = null; $('detail').classList.remove('hidden'); document.body.classList.add('noscroll'); $('detail-body').innerHTML = html; };
+  const openDrawer = (html) => { detailId = null; postId = null; delete $('detail-body').dataset.cp; $('detail').classList.remove('hidden'); document.body.classList.add('noscroll'); $('detail-body').innerHTML = html; $('detail-body').scrollTop = 0; };
   const CLOSE_BTN = '<button class="btn sq" data-close-detail aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>';
   function newPost() {
     openDrawer(`<div class="sh-head"><div class="sh-title"><span class="eyebrow">Forum</span><h2>New post</h2><div class="sh-sub">Everyone on the team can see it. Admins are told straight away.</div></div><div class="sh-right">${CLOSE_BTN}</div></div>
@@ -928,11 +963,11 @@
         catch (err) { toast(err.message); $('fc-go').disabled = false; }
       };
       $('detail-body').querySelectorAll('[data-cdel]').forEach((b) => b.onclick = async () => {
-        if (!confirm('Delete this comment?')) return;
+        if (!(await askConfirm({ title: 'Delete this comment?', text: 'This can’t be undone.', yes: 'Delete', no: 'Keep it', danger: true }))) return;
         try { await send('DELETE', `/api/forum/${encodeURIComponent(id)}/comments/${encodeURIComponent(b.dataset.cdel)}`); openPost(id); loadForum(); } catch (e) { toast(e.message); }
       });
       if ($('fp-del')) $('fp-del').onclick = async () => {
-        if (!confirm('Delete this post and its comments?')) return;
+        if (!(await askConfirm({ title: 'Delete this post?', text: 'The post and its comments are deleted. This can’t be undone.', yes: 'Delete', no: 'Keep it', danger: true }))) return;
         try { await send('DELETE', `/api/forum/${encodeURIComponent(id)}`); toast('Post deleted'); closeDetail(); loadForum(); } catch (e) { toast(e.message); }
       };
     } catch (e) { if (e.message !== 'signed out') toast(e.message); }
@@ -952,7 +987,7 @@
       box.innerHTML = `<div class="set-head"><div><h3>Backups</h3>
           <p class="muted">The app saves a copy of all its data every day and keeps the last 14. Download one to keep your own copy somewhere safe (it holds everything, including sign-in details, so treat it like a password). Videos and photos aren’t included.</p></div></div>
         <div class="set-actions"><a class="btn primary" href="/api/admin/backups/now" download>Download today’s data</a><span class="muted">${r.backups.length} daily cop${r.backups.length === 1 ? 'y' : 'ies'} kept</span></div>
-        ${r.backups.length ? `<table class="kn-table"><thead><tr><th>Day</th><th>Size</th><th></th></tr></thead><tbody>${r.backups.map((b) => `<tr><td>${esc(new Date(b.day + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))}</td><td>${esc(kb(b.size))}</td><td style="text-align:right"><a href="/api/admin/backups/${encodeURIComponent(b.name)}" download>Download</a></td></tr>`).join('')}</tbody></table>` : ''}`;
+        ${r.backups.length ? `<table class="kn-table"><thead><tr><th>Day</th><th>Size</th><th></th></tr></thead><tbody>${r.backups.map((b) => `<tr><td>${esc(new Date(b.day + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))}</td><td>${esc(kb(b.size))}</td><td style="text-align:right"><a class="btn" href="/api/admin/backups/${encodeURIComponent(b.name)}" download>Download</a></td></tr>`).join('')}</tbody></table>` : ''}`;
     } catch (e) { if (e.message !== 'signed out') box.innerHTML = `<h3>Backups</h3><div class="banner error">${esc(e.message)}</div>`; }
   }
   async function loadSettings() {
@@ -1057,8 +1092,10 @@
   }
   function setView(v) {
     if (!allowed(v)) v = ['day', 'board', 'props', 'account'].find(allowed);
+    const changed = v !== view;
     view = v;
     store.set('cs_view', v);
+    if (changed) { window.scrollTo(0, 0); if (navReady) pushNav(); }
     if (v === 'day' || v === 'board') { lastSched = v; store.set('cs_sched', v); }
     document.querySelectorAll('.snav [data-nav]').forEach((b) => { if (b.dataset.nav === NAV_OF[v]) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     document.querySelectorAll('.range [data-range]').forEach((b) => b.setAttribute('aria-selected', b.dataset.range === v));
@@ -1094,11 +1131,18 @@
   // ---------- who's signed in ----------
   const initials = (n) => (n || '?').split(/\s+/).filter((w) => /^[a-z]/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   function applyPermissions() {
+    const adminWord = me.role === 'supervisor' ? 'Your team' : 'Admin'; // supervisors manage their own people here
+    $('acct-admin').querySelector('h3').textContent = adminWord;
+    document.querySelectorAll('.nlbl[data-group="admin"]').forEach((el) => { el.textContent = adminWord; });
+    GROUP.users = adminWord; GROUP.settings = adminWord;
     document.querySelectorAll('.snav [data-nav]').forEach((b) => b.classList.toggle('hidden', !navAllowed(b.dataset.nav)));
     document.querySelectorAll('.snav .nlbl').forEach((l) => l.classList.toggle('hidden', !document.querySelector(`.snav [data-nav][data-group="${l.dataset.group}"]:not(.hidden)`)));
     document.querySelector('.range [data-range="day"]').classList.toggle('hidden', !allowed('day'));
     document.querySelector('.range [data-range="board"]').classList.toggle('hidden', !allowed('board'));
-    document.querySelector('.copy-wrap').classList.toggle('hidden', !can('copy_print'));
+    document.querySelector('.copy-wrap').classList.toggle('hidden', !can('copy_print') && !can('refresh'));
+    $('menu-refresh').classList.toggle('hidden', !can('refresh'));
+    for (const id of ['copy-day', 'menu-print']) { const el = $(id); if (el) el.classList.toggle('hidden', !can('copy_print')); }
+    const cw = document.querySelector('[data-copy="week"]'); if (cw) cw.classList.toggle('hidden', !can('copy_print'));
     $('me-avatar').textContent = initials(me.name);
     $('me-avatar2').textContent = initials(me.name);
     $('me-name').textContent = me.name;
@@ -1114,6 +1158,7 @@
       <dt>Buildings</dt><dd>${b}</dd>
       <dt>Can use</dt><dd>${perms || '—'}</dd></dl>`;
     $('pw-form').classList.toggle('hidden', !!me.isOwner);
+    $('pw-owner').classList.toggle('hidden', !me.isOwner);
     // On phones Users and Settings live here rather than in the tab bar.
     $('acct-users').classList.toggle('hidden', !navAllowed('users'));
     $('acct-settings').classList.toggle('hidden', !navAllowed('settings'));
@@ -1166,9 +1211,14 @@
   $('add-user').onclick = () => { editing = 'new'; renderUsers(); $('uf-name').focus(); };
 
   function genPassword() {
-    const words = ['maple', 'harbour', 'linen', 'cobalt', 'willow', 'amber', 'granite', 'orchid', 'copper', 'saffron', 'meadow', 'pebble'];
-    const r = crypto.getRandomValues(new Uint32Array(3));
-    return words[r[0] % words.length][0].toUpperCase() + words[r[0] % words.length].slice(1) + '-' + words[r[1] % words.length] + '-' + (100 + (r[2] % 900));
+    const words = ('maple harbour linen cobalt willow amber granite orchid copper saffron meadow pebble river canyon lantern velvet thistle juniper ' +
+      'harvest falcon marble cedar indigo sparrow quartz meadow summit pepper ember coral walnut glacier hazel violet bramble cinder orbit ' +
+      'tundra rowan acorn birch clover dune fern heron ivory jasper kestrel lilac moss nectar oak plume quill reef sage tide umber vale wren ' +
+      'yarrow zephyr basil comet delta fable garnet hollow iris jade kelp lark mint noble opal pine raven slate topaz').split(' ');
+    const pick = new Set(); const r = crypto.getRandomValues(new Uint32Array(16)); let i = 0;
+    while (pick.size < 4 && i < r.length) pick.add(words[r[i++] % words.length]);
+    const w = [...pick];
+    return w[0][0].toUpperCase() + w[0].slice(1) + '-' + w.slice(1).join('-') + '-' + String(r[15] % 100).padStart(2, '0');
   }
   function renderForm() {
     const isNew = editing === 'new';
@@ -1197,7 +1247,7 @@
       </fieldset>
       <fieldset><legend>Buildings they can see</legend>
         <div class="radio"><label class="${U.canAllBuildings === false ? 'hidden' : ''}"><input type="radio" name="uf-bmode" value="all" ${allB ? 'checked' : ''}>All buildings</label><label><input type="radio" name="uf-bmode" value="some" ${allB ? '' : 'checked'}>Only these</label></div>
-        <div class="checks ${allB ? 'hidden' : ''}" id="uf-blist">${U.buildings.map((b) => `<label><input type="checkbox" data-b="${esc(b)}" ${!allB && u.buildings.includes(b) ? 'checked' : ''}>${esc(b)}</label>`).join('')}</div>
+        <div class="checks ${allB ? 'hidden' : ''}" id="uf-blist">${U.buildings.map((b) => `<label><input type="checkbox" data-b="${esc(b)}" ${!allB && (u.buildings || []).includes(b) ? 'checked' : ''}>${esc(b)}</label>`).join('')}</div>
       </fieldset>
       ${isNew ? '' : `<fieldset><legend>Status</legend><div class="radio"><label><input type="radio" name="uf-active" value="1" ${u.active ? 'checked' : ''}>Active</label><label><input type="radio" name="uf-active" value="0" ${u.active ? '' : 'checked'}>Deactivated</label></div></fieldset>`}
       <div class="form-msg" id="uf-msg"></div>
@@ -1210,6 +1260,7 @@
       </div>`;
     f.classList.remove('hidden');
     document.querySelector('.users-layout').classList.add('editing');
+    if (window.innerWidth <= 900) f.scrollIntoView({ block: 'start', behavior: 'smooth' });
     $('uf-gen').onclick = () => { $('uf-pw').value = genPassword(); };
     $('uf-cancel').onclick = () => { editing = null; renderUsers(); };
     f.querySelectorAll('[name=uf-bmode]').forEach((r) => r.onchange = () => $('uf-blist').classList.toggle('hidden', f.querySelector('[name=uf-bmode]:checked').value === 'all'));
@@ -1243,11 +1294,32 @@
       if (!isNew) body.active = f.querySelector('[name=uf-active]:checked').value === '1';
       try {
         const out = await send(isNew ? 'POST' : 'PUT', isNew ? '/api/users' : '/api/users/' + u.id, body);
-        toast(isNew ? `${out.user.name} can now sign in as “${out.user.username}”` : 'Saved');
+        if (body.password && out.user.id !== me.id) shareLogin(out.user, body.password, isNew); // shown once, to send on
+        else toast(isNew ? `${out.user.name} can now sign in as “${out.user.username}”` : 'Saved');
         editing = null; loadUsers();
         if (out.user.id === me.id) { me = { ...me, ...out.user }; applyPermissions(); }
       } catch (err) { $('uf-msg').className = 'form-msg err'; $('uf-msg').textContent = err.message; }
     };
+  }
+
+  // After adding someone (or setting them a new password): their sign-in details, once, to copy and send privately.
+  function shareLogin(user, pw, isNew) {
+    const box = document.createElement('div');
+    box.className = 'modal';
+    box.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="sl-t"><h3 id="sl-t">${isNew ? `${esc(user.name)} can now sign in` : `New password for ${esc(user.name)}`}</h3>
+      <p>Send these to ${esc(user.name.split(' ')[0])} privately. The password isn’t shown again${isNew ? '; they can change it under My account' : ''}.</p>
+      <dl class="sl-dl"><dt>Address</dt><dd>${esc(location.host)}</dd><dt>Username</dt><dd>${esc(user.username)}</dd><dt>Password</dt><dd>${esc(pw)}</dd></dl>
+      <div class="form-actions"><span class="spacer"></span><button class="btn" data-sl="done">Done</button><button class="btn primary" data-sl="copy">Copy details</button></div></div>`;
+    document.body.appendChild(box);
+    const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape' && isTopModal(box)) close(); };
+    document.addEventListener('keydown', onKey);
+    box.addEventListener('click', async (e) => {
+      if (e.target === box || e.target.closest('[data-sl="done"]')) return close();
+      if (!e.target.closest('[data-sl="copy"]')) return;
+      try { await navigator.clipboard.writeText(`Cityscape Schedule: ${location.origin}\nUsername: ${user.username}\nPassword: ${pw}`); toast('Copied: send it to them privately'); }
+      catch (_) { toast('Couldn’t copy here: select the details and copy them'); }
+    });
   }
 
   // ---------- live updates ----------
@@ -1298,6 +1370,8 @@
     $('copy').setAttribute('aria-expanded', String(open));
   };
   $('copy-menu').addEventListener('click', async (e) => {
+    if (e.target.closest('#menu-refresh')) { closeCopyMenu(); toast('Checking Guesty…'); try { weeks.clear(); await showWeek(data.weekStart, { fresh: true }); toast('Up to date with Guesty'); } catch (err) { toast(err.message); } return; }
+    if (e.target.closest('#menu-print')) { closeCopyMenu(); setTimeout(() => window.print(), 50); return; }
     const b = e.target.closest('[data-copy]');
     if (!b || !data) return;
     closeCopyMenu();
@@ -1331,7 +1405,10 @@
     try { const r = await getJSON('/api/me'); me = r.user; window.__permsList = r.perms; }
     catch (_) { return; }
     applyPermissions();
+    if (store.get('cs_who') !== me.id) { store.set('cs_who', me.id); view = 'day'; } // someone else signed in on this phone
     setView(deep && allowed(q0.get('view')) ? q0.get('view') : view);
+    try { history.replaceState({ cs: 'view', v: view }, '', location.href); } catch (_) {}
+    navReady = true; syncNav();
     if (can('view_day') || can('view_board')) {
       const w = q0.get('week') || (deep && q0.get('date'));
       showWeek(/^\d{4}-\d{2}-\d{2}$/.test(w || '') ? w : '').then(() => { checkVersion(); if (deep) openLink(deep); });
@@ -1402,7 +1479,7 @@
     const u = c.date === date && unitOn(c.listingId, date);
     return c.date === date && !(u && u.checkOut);
   }
-  const forListing = (id, date) => cleanings.filter((c) => c.listingId === id && c.status !== 'cancelled' && (!date || ACTIVE.includes(c.status) || cleaningShowsOn(c, date)));
+  const forListing = (id, date) => cleanings.filter((c) => c.listingId === id && c.status !== 'cancelled' && (!date || cleaningShowsOn(c, date) || (ACTIVE.includes(c.status) && (c.date === date || cleanFor(c) === date))));
   let cRange = '';
 
   async function refreshCleanings() {
@@ -1432,16 +1509,41 @@
   }
 
   // Each row's status ("Cleaning · 12:04" live, "Cleaned · 49 min", "To clean") and its cleaner.
-  const cleanState = (listingId) => {
-    const list = forListing(listingId, selected);
+  const cleanState = (listingId, date = selected) => {
+    const list = forListing(listingId, date);
     return { active: list.find((c) => ACTIVE.includes(c.status)), done: list.filter((c) => c.status === 'completed').pop() };
   };
+  // Guests arriving today at a flat that isn't clean yet: flagged on the row and under Needs attention.
+  // A same-day turnover counts once check-in is 2 hours away and the clean hasn't started; an arrival after an
+  // earlier check-out counts as soon as that clean is missing.
+  const toMin = (t) => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+  const londonMin = () => toMin(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()));
+  function arrivalRisk(u) {
+    if (!data || !u || !u.checkIn || selected !== data.today) return null;
+    if (cRange !== cleaningRange() || !can('view_cleaning')) return null; // cleanings not loaded yet, or only your own
+    const inAt = toMin(u.checkIn.timeRaw), now = londonMin(), late = inAt !== null && now >= inAt;
+    const { active, done } = cleanState(u.listingId);
+    if (active || done) return null;
+    if (u.checkOut) return inAt !== null && now >= inAt - 120 ? { late, why: late ? 'not cleaned yet' : 'clean not started' } : null;
+    if (u.movedOut) return { late, why: `clean moved to ${WD_SHORT.format(D(u.movedOut.to))} ${shortDate(u.movedOut.to)}` };
+    for (const d of data.days.filter((x) => x.date < selected).reverse()) { // the last guests' check-out earlier this week
+      const p = d.units.find((x) => x.listingId === u.listingId);
+      if (!p || (!p.checkOut && !p.movedOut)) continue;
+      const day = p.checkOut ? d.date : p.movedOut.to;
+      if (day > selected) return { late, why: `clean moved to ${WD_SHORT.format(D(day))} ${shortDate(day)}` };
+      const st = cleanState(u.listingId, day);
+      return st.done || st.active ? null : { late, why: `not cleaned since guests left ${WD_SHORT.format(D(d.date))}` };
+    }
+    return null;
+  }
   function decorateDay() {
     if (data && me && cRange !== cleaningRange()) { cRange = 'loading'; refreshCleanings(); }
     document.querySelectorAll('[data-cbadge]').forEach((el) => {
       const { active, done } = cleanState(el.dataset.cbadge);
-      if (active) el.innerHTML = `<span class="cb running"><i></i>${active.status === 'in_progress' ? 'Cleaning' : esc(STEP_WORD[active.status] || 'Cleaning')}${active.status === 'in_progress' ? ` · <b data-since="${esc(active.startedAt)}" data-until="${esc(active.endedAt || '')}">${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</b>` : ''}</span>`;
+      let risk = null;
+      if (active) el.innerHTML = `<span class="cb running"><i></i>${active.status === 'in_progress' ? 'Cleaning' : esc(stepWord(active))}${active.status === 'in_progress' ? ` · <b data-since="${esc(active.startedAt)}" data-until="${esc(active.endedAt || '')}">${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</b>` : ''}</span>`;
       else if (done) el.innerHTML = `<span class="cb done">✓ ${done.manual ? 'Marked cleaned' : 'Cleaned'}${hasDuration(done) ? ` · ${durWords(Date.parse(done.endedAt) - Date.parse(done.startedAt))}` : ''}</span>`;
+      else if ((risk = arrivalRisk(unitOn(el.dataset.cbadge, selected)))) el.innerHTML = `<span class="cb risk${risk.late ? ' late' : ''}">${risk.late ? 'Guests in · not clean' : 'At risk'}</span>`;
       else if (el.dataset.moved) el.innerHTML = `<span class="cb moved">Clean moved → ${esc(WD_SHORT.format(D(el.dataset.moved)))} ${esc(shortDate(el.dataset.moved))}</span>`;
       else el.innerHTML = el.dataset.kind === 'in' ? '<span class="cb arr">Arriving</span>' : '<span class="cb todo">To clean</span>';
     });
@@ -1449,7 +1551,7 @@
     document.querySelectorAll('[data-achip]').forEach((el) => {
       const a = assignments[`${selected}|${el.dataset.achip}`];
       el.innerHTML = a ? `<span class="achip${a.cleanerId === me.id ? ' mine' : ''}" title="Assigned to ${esc(a.cleanerName)}"><span class="avatar sm">${esc(initials(a.cleanerName))}</span>${a.cleanerId === me.id ? 'You' : esc(a.cleanerName.split(' ')[0])}</span>`
-        : el.dataset.needs && can('assign_cleanings') ? '<span class="achip none"><span class="avatar sm dash" aria-hidden="true">+</span>Assign</span>' : '';
+        : el.dataset.needs && can('assign_cleanings') && !(data && selected < data.today) ? '<span class="achip none"><span class="avatar sm dash" aria-hidden="true">+</span>Assign</span>' : '';
     });
     renderSummary();
     renderRail();
@@ -1468,19 +1570,21 @@
   const seesCleaning = () => isManager() || can('view_cleaning');
   function renderSummary() {
     if (!data) return;
+    $('m-done-box').closest('.summary').classList.toggle('c-loading', cRange !== cleaningRange());
     const s = dayStats();
     const firstIn = s.arrivals.map((u) => u.checkIn.timeRaw || '').filter(Boolean).sort()[0];
     const turns = s.cleans.filter((u) => u.checkIn).length;
     $('m-clean').textContent = s.cleans.length;
-    $('m-clean-s').textContent = s.cleans.length ? `${turns} same-day · ${s.cleans.length - turns} check-out${s.cleans.length - turns === 1 ? '' : 's'}` : 'Nothing to clean';
+    $('m-clean-s').textContent = s.cleans.length ? `${turns} same-day · ${s.cleans.length - turns} check‑out${s.cleans.length - turns === 1 ? '' : 's'}` : 'Nothing to clean';
     $('m-in').previousElementSibling.textContent = data.cleansOnly ? 'Same-day arrivals' : 'Arrivals';
     $('m-in').textContent = s.arrivals.length;
     $('m-in-s').textContent = firstIn ? `First guests from ${s.arrivals.find((u) => u.checkIn.timeRaw === firstIn).checkIn.time}` : 'No arrivals';
     if (isManager()) {
       $('m-third-k').textContent = 'Not assigned';
       $('m-third').textContent = s.unassigned.length;
-      $('m-third').classList.toggle('warnv', s.unassigned.length > 0);
+      $('m-third').classList.toggle('warnv', s.unassigned.length > 0 && !(data && selected < data.today));
       $('m-third-s').textContent = s.unassigned.length ? s.unassigned.map((x) => x.u.label).slice(0, 4).join(' · ') + (s.unassigned.length > 4 ? ' …' : '') : 'Everyone has a cleaner';
+      $('m-assign').classList.toggle('hidden', !(s.unassigned.some((x) => !x.done && !x.active) && can('assign_cleanings') && !(data && selected < data.today)));
     } else {
       const mine = s.st.filter((x) => x.a && x.a.cleanerId === me.id);
       $('m-third-k').textContent = 'Assigned to you';
@@ -1513,19 +1617,28 @@
     }
     if (seesCleaning() && s.cleans.length) {
       const by = new Map();
-      for (const x of s.st) { const k = x.a ? x.a.cleanerId : ''; if (!by.has(k)) by.set(k, { name: x.a ? x.a.cleanerName : '', items: [] }); by.get(k).items.push(x); }
-      const line = (x) => x.active ? `${x.u.label} cleaning since ${fmtClock(x.active.startedAt)}` : x.done ? `${x.u.label} done ${fmtClock(x.done.endedAt)}` : `${x.u.label} to clean`;
+      for (const x of s.st) { // who's doing or did it, else who's assigned
+        const c = x.active || x.done, k = c && c.cleanerId ? c.cleanerId : x.a ? x.a.cleanerId : '', nm = c && c.cleanerId ? c.cleanerName : x.a ? x.a.cleanerName : '';
+        if (!by.has(k)) by.set(k, { name: nm, items: [] }); by.get(k).items.push(x);
+      }
+      const line = (x) => x.active ? `${x.u.label} ${x.active.status === 'in_progress' ? `cleaning since ${fmtClock(x.active.startedAt)}` : stepWord(x.active).toLowerCase()}`
+        : x.done ? `${x.u.label} done${x.done.manual && !x.done.manual.timeKnown ? '' : ' ' + fmtClock(x.done.endedAt)}` : `${x.u.label} to clean`;
       const rows = [...by.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : 0)).map(([id, g]) => id
         ? `<div class="rrow"><span class="avatar">${esc(initials(g.name))}</span><span class="rtxt"><b>${id === me.id ? 'You' : esc(g.name)}</b><span>${esc(g.items.map(line).join(' · '))}</span></span><em>${g.items.filter((x) => x.done).length}/${g.items.length}</em></div>`
-        : `<div class="rrow"><span class="avatar dash" aria-hidden="true"></span><span class="rtxt"><b>Not assigned</b><span>${esc(g.items.map((x) => x.u.label).join(' · '))}</span></span></div>`).join('');
+        : `<div class="rrow"><span class="avatar dash" aria-hidden="true"></span><span class="rtxt"><b>Not assigned</b><span>${esc(g.items.map((x) => x.u.label).join(' · '))}</span></span>${can('assign_cleanings') && !(data && selected < data.today) && g.items.some((x) => !x.done && !x.active) ? '<button class="btn sm-assign" data-assign-many>Assign</button>' : ''}</div>`).join('');
       cards.push(`<div class="card rcard"><div class="rc-h"><h3>Team ${esc(dayWord)}</h3></div>${rows}</div>`);
     }
     const att = [];
     if (stepsIn()) {
-      const stuck = cleanings.filter((c) => (c.status === 'awaiting_video' || c.status === 'awaiting_key') && Date.now() - Date.parse(c.checksConfirmedAt || c.videoAt || c.endedAt || c.startedAt) > 30 * 60e3);
-      for (const c of stuck) att.push(`<button class="rrow link" data-flat="${esc(c.listingId)}" data-fday="${esc(cleanFor(c))}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${esc(c.label)}: ${c.status === 'awaiting_video' ? 'video not uploaded' : 'key not returned'}</b><span>${esc(c.cleanerName)} · stuck for ${esc(durWords(Date.now() - Date.parse(c.checksConfirmedAt || c.videoAt || c.endedAt || c.startedAt)))}</span></span>${CHEV}</button>`);
+      const since = (c) => Date.parse((c.status === 'awaiting_key' ? c.videoAt || (c.videoSkipped && c.videoSkipped.at) : c.checksConfirmedAt) || c.endedAt || c.startedAt);
+      const stuck = cleanings.filter((c) => (c.status === 'awaiting_video' || c.status === 'awaiting_key') && Date.now() - since(c) > 30 * 60e3);
+      for (const c of stuck) att.push(`<button class="rrow link" data-flat="${esc(c.listingId)}" data-fday="${esc(cleanFor(c))}"><span class="ric warn">${c.status === 'awaiting_video' ? ICONS.video : ICONS.key}</span><span class="rtxt"><b>${esc(c.label)}: ${c.status === 'awaiting_video' ? 'video not uploaded' : 'key not returned'}</b><span>${esc(c.building)} · ${esc(c.cleanerName)} · waiting ${esc(durWords(Date.now() - since(c)))}</span></span>${CHEV}</button>`);
     }
-    if (openDamage) att.push(`<button class="rrow link" data-go="damage"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${openDamage} open damage report${openDamage === 1 ? '' : 's'}</b><span>Review and resolve</span></span>${CHEV}</button>`);
+    for (const u of s.units) { // guests arriving at a flat that isn't clean: first in the list
+      const r = arrivalRisk(u);
+      if (r) att.unshift(`<button class="rrow link" data-flat="${esc(u.listingId)}"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${esc(u.label)}: guests ${r.late ? 'arrived' : 'arrive'} ${esc(u.checkIn.time)}</b><span>${esc(u.building || '')} · ${esc(r.why)}</span></span>${CHEV}</button>`);
+    }
+    if (openDamage) att.push(`<button class="rrow link" data-go="damage"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${openDamage} open damage report${openDamage === 1 ? '' : 's'}</b><span>${can('manage_damage') ? 'Review and resolve' : 'See the reports'}</span></span>${CHEV}</button>`);
     if (knUnlinked.length) att.push(`<button class="rrow link" data-go="${can('manage_settings') ? 'settings' : 'props'}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${knUnlinked.length} KeyNest flat${knUnlinked.length === 1 ? '' : 's'} not linked</b><span>${esc(knUnlinked.map((f) => f.label).join(' · '))}</span></span>${CHEV}</button>`);
     for (const u of s.units.filter((x) => x.checkIn && x.checkIn.isNew)) att.push(`<button class="rrow link" data-flat="${esc(u.listingId)}"><span class="ric new">${ICONS.star}</span><span class="rtxt"><b>${esc(u.label)} is a new booking</b><span>Arrives ${esc(u.checkIn.time)}${u.checkIn.guests ? ` · ${u.checkIn.guests} guest${u.checkIn.guests > 1 ? 's' : ''}` : ''}</span></span>${CHEV}</button>`);
     cards.push(`<div class="card rcard"><div class="rc-h"><h3>Needs attention</h3></div>${att.join('') || '<p class="muted rnone">Nothing right now.</p>'}</div>`);
@@ -1537,16 +1650,20 @@
   }
   const CHEV = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>';
   const ICONS = {
+    video: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6.5" width="13" height="11" rx="2"/><path d="m16 10.5 5-3v9l-5-3z"/></svg>',
     tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4.2 4.2 0 0 0-5.5 5.4L3.8 17.1a1.9 1.9 0 0 0 2.7 2.7l5.4-5.4a4.2 4.2 0 0 0 5.4-5.5l-2.5 2.5-2.3-.4-.4-2.3z"/></svg>',
     repeat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 11V9.5A3.5 3.5 0 0 1 7 6h13.5M7 21.5 3.5 18 7 14.5"/><path d="M20.5 13v1.5A3.5 3.5 0 0 1 17 18H3.5"/></svg>',
     damage: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5M12 17.2v.3"/></svg>',
     key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14 9l2 2"/></svg>',
     star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 13.8 10.2 20.5 12 13.8 13.8 12 20.5 10.2 13.8 3.5 12 10.2 10.2z"/></svg>',
   };
+  $('m-assign').onclick = () => assignMany();
   $('rail').addEventListener('click', (e) => {
+    if (e.target.closest('[data-assign-many]')) { assignMany(); return; }
     const b = e.target.closest('[data-go], [data-flat]');
     if (!b) return;
-    if (b.dataset.flat) openSheet(b.dataset.flat); else setView(b.dataset.go);
+    if (b.dataset.flat && b.dataset.fday && b.dataset.fday !== selected) openLink(`/?view=day&date=${b.dataset.fday}&flat=${encodeURIComponent(b.dataset.flat)}`);
+    else if (b.dataset.flat) openSheet(b.dataset.flat); else setView(b.dataset.go);
   });
   let assignments = {}; // "date|listingId" → { cleanerId, cleanerName, … }
   const PERSON_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>';
@@ -1561,12 +1678,20 @@
   // Sticky bar so a cleaner can always get back to the flat they're cleaning.
   function renderActiveBar() {
     const a = myActive();
+    if (a && a.status === 'awaiting_video') restoreUploads(a); // after a reload: is the video already up?
     const bar = $('active-bar');
     if (!a) { bar.classList.add('hidden'); return; }
-    const step = a.status === 'in_progress' ? `<b data-since="${esc(a.startedAt)}">${fmtDur(Date.now() - Date.parse(a.startedAt))}</b>` : a.status === 'checklist' ? 'Checklist to finish' : a.status === 'awaiting_key' ? 'Key to return' : 'Video needed';
+    const step = a.status === 'in_progress' ? `<b data-since="${esc(a.startedAt)}">${fmtDur(Date.now() - Date.parse(a.startedAt))}</b>` : a.status === 'checklist' ? 'Checklist to finish' : a.status === 'awaiting_key' ? 'Key to return' : videoReady(a) ? 'Video uploaded · finish it' : 'Video needed';
     bar.innerHTML = `<div class="wrap"><span class="ab-dot"></span><span>Cleaning <b>${esc(a.label)}</b> · ${step}</span><button class="btn primary" id="ab-open">Open</button></div>`;
     bar.classList.remove('hidden');
-    $('ab-open').onclick = () => openSheet(a.listingId);
+    $('ab-open').onclick = async () => { // on the cleaning's own day, whichever day is picked
+      const d = cleanFor(a);
+      if (data && d !== selected && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+        if (!data.dates.includes(d)) await showWeek(d);
+        if (data.dates.includes(d)) { selected = d; renderStrip(); renderDay(); setPageHead(); }
+      }
+      openSheet(a.listingId);
+    };
   }
 
   // Tapping a flat in the Day view opens its panel.
@@ -1583,18 +1708,70 @@
     return c ? { listingId, label: c.label, name: c.listingName, building: c.building, unitType: c.unitType } : null;
   }
   function openSheet(listingId) {
+    if (!$('detail').classList.contains('hidden')) closeDetail(); // a detail drawer would otherwise sit on top of it
     sheetListing = listingId; sheetMode = 'main';
     $('sheet').classList.remove('hidden');
     document.body.classList.add('noscroll');
     renderSheet();
+    $('sheet-body').scrollTop = 0;
   }
   function closeSheet() {
-    if (uploadsBusy()) { toast('An upload is still running — keep this open until it finishes'); return; }
+    if (uploadsBusy()) { toast('An upload is still running — keep this open until it finishes'); return false; }
     sheetListing = null;
+    clearInterval(keyPoll); keyPoll = null; // stop checking KeyNest for a panel nobody is looking at
     $('sheet').classList.add('hidden');
     document.body.classList.remove('noscroll');
+    return true;
   }
-  $('sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet' || e.target.closest('[data-close]')) closeSheet(); });
+  // ---- the phone's Back button closes the open panel, or goes back to the previous screen (instead of leaving the app) ----
+  // While a panel or drawer is open there's one extra history entry ('panel'); it's put back or taken away after every
+  // open and close (watched below), so switching straight from one panel to another never loses or doubles it.
+  let navPopping = false, navSkip = 0, navTimer = null, navWait = 0, navSkipT = null;
+  const skipNext = () => { navSkip++; clearTimeout(navSkipT); navSkipT = setTimeout(() => { navSkip = 0; }, 1000); }; // our own history step's popstate
+  const OVERLAYS = ['sheet', 'detail', 'notif', 'checklist'];
+  const panelOpen = () => OVERLAYS.some((id) => !$(id).classList.contains('hidden'));
+  function syncNav() {
+    clearTimeout(navTimer);
+    navTimer = setTimeout(() => {
+      if (!navReady) return;
+      if (navSkip && navWait++ < 20) return syncNav(); // our own Back step hasn't landed yet
+      navWait = 0;
+      const has = history.state && history.state.cs === 'panel', want = panelOpen();
+      try {
+        if (want && !has) history.pushState({ cs: 'panel', v: view }, '', location.href);
+        else if (!want && has) { skipNext(); history.back(); } // closed with ✕: take its Back step away too
+      } catch (_) {}
+    }, 30);
+  }
+  function pushNav() { if (navPopping) return; try { history.pushState({ cs: 'view', v: view }, '', location.href); } catch (_) {} }
+  const navWatch = new MutationObserver(syncNav);
+  for (const id of OVERLAYS) navWatch.observe($(id), { attributes: true, attributeFilter: ['class'] });
+  navWatch.observe(document.body, { childList: true }); // a pop-up closing: check the step still matches what's open
+  // Back and Escape close what's on top, one layer at a time.
+  function closeTop() {
+    if (!$('notif').classList.contains('hidden')) closeNotifs();
+    else if (!$('checklist').classList.contains('hidden')) $('checklist').classList.add('hidden'); // same as "Not done yet"
+    else if (!$('detail').classList.contains('hidden')) { const back = $('mt-back') || $('cp-back'); if (back) back.click(); else closeDetail(); } // a form's own Cancel goes back to where it came from
+    else if (!$('sheet').classList.contains('hidden')) {
+      if (sheetMode === 'damage') { if ($('dmg-back')) $('dmg-back').click(); else { sheetMode = 'main'; renderSheet(); } } // back to the flat, like its ←
+      else closeSheet(); // refused while a video uploads: the Back step comes back
+    } else return false;
+    return true;
+  }
+  window.addEventListener('popstate', (e) => {
+    if (navSkip) { navSkip--; return; }
+    if (document.querySelector('.modal')) { skipNext(); history.go(1); return; } // finish or cancel the pop-up first
+    navPopping = true;
+    try {
+      if (!closeTop()) { const v = e.state && e.state.v; if (v && v !== view && allowed(v)) setView(v); }
+    } finally { navPopping = false; }
+    syncNav();
+  });
+  $('sheet').addEventListener('click', (e) => {
+    if (e.target.id !== 'sheet' && !e.target.closest('[data-close]')) return;
+    if (sheetMode === 'damage' && $('dmg-back')) $('dmg-back').click(); // asks before throwing a started report away
+    else closeSheet();
+  });
 
   // "4K", "1080p"… from the uploaded video's shorter side (works for upright and sideways videos).
   const qualityName = (m) => { const s = Math.min(m.width, m.height); return s >= 2160 ? '4K' : s >= 1080 ? '1080p' : s >= 720 ? '720p' : `${m.width}×${m.height}`; };
@@ -1608,7 +1785,7 @@
     if (!media || !media.length) return '';
     return `<div class="media-grid">${media.map((m) => m.kind === 'video'
       ? `<div class="mt video">${m.status === 'ready' ? `<video controls preload="none" playsinline poster="/media/${m.id}/thumb" src="/media/${m.id}"></video>` : `<div class="mt-wait">Processing video…</div>`}${m.duration ? `<span class="mt-d">${fmtDur(m.duration * 1000)}</span>` : ''}</div>${videoBar(m)}`
-      : `<a class="mt photo" href="/media/${m.id}${m.hasOrig ? '/orig' : ''}" target="_blank" rel="noopener"><img loading="lazy" src="/media/${m.id}/thumb" onerror="this.src='/media/${m.id}'" alt="Photo"></a>`).join('')}</div>`;
+      : `<a class="mt photo" href="/media/${m.id}${m.hasOrig ? '/orig' : ''}" target="_blank" rel="noopener"><img loading="lazy" src="/media/${m.id}/thumb" onerror="if(this.dataset.f){this.onerror=null;this.parentNode.classList.add('broken')}else{this.dataset.f=1;this.src='/media/${m.id}'}" alt="Photo"></a>`).join('')}</div>`;
   }
 
   // A cleaner can back out of their own cleaning at any step until it's complete.
@@ -1618,22 +1795,55 @@
   const sheetSig = () => JSON.stringify([sheetListing, selected, typingStep() ? null : (assignments[`${selected}|${sheetListing}`] || {}).cleanerId || null, forListing(sheetListing, selected).map((c) =>
     [c.id, c.status, c.endedAt, c.guesty, c.checklist && c.checklist.length, c.key && c.key.mode, (c.media || []).map((m) => [m.id, m.status, m.hasOrig])])]);
 
+  // ---- every flat still without a cleaner that day, assigned in one pop-up (summary tile, Not assigned card) ----
+  async function assignMany() {
+    const date = selected, todo = dayStats().unassigned.filter((x) => !x.done && !x.active).map((x) => x.u); // still to clean
+    if (!todo.length || !can('assign_cleanings') || (data && date < data.today)) return;
+    await Promise.all(todo.map(async (u) => { // fresh: who covers each flat can change
+      try { assignees.set(u.listingId, (await getJSON('/api/assignees?listingId=' + encodeURIComponent(u.listingId))).people); } catch (_) { /* that flat's picker stays empty */ }
+    }));
+    const html = `<p class="muted">They’re told straight away. Leave a flat on “Not assigned” to do it later.</p><div class="am-list">${todo.map((u) => `<label class="am-row"><span class="am-f"><b>${esc(u.label)}</b><small>${esc(u.building || '')}${u.checkOut ? ` · out ${esc(u.checkOut.time)}` : ''}${u.checkIn ? ` · in ${esc(u.checkIn.time)}` : ''}</small></span>
+      <select data-am="${esc(u.listingId)}"><option value="">Not assigned</option>${(assignees.get(u.listingId) || []).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}${p.role !== 'cleaner' ? ` (${esc(p.role)})` : ''}</option>`).join('')}</select></label>`).join('')}</div>
+      <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary">Assign</button></div>`;
+    formModal(`Assign cleaners · ${longDate(date)}`, html, async (form) => {
+      const picks = [...form.querySelectorAll('[data-am]')].filter((x) => x.value);
+      if (!picks.length) throw new Error('Pick a cleaner for at least one flat.');
+      let ok = 0; const errs = [];
+      for (const sel of picks) {
+        try { const r = await send('PUT', '/api/assignments', { listingId: sel.dataset.am, date, cleanerId: sel.value }); if (r.assignment) assignments[`${date}|${sel.dataset.am}`] = r.assignment; ok++; sel.disabled = true; }
+        catch (e) { errs.push(e.message); }
+      }
+      decorateDay();
+      if (ok) toast(`${ok} flat${ok === 1 ? '' : 's'} assigned — they’ve been notified`);
+      if (errs.length) throw new Error(errs[0]);
+      return true;
+    });
+  }
   // ---- assigning a cleaner to this flat on the selected day (Admin/User); everyone else just sees who it is ----
   const assignees = new Map(); // listingId → [{ id, name, role }]
   function assignBlock() {
     const a = assignments[`${selected}|${sheetListing}`];
+    const du = data && unitOn(sheetListing, selected);
+    if (data && !a && (!(du && du.checkOut) || selected < data.today)) return ''; // nothing to clean that day, or it's passed
+    if (data && a && selected < data.today && can('assign_cleanings')) { // the day has passed: it can only be taken off
+      return `<div class="assign-row ro">${PERSON_ICON}<span>Assigned to <b>${esc(a.cleanerName)}</b> ${esc(longDate(selected))}</span><button class="linkbtn" id="as-remove">Remove</button></div>`;
+    }
     const day = selected === (data && data.today) ? 'today' : esc(longDate(selected));
     if (!can('assign_cleanings')) return a ? `<div class="assign-row ro">${PERSON_ICON}<span>${a.cleanerId === me.id ? '<b>Assigned to you</b>' : `Assigned to <b>${esc(a.cleanerName)}</b>`} ${day}</span></div>` : '';
-    return `<div class="assign-row">${PERSON_ICON}<label for="as-sel">Cleaner ${day}</label>
+    return `<div class="assign-row">${PERSON_ICON}<label for="as-sel">Cleaner ${selected === (data && data.today) ? 'today' : esc(`${WD_SHORT.format(D(selected))} ${shortDate(selected)}`)}</label>
       <select id="as-sel" data-cur="${esc(a ? a.cleanerId : '')}"><option value="">${a ? esc(a.cleanerName) : 'Not assigned'}</option></select></div>`;
   }
   async function wireAssign() {
+    if ($('as-remove')) $('as-remove').onclick = async () => {
+      const listingId = sheetListing, date = selected;
+      try { await send('PUT', '/api/assignments', { listingId, date, cleanerId: null }); delete assignments[`${date}|${listingId}`]; toast('Assignment removed'); decorateDay(); renderSheet(); } catch (e) { toast(e.message); }
+    };
     const sel = $('as-sel');
     if (!sel) return;
     const listingId = sheetListing, date = selected;
     let cur = sel.dataset.cur;
     try {
-      if (!assignees.has(listingId)) assignees.set(listingId, (await getJSON('/api/assignees?listingId=' + encodeURIComponent(listingId))).people);
+      assignees.set(listingId, (await getJSON('/api/assignees?listingId=' + encodeURIComponent(listingId))).people);
     } catch (e) { return; }
     if ($('as-sel') !== sel) return; // panel was redrawn meanwhile
     const people = assignees.get(listingId);
@@ -1663,6 +1873,7 @@
     let body = '';
 
     if (sheetMode === 'damage') return renderDamageForm(u);
+    const typed = $('ks-code') ? { id: $('ks-code').closest('[data-cid]') && $('ks-code').closest('[data-cid]').dataset.cid, c1: $('ks-code').value, c2: $('ks-code2') && $('ks-code2').value, back: $('ks-back') && $('ks-back').checked } : null;
 
     if (active && mine && active.status === 'in_progress') {
       body = `<div class="timer-card">
@@ -1680,20 +1891,22 @@
       body = keyStep(active) + `<div class="cancel-row">${CANCEL_MINE}</div>`;
     } else if (active) {
       body = `<div class="timer-card other"><div class="tc-label">${esc(active.cleanerName)} started at ${fmtClock(active.startedAt)}</div>
-        <div class="tc-time" ${active.endedAt ? '' : `data-since="${esc(active.startedAt)}"`}>${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</div>
-        <div class="tc-step">${active.status === 'in_progress' ? 'Cleaning now' : active.status === 'checklist' ? 'Doing final checks' : active.status === 'awaiting_key' ? 'Returning the key' : 'Uploading video'}</div>
+        ${active.status === 'in_progress' ? `<div class="tc-time" data-since="${esc(active.startedAt)}">${fmtDur(Date.now() - Date.parse(active.startedAt))}</div>` : `<div class="tc-wait">Cleaned ${active.endedAt ? `${fmtClock(active.startedAt)}–${fmtClock(active.endedAt)}` : ''}</div>`}
+        <div class="tc-step">${active.status === 'in_progress' ? 'Cleaning now' : active.status === 'checklist' ? 'Doing final checks' : active.status === 'awaiting_key' ? 'Key to return' : 'Video to upload'}</div>
         ${can('reset_cleanings') ? '<button class="linkbtn" id="reset-active">Reset this cleaning</button>' : ''}</div>`
         + (active.status === 'awaiting_key' && stepsIn() ? `<p class="stepin-note">You can finish ${esc(active.cleanerName.split(' ')[0])}’s cleaning here.</p>${keyStep(active)}` : '')
         + (active.status === 'awaiting_video' && stepsIn() ? `<p class="stepin-note">${esc(active.cleanerName.split(' ')[0])} hasn’t uploaded the video yet${active.checksConfirmedAt ? ` (checks done at ${fmtClock(active.checksConfirmedAt)})` : ''}. If their phone won’t upload it, you can finish without it.</p><button class="btn wide" id="no-video">Finish without the video</button>` : '');
-    } else if (can('do_cleaning') && me.role !== 'user' && !(duNow && duNow.movedOut && !duNow.checkOut) && !(duNow && duNow.checkOut && done.length) && !(data && selected > nextDay(data.today))) {
+    } else if (can('do_cleaning') && me.role !== 'user' && duNow && duNow.checkOut && !done.length && !(data && selected > nextDay(data.today))
+      && !(duNow.checkOut.nextIn && data && data.today > nextDay(duNow.checkOut.nextIn))) {
       // Users don't clean; Admins are asked first. Not when this check-out is already cleaned (reset it to clean again),
-      // nor on a day whose clean was moved to another day, nor further ahead than tomorrow.
+      // nor where there's no check-out (or the clean was moved away), nor further ahead than tomorrow, nor a check-out
+      // that new guests have long since followed (that's for Mark as cleaned).
       body = `<button class="btn big primary" id="begin-clean"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 5v14l11-7z"/></svg>Begin cleaning</button>`;
     }
 
     const history = done.map((c) => `<div class="hist">
         <div class="hist-h"><b>✓ ${c.manual ? `Marked cleaned by ${esc(c.manual.byName)}` : `Cleaned by ${esc(c.cleanerName)}`}</b><span>${c.date !== selected ? esc(`${WD_SHORT.format(D(c.date))} ${shortDate(c.date)}`) + ', ' : ''}${esc(cleanedWhen(c))}</span></div>
-        <div class="hist-s">${c.manual ? `Cleaned by ${esc(c.cleanerName)}${c.manual.note ? ` · “${esc(c.manual.note)}”` : ''}` : `Checklist confirmed ${c.checklist.length}/${checklistDef.length || 5}${keyNote(c)}`}${c.videoSkipped ? ` · <span class="warn">no video (${esc(c.videoSkipped.byName)})</span>` : ''}${c.forBy ? ` · counted for this check-out by ${esc(c.forBy.byName)}` : ''}${c.guesty === 'updated' ? ' · marked clean in Guesty' : c.guesty === 'failed' ? ' · <span class="warn">Guesty not updated</span>' : ''}</div>
+        <div class="hist-s">${c.manual ? `Cleaned by ${esc(c.cleanerName)}${c.manual.note ? ` · “${esc(c.manual.note)}”` : ''}` : `Checklist confirmed ${c.checklist.length}/${checklistDef.length || 5}${keyNote(c)}`}${c.videoSkipped ? ` · <span class="warn">no video (${esc(c.videoSkipped.byName)}${c.videoSkipped.reason ? `: “${esc(c.videoSkipped.reason)}”` : ''})</span>` : ''}${c.key && c.key.overridden && c.key.note ? ` · override reason: “${esc(c.key.note)}”` : ''}${c.forBy ? ` · counted for this check-out by ${esc(c.forBy.byName)}` : ''}${c.guesty === 'updated' ? ' · marked clean in Guesty' : c.guesty === 'failed' ? ' · <span class="warn">Guesty not updated</span>' : ''}</div>
         ${(can('view_cleaning') || c.cleanerId === me.id) ? mediaTiles(c.media) : ''}
         ${can('reset_cleanings') ? `<button class="linkbtn danger-link" data-reset="${esc(c.id)}">Reset (not cleaned)</button>` : ''}
       </div>`).join('');
@@ -1703,27 +1916,29 @@
     // Tools for the job on this day: mark it cleaned (another date, no video), move it, or see where it was moved.
     const job = duNow && duNow.checkOut ? { from: duNow.checkOut.movedFrom || selected, moved: Boolean(duNow.checkOut.movedFrom), out: duNow.checkOut } : null;
     const tools = [];
-    if (job && job.moved) tools.push(`<p class="moved-note">⇄ Clean moved here from ${esc(longDate(job.from))}${job.out.movedBy ? ` by ${esc(job.out.movedBy)}` : ''}${job.out.movedNote ? ` · “${esc(job.out.movedNote)}”` : ''}${can('move_cleanings') ? ` <button class="linkbtn" id="move-back">Move back</button>` : ''}</p>`);
+    if (job && job.moved) tools.push(`<p class="moved-note">⇄ Clean moved here from ${esc(longDate(job.from))}${job.out.movedBy ? ` by ${esc(job.out.movedBy)}` : ''}${job.out.movedNote ? ` · “${esc(job.out.movedNote)}”` : ''}${can('move_cleanings') ? ` <button class="linkbtn" id="move-back">Move back</button>` : ''}</p>`
+      + (job.out.nextIn && job.out.nextIn < selected ? `<p class="reset-note warn">⚠ New guests arrive ${esc(longDate(job.out.nextIn))}, before this clean.</p>` : ''));
     if (duNow && duNow.movedOut && !duNow.checkOut) tools.push(`<p class="moved-note">⇄ The clean after these guests leave was moved to ${esc(longDate(duNow.movedOut.to))}${duNow.movedOut.by ? ` by ${esc(duNow.movedOut.by)}` : ''}. <button class="linkbtn" id="moved-open">Open that day</button>${can('move_cleanings') ? ` · <button class="linkbtn" id="move-back">Move back</button>` : ''}</p>`);
     if (job && !active && !done.length && can('mark_cleaned') && data && selected <= data.today) tools.push('<button class="btn wide" id="mark-cleaned">Mark as cleaned…</button>');
-    if (job && !done.length && can('move_cleanings')) tools.push('<button class="btn wide" id="move-job">Move to another day</button>');
+    if (job && !done.length && !active && can('move_cleanings')) tools.push('<button class="btn wide" id="move-job">Move to another day</button>');
 
     // This flat on the selected day: check-out, check-in and the window between them.
-    const du = (data && unitOn(sheetListing, selected)) || u;
+    const du = (data && unitOn(sheetListing, selected)) || (data ? {} : u);
     const o = du.checkOut, n = du.checkIn;
     const hrs = (a, b) => { const m = (x) => { const r = /^(\d{1,2}):(\d\d)/.exec(x || ''); return r ? Number(r[1]) * 60 + Number(r[2]) : null; }; const d = m(b) - m(a); return m(a) === null || m(b) === null || d <= 0 ? null : d; };
     const win = o && n && !o.movedFrom ? hrs(o.timeRaw, n.timeRaw) : null;
     const stay = (e) => (e ? [e.nights && `${e.nights} night${e.nights > 1 ? 's' : ''}`, e.guests && `${e.guests} guest${e.guests > 1 ? 's' : ''}`, e.planned && 'planned time', e.isNew && 'new booking'].filter(Boolean).join(' · ') : '');
+    const nothing = data && !duNow && !active && !done.length ? `<p class="reset-note">Nothing is scheduled at this flat on ${esc(longDate(selected))}.</p>` : '';
     const times = (o || n) ? `<div class="sh-times">
-        <div><span>${o && o.movedFrom ? 'Guests left' : 'Check-out'}</span><b class="o">${o ? esc(o.movedFrom ? `${WD_SHORT.format(D(o.movedFrom))} ${shortDate(o.movedFrom)}` : o.time) : '—'}</b><em>${esc(o && o.movedFrom ? `${o.time} · clean moved to today` : stay(o))}</em></div>
+        <div><span>${o && o.movedFrom ? (data && o.movedFrom > data.today ? 'Guests leave' : 'Guests left') : 'Check-out'}</span><b class="o">${o ? esc(o.movedFrom ? `${WD_SHORT.format(D(o.movedFrom))} ${shortDate(o.movedFrom)}` : o.time) : '—'}</b><em>${esc(o && o.movedFrom ? `${o.time} · clean moved to this day` : stay(o))}</em></div>
         <div><span>Check-in</span><b class="n">${n ? esc(n.time) : '—'}</b><em>${esc(stay(n))}</em></div>
         <div class="w"><span>Cleaning window</span><b>${win ? (win % 60 ? `${Math.floor(win / 60)} h ${win % 60} min` : `${win / 60} h`) : o && o.movedFrom && n ? `Before ${esc(n.time)}` : o ? 'Open' : '—'}</b><em>${o && !n ? 'No arrival this day' : n && !o ? 'Arrival only' : ''}</em></div>
       </div>` : '';
-    const pill = active ? `<span class="cb running"><i></i>${esc(STEP_WORD[active.status] || 'Cleaning')}</span>` : done.length ? '<span class="cb done">✓ Cleaned</span>' : o ? '<span class="cb todo">To clean</span>' : '';
+    const pill = active ? `<span class="cb running"><i></i>${esc(stepWord(active))}</span>` : done.length ? '<span class="cb done">✓ Cleaned</span>' : o ? '<span class="cb todo">To clean</span>' : '';
     $('sheet-body').innerHTML = `
-      <div class="sh-head"><div class="sh-title"><span class="eyebrow">${esc(u.building || '')}${u.postcode ? ` · ${esc(u.postcode)}` : ''}</span><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(shortType(u.unitType || ''))}</div></div>
+      <div class="sh-head"><div class="sh-title"><span class="eyebrow">${esc(u.building || '')}${u.postcode ? ` · <span class="nw">${esc(u.postcode)}</span>` : ''}</span><h2>${esc(u.label)}</h2><div class="sh-sub">${esc(shortType(u.unitType || ''))}</div></div>
         <div class="sh-right">${pill}<button class="btn sq" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div></div>
-      ${times}
+      ${times}${nothing}
       ${(du.keyMode || u.keyMode) === 'lockbox' && can('view_cleaning') ? '<div id="sh-lbx"></div>' : ''}
       ${assignBlock()}
       ${active ? milestones(active) : ''}
@@ -1746,10 +1961,13 @@
     on('begin-clean', async () => {
       const admin = me.role === 'admin';
       const forDate = job ? job.from : null, otherDay = forDate && data && selected !== data.today;
-      if (admin || otherDay) {
-        const text = [admin ? 'You’re not a cleaner. Are you sure you want to start this cleaning yourself? It will be recorded under your name.' : '',
+      const theirs = assignments[`${selected}|${sheetListing}`];
+      const others = theirs && theirs.cleanerId !== me.id ? theirs.cleanerName : '';
+      if (admin || otherDay || others) {
+        const text = [admin ? 'Are you sure you want to start this cleaning yourself? It will be recorded under your name.' : '',
+          others ? `It’s assigned to ${others}.` : '',
           otherDay ? `It will count for the guests who ${job.from <= data.today ? 'left' : 'leave'} on ${longDate(job.from)}${job.moved ? ` (clean moved to ${longDate(selected)})` : ''}${selected < data.today && can('mark_cleaned') ? '. To record a cleaning that’s already done, use “Mark as cleaned” instead' : ''}.` : ''].filter(Boolean).join(' ');
-        if (!(await askConfirm({ title: admin ? 'You’re not a cleaner' : `Clean for ${WD_LONG.format(D(selected))}?`, text, yes: 'Yes, start cleaning', no: 'Cancel' }))) return;
+        if (!(await askConfirm({ title: admin ? 'You’re not a cleaner' : others ? 'Start someone else’s cleaning?' : `Clean for ${WD_LONG.format(D(selected))}?`, text, yes: 'Yes, start cleaning', no: 'Cancel' }))) return;
       }
       try { await send('POST', '/api/cleanings/start', { listingId: sheetListing, forDate, ...(admin ? { notCleanerConfirmed: true } : {}) }); toast('Cleaning started'); await refreshCleanings(); }
       catch (e) { toast(e.message); refreshCleanings(); }
@@ -1770,7 +1988,7 @@
     on('open-checklist', openChecklist);
     on('reset-active', () => resetCleaning(active));
     on('no-video', async () => {
-      const r = await askConfirm({ title: 'Finish without the video?', text: `${active.cleanerName}’s cleaning of ${u.label} will go on without a walkthrough video. This is recorded with your name.`, yes: 'Finish without video', no: 'Cancel', note: 'Why? (optional)' });
+      const r = await askConfirm({ title: 'Finish without the video?', text: `${active.cleanerName}’s cleaning of ${u.label} will go on without a walkthrough video. This is recorded with your name.`, yes: 'Finish without the video', no: 'Cancel', note: 'Reason (optional)' });
       if (!r) return;
       try { await send('POST', `/api/cleanings/${active.id}/no-video`, { reason: r.note }); toast('Video step finished'); await refreshCleanings(); } catch (e) { toast(e.message); }
     });
@@ -1783,7 +2001,8 @@
     on('report-maint', () => taskForm({ listingId: sheetListing, label: u.label, building: u.building }));
     loadSheetMaint(sheetListing);
     if (active && mine && active.status === 'awaiting_video') wireEvidence(active);
-    if (active && (mine || stepsIn()) && active.status === 'awaiting_key') wireKey(active);
+    if (typed && active && typed.id === active.id && $('ks-code')) { $('ks-code').value = typed.c1 || ''; if ($('ks-code2')) $('ks-code2').value = typed.c2 || ''; if ($('ks-back')) $('ks-back').checked = Boolean(typed.back); }
+    if (active && (mine || stepsIn()) && active.status === 'awaiting_key') { wireKey(active); if (typed && $('ks-code2')) $('ks-code2').dispatchEvent(new Event('input')); }
     loadSheetDamages(sheetListing);
   }
 
@@ -1797,9 +2016,9 @@
     const day = cleanFor(c);
     const r = c.status === 'completed'
       ? await askConfirm({ title: `Reset ${c.label}?`, text: `${c.label} will show as not cleaned for ${longDate(day)}. ${c.manual ? `The record “Marked cleaned by ${c.manual.byName}”` : `${c.cleanerName}’s cleaning (${cleanedWhen(c)})`} stays in the Cleaning log marked “Reset”${c.manual ? '' : ', with its videos and photos'}.${c.cleanerId && c.cleanerId !== me.id ? ` ${first} will be told.` : ''}${info.linkedComplaints ? ` ${info.linkedComplaints} complaint${info.linkedComplaints === 1 ? ' is' : 's are'} linked to this cleaning and will stay linked.` : ''} Are you sure?`,
-        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Why? (optional, the cleaner sees this)', check: info.guestyEligible ? { label: 'Also set it back to dirty in Guesty', checked: true } : null })
+        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Reason (optional, the cleaner sees this)', check: info.guestyEligible ? { label: 'Also set it back to dirty in Guesty', checked: true } : null })
       : await askConfirm({ title: `Stop ${first}’s cleaning?`, text: `${c.cleanerName} started ${c.label} at ${fmtClock(c.startedAt)} and is at “${STEP_WORD[c.status] || c.status}”. Resetting stops it: it won’t count as cleaned and ${first} will be told. Anything already uploaded is kept. Are you sure?`,
-        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Why? (optional)' });
+        yes: 'Yes, reset it', no: 'Keep it', danger: true, note: 'Reason (optional)' });
     if (!r) return;
     try {
       await send('POST', `/api/cleanings/${encodeURIComponent(c.id)}/reset`, { reason: r.note, guesty: Boolean(r.checked) });
@@ -1809,6 +2028,7 @@
       if (detailId === c.id) openDetail(c.id);
     } catch (e) { toast(e.message); }
   }
+  const isTopModal = (box) => [...document.querySelectorAll('.modal')].pop() === box; // Escape closes only the pop-up on top
   // A small form in a pop-up. fill(box) wires it; submit(form) returns true to close, or throws to show the error.
   function formModal(title, html, submit, fill) {
     const box = document.createElement('div');
@@ -1816,10 +2036,11 @@
     box.innerHTML = `<form class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="md-t" novalidate><h3 id="md-t">${esc(title)}</h3>${html}<p class="md-err" id="md-err" role="alert"></p></form>`;
     document.body.appendChild(box);
     const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const onKey = (e) => { if (e.key === 'Escape' && isTopModal(box)) close(); };
     document.addEventListener('keydown', onKey);
     box.addEventListener('click', (e) => { if (e.target === box || e.target.closest('[data-md="no"]')) close(); });
     const form = box.querySelector('form');
+    form.addEventListener('input', () => { box.querySelector('#md-err').textContent = ''; });
     form.onsubmit = async (e) => {
       e.preventDefault();
       const go = form.querySelector('[type=submit]'); if (go) go.disabled = true;
@@ -1874,16 +2095,16 @@
   function moveJobForm(u, from, shownOn, out) {
     const listingId = u.id || sheetListing;
     const html = `<p>Guests leave ${esc(u.label)} on ${esc(longDate(from))}${out.nextIn ? `; the next guests arrive ${esc(longDate(out.nextIn))}` : ''}. Whoever is assigned moves with it and is told.</p>
-      <label class="md-l" for="mv-to">Clean on</label><input type="date" id="mv-to" value="${esc(nextDay(shownOn))}">
+      <label class="md-l" for="mv-to">Clean on</label><input type="date" id="mv-to" value="${esc([nextDay(shownOn), data ? data.today : ''].sort()[1])}" min="${esc([nextDay(from), data ? data.today : ''].sort()[1])}">
       <p class="muted" id="mv-hint"></p>
-      <label class="md-l" for="mv-note">Why? <span class="muted">(optional)</span></label><textarea id="mv-note" rows="2" maxlength="300" placeholder="e.g. Guests asked for a late check-out"></textarea>
+      <label class="md-l" for="mv-note">Reason <span class="muted">(optional)</span></label><textarea id="mv-note" rows="2" maxlength="300" placeholder="e.g. Guests asked for a late check-out"></textarea>
       <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary">Move clean</button></div>`;
     formModal(`Move the clean of ${u.label}`, html, async () => {
       const to = $('mv-to').value;
       if (!to) throw new Error('Pick a day.');
       return sendMove({ listingId, from, to, note: $('mv-note').value }, `${u.label}: clean moved to ${longDate(to)}`);
     }, (box) => {
-      const hint = () => { const to = $('mv-to').value; $('mv-hint').innerHTML = !to || !out.nextIn ? '' : to > out.nextIn ? '<span class="warn">That’s after the next guests arrive.</span>' : to === out.nextIn ? 'That makes it a same-day turnover.' : ''; };
+      const hint = () => { const to = $('mv-to').value; $('mv-hint').innerHTML = !to ? '' : to <= from ? '<span class="warn">Pick a day after the guests leave.</span>' : data && to < data.today ? '<span class="warn">That day has passed.</span>' : !out.nextIn ? '' : to > out.nextIn ? '<span class="warn">That’s after the next guests arrive.</span>' : to === out.nextIn ? 'That makes it a same-day turnover.' : ''; };
       box.querySelector('#mv-to').oninput = hint; hint();
     });
   }
@@ -1892,12 +2113,15 @@
     try {
       await send('DELETE', '/api/job-moves', { listingId: u.id || sheetListing, from });
       toast(`${u.label}: clean back on ${longDate(from)}`); weeks.clear(); await showWeek(data.weekStart, { quiet: true }); await refreshCleanings();
-      if (sheetListing && sheetMode === 'main') renderSheet();
+      if (sheetListing && sheetMode === 'main') { if (selected !== from) closeSheet(); else renderSheet(); } // nothing left to clean on the day it had moved to
     } catch (e) { toast(e.message); }
   }
 
   // A cleaning's milestones: started → cleaned → checklist → video → key back, each ticked with its time.
   const STEP_WORD = { in_progress: 'Cleaning', checklist: 'Final checks', awaiting_video: 'Video to upload', awaiting_key: 'Key to return' };
+  // On the cleaner's own phone: the video is uploaded but "Finish" hasn't been pressed yet.
+  const videoReady = (c) => c && c.status === 'awaiting_video' && c.cleanerId === me.id && [...uploads.values()].some((u) => u.ownerId === c.id && u.kind === 'video' && u.done);
+  const stepWord = (c) => (videoReady(c) ? 'Video uploaded · finish it' : STEP_WORD[c.status] || 'Cleaning');
   function milestones(c) {
     const at = ['in_progress', 'checklist', 'awaiting_video', 'awaiting_key', 'completed'].indexOf(c.status);
     const st = (i) => (at > i ? 'done' : at === i ? 'now' : 'next');
@@ -1926,7 +2150,7 @@
         <div class="form-actions"><span class="spacer"></span><button class="btn" data-md="no">${esc(no)}</button><button class="btn ${danger ? 'danger-solid' : 'primary'}" data-md="yes">${esc(yes)}</button></div></div>`;
       document.body.appendChild(box);
       const done = (ok) => { const n = box.querySelector('#md-note'), c = box.querySelector('#md-check'); box.remove(); document.removeEventListener('keydown', esc_); resolve(ok ? { note: n ? n.value.trim() : '', checked: c ? c.checked : false } : null); };
-      const esc_ = (e) => { if (e.key === 'Escape') done(false); };
+      const esc_ = (e) => { if (e.key === 'Escape' && isTopModal(box)) done(false); };
       document.addEventListener('keydown', esc_);
       box.addEventListener('click', (e) => { if (e.target === box) done(false); const b = e.target.closest('[data-md]'); if (b) done(b.dataset.md === 'yes'); });
       box.querySelector('[data-md="no"]').focus();
@@ -1992,9 +2216,9 @@
         ${later}
       </div>`;
       $('cl-later').onclick = () => { ov.classList.add('hidden'); };
-      const tap = $('tap-btn');
+      const tap = $('tap-btn'), shownAt = Date.now();
       tap.onclick = async () => {
-        if (tap.disabled) return;
+        if (tap.disabled || Date.now() - shownAt < 700) return; // a double tap mustn't confirm the next check without it being read
         tap.disabled = true;
         try {
           const r = await send('POST', `/api/cleanings/${cur.id}/confirm`, { key: item.key });
@@ -2043,9 +2267,12 @@
   function keyNote(c) {
     if (!c.key) return '';
     if (c.key.mode === 'lockbox') return c.key.code && can('view_cleaning') ? ` · key in lockbox, new code <b>${esc(c.key.code)}</b>` : c.key.note ? ' · key returned' : ' · key back in the lockbox';
-    return c.key.overridden ? ` · KeyNest check overridden by ${esc(c.key.overriddenBy || '')}` : ' · key back in KeyNest';
+    return c.key.overridden ? ` · KeyNest check overridden by ${esc(c.key.overriddenBy || '')}${c.key.status && c.key.status !== 'not checked' ? ` (KeyNest showed: ${esc(c.key.status)})` : ''}` : c.key.viaWebhook ? ` · key handed in at ${esc(c.key.store || 'KeyNest')}` : ' · key back in KeyNest';
   }
   let keyPoll = null;
+  // KeyNest key steps from the last 36 hours finish by themselves (the server's rule too); older ones need the button,
+  // so the next guests' drop-off can't finish a cleaning that's been stuck for days.
+  const keyAuto = (a) => Date.now() - Date.parse(a.videoAt || a.endedAt || a.startedAt) < 36 * 3600e3;
   function keyStep(a) {
     if (a.keyMode === 'lockbox' && a.keyNoCode) {
       return `<div class="evidence keystep">
@@ -2056,7 +2283,7 @@
       </div>`;
     }
     if (a.keyMode === 'lockbox') {
-      return `<div class="evidence keystep">
+      return `<div class="evidence keystep" data-cid="${esc(a.id)}">
         <div class="ev-head"><b>Last step: the key.</b> <span class="req">Required</span></div>
         <ol class="ks-steps"><li>Put the key back in the lockbox.</li><li>Set a <b>new 4-digit code</b> on the lockbox and close it.</li><li>Enter the new code below.</li></ol>
         <label class="ks-l" for="ks-code">New lockbox code</label>
@@ -2068,9 +2295,14 @@
         <button class="btn big primary" id="ks-done" disabled>Complete cleaning</button>
       </div>`;
     }
+    const auto = keyAuto(a);
+    const knNote = a.cleanerId !== me.id
+      ? `${esc(a.cleanerName)} needs to hand the key in at KeyNest. ${auto ? 'Once KeyNest shows it in the store, this cleaning completes by itself.' : 'Once KeyNest shows it in the store, press Complete cleaning.'}`
+      : auto ? 'If you collected the key from KeyNest, hand it back in at the store. As soon as KeyNest records it there, this cleaning completes by itself: you don’t need to come back to the app.'
+        : 'If you collected the key from KeyNest, hand it back in at the store, then press Complete cleaning once KeyNest shows it there.';
     return `<div class="evidence keystep">
       <div class="ev-head"><b>Last step: the key must be in KeyNest.</b> <span class="req">Required</span></div>
-      <p class="ev-note">If you collected the key from KeyNest, hand it back in at the store. As soon as KeyNest shows it in the store, you can complete the cleaning.</p>
+      <p class="ev-note">${knNote}</p>
       <div class="kn-status" id="kn-status"><span class="kn-dot"></span><span class="kn-body"><span id="kn-text">Checking KeyNest…</span><small id="kn-when"></small></span></div>
       <div class="kn-stores" id="kn-stores"></div>
       <button class="btn wide" id="kn-check">Check again</button>
@@ -2081,6 +2313,7 @@
   function wireKey(a) {
     clearInterval(keyPoll); keyPoll = null;
     const done = $('ks-done');
+    let checking = false, finishing = false, autoTried = false;
     const finish = async (payload) => {
       done.disabled = true;
       try {
@@ -2090,7 +2323,10 @@
         toast('Cleaning complete ✓');
         await refreshCleanings();
         if (sheetListing === a.listingId && sheetMode === 'main') closeSheet(); // not if they've since opened another flat
-      } catch (e) { toast(e.message); done.disabled = false; if (a.keyMode === 'keynest') check(); }
+      } catch (e) { // e.g. someone else finished or reset it meanwhile: show what the cleaning is now
+        toast(e.message); done.disabled = false; finishing = false;
+        refreshCleanings();
+      }
     };
     if (a.keyMode === 'lockbox' && !$('ks-code')) { // no new code for this flat: just confirm the key is back
       const back = $('ks-back');
@@ -2138,9 +2374,9 @@
         n24 && n24.id === n.id ? storeCard('Nearest KeyNest · open 24 hours', n) : storeCard('Nearest KeyNest to the flat', n) + (n24 ? storeCard('Nearest open 24 hours', n24) : '')}${
         stores.usual ? storeCard('Where this key usually goes', stores.usual) : ''}`;
     };
-    let checking = false;
     const check = async () => {
-      if (!$('kn-status')) { clearInterval(keyPoll); keyPoll = null; return; }
+      if (!$('kn-status') || $('kn-status') !== box || sheetListing !== a.listingId || $('sheet').classList.contains('hidden')) { clearInterval(keyPoll); keyPoll = null; return; }
+      if (document.hidden) return;
       if (checking) return;
       checking = true; again.disabled = true; again.textContent = 'Checking…';
       try {
@@ -2148,6 +2384,7 @@
         box.className = 'kn-status ' + (r.ok ? 'ok' : r.error ? 'err' : 'wait');
         text.textContent = r.error ? r.error : r.ok ? `Key is in KeyNest ✓ (${r.status})` : `Waiting for the key · KeyNest shows: ${r.status}`;
         done.disabled = !r.ok;
+        if (r.ok && a.cleanerId === me.id && keyAuto(a) && !finishing && !autoTried) { autoTried = true; finishing = true; checking = false; return finish({}); } // it's back: done (once; after that the button)
         showStores(!r.ok && !r.error);
       } catch (e) { box.className = 'kn-status err'; text.textContent = e.message; done.disabled = true; }
       checking = false; again.disabled = false; again.textContent = 'Check again';
@@ -2188,7 +2425,19 @@
       <button class="btn big primary" id="ev-finish" disabled>Finish cleaning</button>
     </div>`;
   }
+  // The phone reloaded after the video uploaded but before Finish: the server still has it, so show it as uploaded.
+  const restoreTried = new Set();
+  async function restoreUploads(a) {
+    if (!a || a.status !== 'awaiting_video' || a.cleanerId !== me.id || restoreTried.has(a.id)) return;
+    if ([...uploads.values()].some((u) => u.ownerId === a.id)) return;
+    restoreTried.add(a.id);
+    let r; try { r = await getJSON(`/api/media?owner=${encodeURIComponent(a.id)}`); } catch (_) { restoreTried.delete(a.id); return; } // try again on the next redraw
+    if ([...uploads.values()].some((u) => u.ownerId === a.id)) return; // they started a new upload meanwhile
+    for (const m of r.media || []) uploads.set('r' + m.id, { file: { name: m.name, size: m.size }, kind: m.kind, progress: 1, id: m.id, done: true, error: null, ownerId: a.id, purpose: 'cleaning', info: m.info, restored: true });
+    if ((r.media || []).length) { if ($('ev-list') && sheetListing === a.listingId) drawUploads(a); else { renderActiveBar(); decorateDay(); } }
+  }
   function wireEvidence(a) {
+    restoreUploads(a);
     const add = (files, kindHint) => {
       for (const f of files) {
         const kind = (f.type || '').startsWith('video') || kindHint === 'video' && !(f.type || '').startsWith('image') ? 'video' : 'photo';
@@ -2219,12 +2468,19 @@
     if (!list) return;
     const mine = [...uploads.entries()].filter(([, u]) => u.ownerId === a.id);
     list.innerHTML = mine.map(([k, u]) => `<div class="up ${u.error ? 'err' : u.done ? 'ok' : ''}" data-up="${k}">
-      <span class="up-k">${u.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(u.file.name || u.kind)} · ${(u.file.size / 1e6).toFixed(u.file.size > 1e7 ? 0 : 1)} MB</span>
+      <span class="up-k">${u.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(u.file.name || u.kind)} · ${u.file.size >= 1e6 ? `${(u.file.size / 1e6).toFixed(u.file.size > 1e7 ? 0 : 1)} MB` : `${Math.max(1, Math.round(u.file.size / 1e3))} KB`}</span>
       <span class="up-s">${u.error ? esc(u.error) : u.done ? 'Uploaded ✓' : u.waiting ? 'Waiting for signal…' : Math.floor(u.progress * 100) + '%'}</span>
       <span class="up-bar"><i style="transform:scaleX(${u.done ? 1 : u.progress})"></i></span>
       ${u.kind === 'video' && isLowQuality(u.info) ? lowQualityNote(u.info) : ''}</div>`).join('');
     const hasVideo = mine.some(([, u]) => u.kind === 'video' && u.done);
     const busy = mine.some(([, u]) => !u.done && !u.error);
+    if (hasVideo && !busy) { // the bar, the panel and the day row now say the video is uploaded
+      renderActiveBar(); decorateDay();
+      const pill = document.querySelector('#sheet-body .sh-head .cb.running'); if (pill) pill.lastChild.textContent = stepWord(a);
+    }
+    const req = document.querySelector('.evidence .req'), note = document.querySelector('.evidence .ev-note');
+    if (req) req.classList.toggle('hidden', hasVideo);
+    if (note) note.textContent = hasVideo && !busy ? (a.keyMode === 'lockbox' || a.keyMode === 'keynest' ? 'Video uploaded ✓ Next, return the key.' : 'Video uploaded ✓ You can finish the cleaning.') : busy ? 'Keep this screen open until the upload finishes.' : 'A video is needed to finish. Keep this screen open until uploads finish.';
     const btn = $('ev-finish');
     btn.disabled = !hasVideo || busy;
     const next = a.keyMode ? 'Next: return the key' : 'Finish cleaning';
@@ -2315,7 +2571,7 @@
         <textarea id="dmg-what" rows="3" required placeholder="e.g. Crack in the bathroom mirror, stain on the sofa"></textarea>
         <label for="dmg-where">Where in the flat? <span class="muted">(optional)</span></label>
         <input id="dmg-where" type="text" placeholder="e.g. Bathroom, living room">
-        <label>Evidence <span class="req">Video or photo required</span></label>
+        <label>Evidence <span class="req" id="dmg-req">Video or photo required</span></label>
         <div class="ev-btns">
           <label class="btn primary file"><input type="file" accept="video/*" id="dmg-rec">Upload video</label>
           <label class="btn file"><input type="file" accept="image/*" capture="environment" id="dmg-cam">Take photo</label>
@@ -2332,21 +2588,30 @@
       $('dmg-list') && ($('dmg-list').innerHTML = keys.map((k) => { const x = uploads.get(k); return `<div class="up ${x.error ? 'err' : x.done ? 'ok' : ''}"><span class="up-k">${x.kind === 'video' ? 'Video' : 'Photo'}</span><span class="up-n">${esc(x.file.name || x.kind)}</span><span class="up-s">${x.error ? esc(x.error) : x.done ? 'Uploaded ✓' : x.waiting ? 'Waiting for signal…' : Math.floor(x.progress * 100) + '%'}</span><span class="up-bar"><i style="transform:scaleX(${x.done ? 1 : x.progress})"></i></span>${x.kind === 'video' && isLowQuality(x.info) ? lowQualityNote(x.info) : ''}</div>`; }).join(''));
       const ok = keys.some((k) => uploads.get(k).done), busy = keys.some((k) => { const x = uploads.get(k); return !x.done && !x.error; });
       if ($('dmg-send')) { $('dmg-send').disabled = !ok || busy; $('dmg-send').textContent = busy ? 'Uploading…' : 'Send report'; }
+      if ($('dmg-req')) $('dmg-req').classList.toggle('hidden', ok);
     };
     const add = (files) => { for (const f of files) { const key = Math.random().toString(36).slice(2); uploads.set(key, { file: f, kind: (f.type || '').startsWith('image') ? 'photo' : 'video', progress: 0, done: false, error: null, purpose: 'damage', listingId }); keys.push(key); runUpload(key, draw); } draw(); };
     $('dmg-rec').onchange = (e) => add(e.target.files);
     $('dmg-cam').onchange = (e) => add(e.target.files);
     $('dmg-pick').onchange = (e) => add(e.target.files);
-    $('dmg-back').onclick = () => { if (keys.some((k) => !uploads.get(k).done && !uploads.get(k).error)) return toast('Wait for the upload to finish'); sheetMode = 'main'; renderSheet(); };
+    $('dmg-back').onclick = async () => {
+      if (keys.some((k) => !uploads.get(k).done && !uploads.get(k).error)) return toast('Wait for the upload to finish');
+      const started = ($('dmg-what') && $('dmg-what').value.trim()) || keys.length;
+      if (started && !(await askConfirm({ title: 'Discard this report?', text: 'What you typed and added isn’t sent.', yes: 'Discard', no: 'Keep editing', danger: true }))) return;
+      if (sheetMode === 'damage') { sheetMode = 'main'; renderSheet(); }
+    };
     $('dmg-form').onsubmit = async (e) => {
       e.preventDefault();
+      const btn = e.target.querySelector('[type=submit]');
+      if (btn && btn.dataset.sending) return;
+      if (btn) { btn.dataset.sending = '1'; btn.disabled = true; }
       const a = myActive();
       try {
         await send('POST', '/api/damages', { listingId, description: $('dmg-what').value, location: $('dmg-where').value, mediaIds: keys.map((k) => uploads.get(k)).filter((x) => x.done).map((x) => x.id), cleaningId: a && a.listingId === listingId ? a.id : null });
         keys.forEach((k) => uploads.delete(k));
         toast('Damage reported — thank you'); refreshBadges();
         sheetMode = 'main'; renderSheet();
-      } catch (err) { $('dmg-msg').className = 'form-msg err'; $('dmg-msg').textContent = err.message; }
+      } catch (err) { $('dmg-msg').className = 'form-msg err'; $('dmg-msg').textContent = err.message; if (btn) { delete btn.dataset.sending; btn.disabled = false; } }
     };
   }
   async function loadSheetDamages(listingId) {
@@ -2362,30 +2627,35 @@
   function damageCard(d) {
     dmgSeen.set(d.id, d);
     return `<div class="dmg ${d.status}">
-      <div class="hist-h"><b>${esc(d.label)} · ${esc(d.location || 'Damage')}</b><span>${new Date(d.reportedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })} · ${esc(d.reporterName)}</span></div>
+      <div class="hist-h"><b>${esc(d.label)} <span class="muted">· ${esc(d.building || '')}</span>${d.location ? ` · ${esc(d.location)}` : ''}</b><span>${new Date(d.reportedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })} · ${esc(d.reporterName)}</span></div>
       <p class="dmg-desc">${esc(d.description)}</p>
       ${mediaTiles(d.media)}
       ${d.status === 'resolved' ? `<div class="hist-s">Resolved by ${esc(d.resolvedBy || '')}${d.note ? ' — ' + esc(d.note) : ''}</div>` : ''}
-      ${can('manage_damage') || can('manage_maintenance') ? `<div class="form-actions">${can('manage_damage') ? `<button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button>` : ''}${can('manage_maintenance') ? `<button class="btn" data-dmg-mt="${esc(d.id)}">Create maintenance task</button>` : ''}</div>` : ''}
+      ${(d.tasks || []).length ? `<div class="dmg-tasks">${d.tasks.map((t) => `<button class="linkbtn" data-dmg-task="${esc(t.id)}">${ICONS.tool}<span>Task: ${esc(t.title)} · ${esc(MT_ST[t.status] || t.status)}</span></button>`).join('')}</div>` : ''}
+      ${can('manage_damage') || can('manage_maintenance') ? `<div class="form-actions">${can('manage_damage') ? `<button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button>` : ''}${can('manage_maintenance') ? `<button class="btn" data-dmg-mt="${esc(d.id)}">${(d.tasks || []).length ? 'Create another task' : 'Create maintenance task'}</button>` : ''}</div>` : ''}
     </div>`;
   }
   const dmgSeen = new Map(); // damage reports on screen, for "Create maintenance task"
   function wireDamageCards(root, after) {
+    root.querySelectorAll('[data-dmg-task]').forEach((b) => b.onclick = () => openTask(b.dataset.dmgTask));
     root.querySelectorAll('[data-dmg-mt]').forEach((b) => b.onclick = () => {
       const d = dmgSeen.get(b.dataset.dmgMt);
       if (d) taskForm({ listingId: d.listingId, label: d.label, building: d.building, damageId: d.id, title: `Fix: ${d.description.split('\n')[0].slice(0, 90)}`, details: `${d.location ? d.location + ': ' : ''}${d.description}\n\nFrom a damage report by ${d.reporterName}.`, mediaIds: (d.media || []).map((m) => m.id) });
     });
     root.querySelectorAll('[data-dmg]').forEach((b) => b.onclick = async () => {
-      try { await send('PUT', '/api/damages/' + b.dataset.dmg, { status: b.dataset.to }); toast(b.dataset.to === 'resolved' ? 'Marked resolved' : 'Reopened'); after(); refreshBadges(); } catch (e) { toast(e.message); }
+      let note;
+      if (b.dataset.to === 'resolved') { const r = await askConfirm({ title: 'Mark this damage resolved?', text: 'Say what was done (optional). It’s kept with the report.', yes: 'Mark resolved', note: 'What was done?' }); if (!r) return; note = r.note || undefined; }
+      try { await send('PUT', '/api/damages/' + b.dataset.dmg, { status: b.dataset.to, ...(note ? { note } : {}) }); toast(b.dataset.to === 'resolved' ? 'Marked resolved' : 'Reopened'); after(); refreshBadges(); } catch (e) { toast(e.message); }
     });
   }
 
   // ---------------- Cleaning tab (admins, supervisors, users) ----------------
   let cvDate = null;
-  const STEP = { in_progress: 'Cleaning', checklist: 'Final checks', awaiting_video: 'Uploading video', awaiting_key: 'Returning key' };
+  const STEP = { in_progress: 'Cleaning', checklist: 'Final checks', awaiting_video: 'Video to upload', awaiting_key: 'Key to return' };
   async function loadCleaningView() {
     cvDate = cvDate || (data && data.today) || new Date().toISOString().slice(0, 10);
     $('cv-date').value = cvDate;
+    if (data) { $('cv-date').max = data.today; $('cv-next').disabled = cvDate >= data.today; }
     try {
       const [c, d] = await Promise.all([getJSON('/api/cleanings?date=' + cvDate), getJSON('/api/damages?status=open').catch(() => ({ damages: [] }))]);
       checklistDef = c.checklist || checklistDef;
@@ -2393,7 +2663,7 @@
       const cls = c.cleanings.filter((x) => x.date === cvDate && (x.status !== 'cancelled' || x.reset)).sort((a, b) => (a.status === 'cancelled') - (b.status === 'cancelled'));
       const active = cls.filter((x) => ACTIVE.includes(x.status));
       const done = cls.filter((x) => x.status === 'completed');
-      const timed = done.filter(hasDuration);
+      const timed = done.filter((x) => !x.manual); // the average is of cleanings timed in the app
       const totalMin = timed.reduce((s, x) => s + (Date.parse(x.endedAt) - Date.parse(x.startedAt)), 0);
       const openDmg = d.damages.length;
       $('cv-summary').innerHTML = `<div class="metric"><div class="k">In progress</div><div class="v">${active.length}</div></div>
@@ -2406,11 +2676,11 @@
           <div class="hist-h"><b>${esc(x.label)} <span class="muted">· ${esc(x.building)}</span></b>
             <span class="${ACTIVE.includes(x.status) ? 'cb running' : x.status === 'cancelled' ? 'cb todo' : 'cb done'}">${ACTIVE.includes(x.status) ? `<i></i>${STEP[x.status]}` : x.status === 'cancelled' ? `↺ Reset by ${esc(x.reset.byName)}` : x.manual ? `✓ Marked cleaned by ${esc(x.manual.byName)}` : '✓ Completed'}</span></div>
           <div class="cv-meta"><span>${esc(x.cleanerName)}</span>${x.manual && !x.manual.timeKnown ? '<span>Time not recorded</span>' : `<span>Start ${fmtClock(x.startedAt)}</span>${hasDuration(x) ? `<span>End ${x.endedAt ? fmtClock(x.endedAt) : '—'}</span>
-            <span>Time <b ${x.endedAt ? '' : `data-since="${esc(x.startedAt)}"`}>${fmtDur((x.endedAt ? Date.parse(x.endedAt) : Date.now()) - Date.parse(x.startedAt))}</b></span>` : ''}`}
+            <span>Time <b ${!x.endedAt && x.status === 'in_progress' ? `data-since="${esc(x.startedAt)}"` : ''}>${x.endedAt ? durWords(Date.parse(x.endedAt) - Date.parse(x.startedAt)) : x.status === 'in_progress' ? fmtDur(Date.now() - Date.parse(x.startedAt)) : '—'}</b></span>` : ''}`}
             ${x.forDate && x.forDate !== x.date ? `<span>For the check-out on ${esc(WD_SHORT.format(D(x.forDate)))} ${esc(shortDate(x.forDate))}</span>` : ''}
             ${x.status === 'completed' && !x.manual ? `<span>Checks ${x.checklist.length}/${c.checklist.length}</span>` : ''}
             ${x.videoSkipped ? `<span class="warn">No video · ${esc(x.videoSkipped.byName)}</span>` : ''}
-            ${(x.media || []).length ? `<span>${x.media.filter((m) => m.kind === 'video').length} video${x.media.filter((m) => m.kind === 'video').length === 1 ? '' : 's'}${x.media.some((m) => m.kind === 'photo') ? ` · ${x.media.filter((m) => m.kind === 'photo').length} photos` : ''}</span>` : ''}
+            ${(x.media || []).length ? `<span>${x.media.filter((m) => m.kind === 'video').length} video${x.media.filter((m) => m.kind === 'video').length === 1 ? '' : 's'}${x.media.some((m) => m.kind === 'photo') ? ` · ${x.media.filter((m) => m.kind === 'photo').length} photo${x.media.filter((m) => m.kind === 'photo').length === 1 ? '' : 's'}` : ''}</span>` : ''}
             ${x.key && x.key.mode === 'lockbox' ? `<span>Lockbox code <b>${esc(x.key.code)}</b></span>` : x.key && x.key.mode === 'keynest' ? (x.key.overridden ? `<span class="warn">KeyNest overridden by ${esc(x.key.overriddenBy || '')}</span>` : '<span>Key at KeyNest ✓</span>') : ''}
             ${x.guesty === 'updated' ? '<span>Guesty ✓</span>' : x.guesty === 'failed' ? '<span class="warn">Guesty not updated</span>' : ''}</div>
           <span class="cv-more">View details</span>
@@ -2434,12 +2704,13 @@
       try { dmg = (await getJSON('/api/damages?listingId=' + encodeURIComponent(c.listingId))).damages.filter((d) => d.cleaningId === c.id); } catch (_) {}
       if (detailId !== id) return;
       const t = (iso) => (iso ? fmtClock(iso) : '—');
-      const took = !hasDuration(c) ? 'Not recorded' : c.endedAt ? durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt)) : `${fmtDur(Date.now() - Date.parse(c.startedAt))} so far`;
+      const took = !hasDuration(c) ? 'Not recorded' : c.endedAt ? durWords(Date.parse(c.endedAt) - Date.parse(c.startedAt)) : c.status === 'in_progress' ? `${fmtDur(Date.now() - Date.parse(c.startedAt))} so far` : '—';
       const state = c.status === 'completed' ? `<span class="pill ok">${c.manual ? 'Marked cleaned' : 'Completed'}</span>` : c.status === 'cancelled' ? `<span class="pill off">${c.reset ? 'Reset' : 'Cancelled'}</span>` : `<span class="pill">${esc(STEP[c.status] || c.status)}</span>`;
       const checks = defs.map((d) => { const got = (c.checklist || []).find((x) => x.key === d.key); return `<li class="${got ? 'ok' : 'no'}"><span class="dt-tick" aria-hidden="true">${got ? '✓' : '–'}</span><span><b>${esc(d.title)}</b> ${esc(d.text)}</span><em>${got ? t(got.confirmedAt) : 'Not confirmed'}</em></li>`; }).join('');
       const key = !c.keyMode && !c.key ? '<p class="muted">No key step for this flat.</p>'
         : c.key && c.key.mode === 'lockbox' ? (c.key.code ? `<p>Key back in the lockbox with a new code <b class="dt-code">${esc(c.key.code)}</b> · ${t(c.key.returnedAt)}</p>` : `<p>${c.key.note ? `Key returned: ${esc(c.key.note)}` : 'Key back in the lockbox (no new code needed)'} · ${t(c.key.returnedAt)}</p>`)
-        : c.key && c.key.mode === 'keynest' && c.key.overridden ? `<p class="warn">KeyNest check overridden by ${esc(c.key.overriddenBy || '')} · ${t(c.key.confirmedAt)}${c.key.note ? ` — “${esc(c.key.note)}”` : ''}</p>`
+        : c.key && c.key.mode === 'keynest' && c.key.overridden ? `<p class="warn">KeyNest check overridden by ${esc(c.key.overriddenBy || '')} · ${t(c.key.confirmedAt)}${c.key.status && c.key.status !== 'not checked' ? ` · KeyNest showed: ${esc(c.key.status)}` : ''}${c.key.note ? ` — “${esc(c.key.note)}”` : ''}</p>`
+        : c.key && c.key.mode === 'keynest' && c.key.viaWebhook ? `<p>Key handed in at ${esc(c.key.store || 'a KeyNest store')} ✓${c.key.droppedBy ? ` by ${esc(c.key.droppedBy)}` : ''} · ${t(c.key.confirmedAt)}<br><span class="muted">KeyNest told the app, so the cleaning finished by itself.</span></p>`
         : c.key && c.key.mode === 'keynest' ? `<p>Key in KeyNest ✓ (${esc(c.key.status || 'in store')}) · checked ${t(c.key.confirmedAt)}</p>`
         : `<p class="warn">Key not returned yet (${esc(c.keyMode === 'keynest' ? 'KeyNest' : 'lockbox')}).</p>`;
       // What KeyNest recorded for this flat's key around the cleaning (from its webhook): who collected it and when it came back.
@@ -2481,9 +2752,21 @@
       if ($('dt-reset')) $('dt-reset').onclick = () => resetCleaning(c);
     } catch (e) { if (e.message !== 'signed out') $('detail-body').innerHTML = `<div class="sh-head"><h2>Cleaning</h2><button class="btn sq" data-close-detail aria-label="Close">✕</button></div><div class="banner error">${esc(e.message)}</div>`; }
   }
-  function closeDetail() { detailId = null; postId = null; $('detail').classList.add('hidden'); if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll'); }
-  $('detail').addEventListener('click', (e) => { if (e.target.id === 'detail' || e.target.closest('[data-close-detail]')) closeDetail(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && detailId) closeDetail(); });
+  function closeDetail() {
+    detailId = null; postId = null; $('detail').classList.add('hidden');
+    if ($('sheet').classList.contains('hidden')) document.body.classList.remove('noscroll');
+    else if (sheetMode === 'main') renderSheet(); // a task changed on top of the panel shows its new state
+  }
+  $('detail').addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-applink]');
+    if (a) { e.preventDefault(); closeDetail(); openLink(a.getAttribute('href')); return; } // stays in the app, Back still works
+    if (e.target.id === 'detail' || e.target.closest('[data-close-detail]')) closeDetail();
+  });
+  // Escape closes whatever is on top: a pop-up handles itself; then a detail drawer, the flat panel, the copy menu.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || document.querySelector('.modal')) return;
+    if (!closeTop() && !$('copy-menu').classList.contains('hidden')) closeCopyMenu();
+  });
 
   // ---------- Damage reports (their own page) ----------
   let dmgFilter = 'open';
@@ -2528,9 +2811,9 @@
     }
     renderRail();
   }
-  $('cv-date').onchange = (e) => { cvDate = e.target.value; loadCleaningView(); };
+  $('cv-date').onchange = (e) => { cvDate = data && e.target.value > data.today ? data.today : e.target.value; loadCleaningView(); };
   $('cv-prev').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
-  $('cv-next').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); cvDate = d.toISOString().slice(0, 10); loadCleaningView(); };
+  $('cv-next').onclick = () => { const d = new Date(cvDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); const nx = d.toISOString().slice(0, 10); if (data && nx > data.today) return; cvDate = nx; loadCleaningView(); };
 
   // =====================================================================
   // Notifications: bell with unread count + list, and phone notifications (Web Push)
@@ -2580,7 +2863,6 @@
   function closeNotifs() { $('notif').classList.add('hidden'); }
   $('bell').onclick = () => ($('notif').classList.contains('hidden') ? openNotifs() : closeNotifs());
   $('notif').addEventListener('click', (e) => { if (e.target.id === 'notif') closeNotifs(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNotifs(); });
   setInterval(() => { if (!document.hidden) loadNotifs(); }, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifs(); });
 
@@ -2609,11 +2891,11 @@
   let pushOn = false;
   function pushState() {
     const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-    if (!supported && isIOS && !standalone) return { state: 'setup', html: `<b>Phone notifications</b><span>On iPhone, first add this app to your Home Screen: tap <b>Share</b> › <b>Add to Home Screen</b>, then open it from there and turn notifications on.</span>` };
-    if (!supported) return { state: 'off', html: '<b>Phone notifications</b><span>This browser can’t show notifications.</span>' };
-    if (Notification.permission === 'denied') return { state: 'off', html: '<b>Phone notifications are blocked</b><span>Allow notifications for this app in your phone’s Settings, then come back here.</span>' };
-    if (pushOn) return { state: 'on', html: '<b>Phone notifications are on</b><span>You’ll get alerts even when the app is closed.</span><span class="np-btns"><button class="linkbtn inline" id="np-test">Send a test</button><button class="linkbtn inline" id="np-off">Turn off</button></span>' };
-    return { state: 'offer', html: '<b>Get alerts on this phone</b><span>Even when the app is closed.</span><button class="btn primary" id="np-on">Turn on</button>' };
+    if (!supported && isIOS && !standalone) return { state: 'setup', html: `<b>Notifications</b><span>On iPhone, first add this app to your Home Screen: tap <b>Share</b> › <b>Add to Home Screen</b>, then open it from there and turn notifications on.</span>` };
+    if (!supported) return { state: 'off', html: '<b>Notifications</b><span>This browser can’t show notifications.</span>' };
+    if (Notification.permission === 'denied') return { state: 'off', html: '<b>Notifications are blocked</b><span>Allow notifications for this app in your phone’s or browser’s settings, then come back here.</span>' };
+    if (pushOn) return { state: 'on', html: '<b>Notifications are on</b><span>You’ll get alerts even when the app is closed.</span><span class="np-btns"><button class="linkbtn inline" id="np-test">Send a test</button><button class="linkbtn inline" id="np-off">Turn off</button></span>' };
+    return { state: 'offer', html: '<b>Get alerts on this device</b><span>Even when the app is closed.</span><button class="btn primary" id="np-on">Turn on</button>' };
   }
   async function initPush() {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
@@ -2637,7 +2919,7 @@
       await send('POST', '/api/push/subscribe', { subscription: sub.toJSON() });
       pushOn = true; renderNotifs();
       send('POST', '/api/push/test').catch(() => {});
-      toast('Phone notifications on ✓');
+      toast('Notifications on ✓');
     } catch (e) { toast('Couldn’t turn on notifications: ' + (e.message || 'unknown error')); }
   }
   // Signing out: this phone stops getting the person's notifications (it may be a shared or borrowed phone).
@@ -2658,7 +2940,7 @@
       const sub = reg && await reg.pushManager.getSubscription();
       if (sub) { await send('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
     } catch (_) {}
-    pushOn = false; renderNotifs(); toast('Phone notifications off');
+    pushOn = false; renderNotifs(); toast('Notifications off');
   }
 
 })();

@@ -34,6 +34,8 @@
   <div class="login-foot">schedule.yourcityscape.com</div>
 </div>
 <script>
+  // Back to this page after signing in: ask the server again (it sends signed-in people to the app).
+  window.addEventListener('pageshow', (ev) => { if (ev.persisted) location.reload(); });
   const q = new URLSearchParams(location.search), e = q.get('e');
   if (q.get('u')) { document.getElementById('un').value = q.get('u'); document.getElementById('pw').focus(); }
   if (e === '1') document.getElementById('err').textContent = 'That username or password isn’t right.';

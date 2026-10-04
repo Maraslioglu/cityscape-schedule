@@ -1,0 +1,20 @@
+name: Tests
+# Every push and pull request: build, check the built files match the source, run all test suites.
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build
+        run: npm run build
+      - name: Built files match the source
+        run: git diff --exit-code -- worker.js server.mjs
+      - name: Test suites
+        run: npm test

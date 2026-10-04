@@ -66,7 +66,7 @@
       <div class="range no-print" role="tablist" aria-label="Day or week"><button role="tab" data-range="day" aria-selected="true">Day</button><button role="tab" data-range="board" aria-selected="false">Week</button></div>
       <div class="copy-wrap no-print">
         <button class="btn act" id="copy" aria-haspopup="menu" aria-expanded="false" title="Copy as text for WhatsApp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 19.5 6 15.8A7.5 7.5 0 1 1 9 18.6z"/></svg><span class="btn-label">Copy for WhatsApp</span><svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></button>
-        <div class="menu hidden" id="copy-menu" role="menu"><button role="menuitem" data-copy="day" id="copy-day">Copy this day</button><button role="menuitem" data-copy="week">Copy this week</button></div>
+        <div class="menu hidden" id="copy-menu" role="menu"><button role="menuitem" data-copy="day" id="copy-day">Copy this day</button><button role="menuitem" data-copy="week">Copy this week</button><button role="menuitem" id="menu-print">Print</button><button role="menuitem" id="menu-refresh" class="hidden">Refresh from Guesty</button></div>
       </div>
     </div>
 
@@ -78,7 +78,7 @@
       <div class="summary" id="summary">
         <div class="metric"><div class="k">To clean</div><div class="v" id="m-clean">–</div><div class="s" id="m-clean-s"></div></div>
         <div class="metric"><div class="k">Arrivals</div><div class="v" id="m-in">–</div><div class="s" id="m-in-s"></div></div>
-        <div class="metric"><div class="k" id="m-third-k">Not assigned</div><div class="v" id="m-third">–</div><div class="s" id="m-third-s"></div></div>
+        <div class="metric"><div class="k" id="m-third-k">Not assigned</div><div class="v" id="m-third">–</div><div class="s" id="m-third-s"></div><button class="linkbtn hidden" id="m-assign" type="button">Assign cleaners</button></div>
         <div class="metric" id="m-done-box"><div class="k">Cleaned</div><div class="v"><span id="m-done">–</span><small id="m-done-of"></small></div><div class="pbar" id="m-bar" aria-hidden="true"><i class="d"></i><i class="p"></i></div></div>
       </div>
       <div class="day-layout">
@@ -197,6 +197,7 @@
         <div class="card pad acct-more hidden" id="acct-more"><h3>More</h3><div class="acct-links"><button class="btn" id="acct-props">Properties<span class="ndot hidden" id="nd-props2" title="A KeyNest flat needs linking"></span></button><button class="btn" id="acct-forum">Forum<span class="ndot hidden" id="nd-forum2" title="New posts"></span></button></div></div>
         <div class="card pad acct-admin hidden" id="acct-admin"><h3>Admin</h3><div class="acct-links"><button class="btn" id="acct-users">Users</button><button class="btn" id="acct-settings">Settings</button></div></div>
       </div>
+      <div class="card pad hidden" id="pw-owner"><h3>Password</h3><p class="muted">This is the recovery login. Its password is the APP_PASSWORD setting on the server (Railway), not set here. Changing it there signs everyone out and changes the Guesty and KeyNest webhook addresses, so only change it if you need to.</p></div>
       <form class="card pad" id="pw-form">
         <h3>Change password</h3>
         <label for="pw-cur">Current password</label><input id="pw-cur" type="password" autocomplete="current-password" required>

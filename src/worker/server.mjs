@@ -9,6 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import { pipeline } from 'node:stream';
 import worker from './worker.js';
 
 const PORT = process.env.PORT || 3000;
@@ -64,26 +65,32 @@ function dailyBackup() {
     console.log(`[backup] saved ${path.basename(f)}`);
   } catch (e) { console.log('[backup] failed', e.message); }
 }
+let dirty = false, saveRetries = 0, restorePending = Boolean(restoredFrom); // after a restore, the damaged file mustn't become the .bak
 function writeNow() {
   clearTimeout(saveTimer); saveTimer = null; firstPending = 0;
   try {
     const tmp = FILE + '.tmp';
     const fd = fs.openSync(tmp, 'w');
     try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    if (fs.existsSync(FILE)) fs.copyFileSync(FILE, FILE + '.bak'); // keep the last good copy, and never leave a moment with no store.json
+    if (fs.existsSync(FILE) && !restorePending) fs.copyFileSync(FILE, FILE + '.bak'); // keep the last good copy, and never leave a moment with no store.json
     fs.renameSync(tmp, FILE); // atomic swap
-    lastSaveError = null; lastSavedAt = Date.now();
+    lastSaveError = null; lastSavedAt = Date.now(); dirty = false; saveRetries = 0; restorePending = false;
     dailyBackup();
-  } catch (e) { lastSaveError = e.message; console.log('[store] could not save', e.message); } // e.g. disk full: keep running, retry on next change
+  } catch (e) { // e.g. disk full: keep running, and try again shortly (backing off up to a minute)
+    lastSaveError = e.message; console.log('[store] could not save', e.message);
+    saveTimer = setTimeout(writeNow, Math.min(60e3, 1000 * 2 ** saveRetries++));
+  }
 }
 const save = () => {
+  dirty = true;
   if (!firstPending) firstPending = Date.now();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(writeNow, Date.now() - firstPending > 2000 ? 0 : 200); // group quick changes, but never wait over 2 s
 };
 // Railway stops the old copy on every deploy: save anything pending first.
-for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { if (saveTimer) writeNow(); process.exit(0); });
-dailyBackup();
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { if (dirty || saveTimer) writeNow(); process.exit(0); });
+// K36: after restoring from a backup, write the good data back first, so the damaged file never becomes a backup.
+if (restoredFrom) writeNow(); else dailyBackup();
 const STORE = {
   async get(key, type) {
     const e = data[key];
@@ -103,10 +110,11 @@ async function getMeta(id) {
   if (metaCache.has(id)) return metaCache.get(id);
   const m = await STORE.get('media:' + id, 'json');
   if (m) metaCache.set(id, m);
-  if (metaCache.size > 500) metaCache.delete(metaCache.keys().next().value);
+  if (metaCache.size > 500) for (const [k, v] of metaCache) { if (!uploading.has(k) && v.uploaded && v.status === 'ready') { metaCache.delete(k); break; } }
   return m;
 }
 const putMeta = (m) => { metaCache.set(m.id, m); const { busy, ...save } = m; return STORE.put('media:' + m.id, JSON.stringify(save)); };
+const uploading = new Set(); // media ids with a piece being written right now
 
 // Short-lived response cache (used for weeks far in the past/future).
 const cacheMap = new Map();
@@ -290,7 +298,7 @@ async function sweepMedia() {
     let m; try { m = JSON.parse(data[k].v); } catch (_) { continue; }
     const age = now - Date.parse(m.createdAt || 0);
     if (!m.uploaded) {
-      if (now - Date.parse(m.lastChunkAt || m.createdAt || 0) > 3 * 864e5 && !(await getMeta(m.id) || {}).busy) {
+      if (now - Date.parse(m.lastChunkAt || m.createdAt || 0) > 3 * 864e5 && !uploading.has(m.id)) {
         await fsp.rm(path.join(MEDIA, `${m.id}.orig`), { force: true });
         metaCache.delete(m.id); await STORE.delete(k);
         console.log(`[media] removed abandoned upload ${m.id}`);
@@ -341,6 +349,23 @@ async function mediaRoute(req, res, url) {
     return sendJson(res, 200, { id: m.id, received: 0, chunk: 8 * 1024 ** 2 });
   }
 
+  // Uploads already finished for a cleaning that isn't finished yet (the phone reloaded in between), so the
+  // cleaner doesn't have to upload again: GET /api/media?owner=<cleaning id>. Only that cleaner, while the
+  // cleaning is waiting for its video (the same check as starting an upload for it).
+  if (req.method === 'GET' && url.pathname === '/api/media') {
+    const owner = String(url.searchParams.get('owner') || '');
+    const c = await check(req, { mode: 'upload', purpose: 'cleaning', ownerId: owner });
+    if (c.status === 401) return sendJson(res, 401, { error: 'Not signed in' });
+    if (!c.ok) return sendJson(res, 403, { error: 'Not allowed' });
+    const media = [];
+    for (const k of Object.keys(data)) {
+      if (!k.startsWith('media:')) continue;
+      let m; try { m = JSON.parse(data[k].v); } catch (_) { continue; }
+      if (m.purpose === 'cleaning' && m.ownerId === owner && m.byId === c.user.id && m.uploaded) media.push({ id: m.id, kind: m.kind, name: m.name, size: m.size, info: m.info || null });
+    }
+    return sendJson(res, 200, { media });
+  }
+
   if (parts[0] === 'api' && parts[1] === 'media' && parts[2]) {
     const m = await getMeta(parts[2]);
     if (!m) return sendJson(res, 404, { error: 'Upload not found' });
@@ -356,8 +381,8 @@ async function mediaRoute(req, res, url) {
       if (me.userId !== m.byId) { req.resume(); return sendJson(res, 403, { error: 'Only the person uploading can send this file.' }); }
       if (m.uploaded) { req.resume(); return sendJson(res, 200, { received: m.received, uploaded: true, info: m.info || null }); }
       const offset = Number(url.searchParams.get('offset'));
-      if (offset !== m.received || m.busy) { req.resume(); return sendJson(res, 409, { received: m.received }); } // tells the phone where to carry on from
-      m.busy = true;
+      if (offset !== m.received || uploading.has(m.id)) { req.resume(); return sendJson(res, 409, { received: m.received }); } // tells the phone where to carry on from
+      uploading.add(m.id);
       try {
       const f = fileFor(m, 'orig');
       // The file must end exactly where the phone continues. A restart mid-piece can leave extra bytes (drop them;
@@ -373,6 +398,7 @@ async function mediaRoute(req, res, url) {
       let n = 0, tooBig = false, writeErr = null;
       out.on('error', (e) => { writeErr = e; });
       await new Promise((resolve) => {
+        if (req.destroyed || req.readableEnded) return resolve(); // the phone hung up while we were checking: don't wait for ever
         req.on('data', (c) => { n += c.length; if (n > MAX_CHUNK || m.received + n > m.size) { tooBig = true; req.destroy(); } else if (!writeErr) out.write(c); });
         req.on('end', resolve); req.on('close', resolve); req.on('error', resolve);
       });
@@ -395,7 +421,7 @@ async function mediaRoute(req, res, url) {
       await putMeta(m);
       if (m.uploaded) enqueue(m.id, m.kind === 'photo');
       return sendJson(res, 200, { received: m.received, uploaded: m.uploaded, info: m.info || null });
-      } finally { m.busy = false; }
+      } finally { uploading.delete(m.id); }
     }
   }
 
@@ -425,15 +451,15 @@ async function mediaRoute(req, res, url) {
     if (req.headers['if-none-match'] === etag && !req.headers.range) { res.writeHead(304, headers); return res.end(); }
     const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
     if (range) {
-      let start = range[1] ? Number(range[1]) : stat.size - Number(range[2]);
+      let start = range[1] ? Number(range[1]) : Math.max(0, stat.size - Number(range[2] || 0));
       let end = range[1] && range[2] ? Number(range[2]) : stat.size - 1;
       if (start >= stat.size || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` }); return res.end(); }
       end = Math.min(end, stat.size - 1);
       res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Content-Length': end - start + 1 });
-      return fs.createReadStream(file, { start, end }).on('error', () => res.destroy()).pipe(res);
+      return pipeline(fs.createReadStream(file, { start, end }), res, () => {}); // closes the file if the viewer stops
     }
     res.writeHead(200, { ...headers, 'Content-Length': stat.size });
-    return fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+    return pipeline(fs.createReadStream(file), res, () => {});
   }
   return false;
 }
@@ -475,7 +501,7 @@ async function backupsRoute(req, res, url) {
   console.log(`[backup] ${c.user.name} downloaded ${name === 'now' ? 'the live data' : name}`);
   const stamp = name === 'now' ? new Date().toISOString().slice(0, 16).replace(':', '') : name.slice(6, 16);
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="cityscape-schedule-data-${stamp}.json"`, 'Content-Length': fs.statSync(file).size });
-  fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+  pipeline(fs.createReadStream(file), res, () => {});
 }
 
 // ---------------- HTTP server ----------------
