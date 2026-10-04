@@ -349,6 +349,23 @@ async function mediaRoute(req, res, url) {
     return sendJson(res, 200, { id: m.id, received: 0, chunk: 8 * 1024 ** 2 });
   }
 
+  // Uploads already finished for a cleaning that isn't finished yet (the phone reloaded in between), so the
+  // cleaner doesn't have to upload again: GET /api/media?owner=<cleaning id>. Only that cleaner, while the
+  // cleaning is waiting for its video (the same check as starting an upload for it).
+  if (req.method === 'GET' && url.pathname === '/api/media') {
+    const owner = String(url.searchParams.get('owner') || '');
+    const c = await check(req, { mode: 'upload', purpose: 'cleaning', ownerId: owner });
+    if (c.status === 401) return sendJson(res, 401, { error: 'Not signed in' });
+    if (!c.ok) return sendJson(res, 403, { error: 'Not allowed' });
+    const media = [];
+    for (const k of Object.keys(data)) {
+      if (!k.startsWith('media:')) continue;
+      let m; try { m = JSON.parse(data[k].v); } catch (_) { continue; }
+      if (m.purpose === 'cleaning' && m.ownerId === owner && m.byId === c.user.id && m.uploaded) media.push({ id: m.id, kind: m.kind, name: m.name, size: m.size, info: m.info || null });
+    }
+    return sendJson(res, 200, { media });
+  }
+
   if (parts[0] === 'api' && parts[1] === 'media' && parts[2]) {
     const m = await getMeta(parts[2]);
     if (!m) return sendJson(res, 404, { error: 'Upload not found' });

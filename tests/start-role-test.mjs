@@ -1,0 +1,16 @@
+const B = 'http://localhost:8799'; let n = 0;
+const ck = async (u, p) => (await fetch(B + '/login', { method: 'POST', headers: { 'x-forwarded-for': `10.5.0.${++n}` }, body: new URLSearchParams({ username: u, password: p }), redirect: 'manual' })).headers.get('set-cookie').split(';')[0];
+const call = async (c, m, u, b) => { const r = await fetch(B + u, { method: m, headers: { cookie: c, 'content-type': 'application/json', origin: B }, body: b ? JSON.stringify(b) : undefined }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
+let fails = 0; const ok = (t, c, x) => { console.log((c ? 'PASS  ' : 'FAIL  ') + t); if (!c) { fails++; console.log('      ', JSON.stringify(x)); } };
+const owner = await ck('owner', 'test');
+for (const [name, u, role] of [['Uma User', 'uma', 'user'], ['Sam Super', 'sam', 'supervisor'], ['Cleo Clean', 'cleo', 'cleaner'], ['Ada Admin', 'ada', 'admin']]) await call(owner, 'POST', '/api/users', { name, username: u, password: 'testpass1', role, buildings: 'all', email: '' });
+const [uma, sam, cleo, ada] = [await ck('uma', 'testpass1'), await ck('sam', 'testpass1'), await ck('cleo', 'testpass1'), await ck('ada', 'testpass1')];
+const start = (c, id, extra) => call(c, 'POST', '/api/cleanings/start', { listingId: id, ...extra });
+let r = await start(uma, 'm1'); ok('User can’t start', r.status === 403 && /Users can’t start/.test(r.body.error), r);
+r = await start(uma, 'm1', { notCleanerConfirmed: true }); ok('User can’t start even with the confirm flag', r.status === 403, r);
+r = await start(ada, 'm1'); ok('Admin without confirming is refused', r.status === 400 && /not a cleaner/.test(r.body.error), r);
+r = await start(owner, 'm1'); ok('Owner login (admin) without confirming is refused', r.status === 400, r);
+r = await start(ada, 'm1', { notCleanerConfirmed: true }); ok('Admin after confirming can start', r.status === 200 && r.body.cleaning.cleanerName === 'Ada Admin', r);
+r = await start(sam, 'm2'); ok('Supervisor starts as before, no confirm', r.status === 200, r);
+r = await start(cleo, 'm3'); ok('Cleaner starts as before, no confirm', r.status === 200, r);
+console.log(fails ? fails + ' FAILED' : 'ALL PASSED'); process.exit(fails ? 1 : 0);

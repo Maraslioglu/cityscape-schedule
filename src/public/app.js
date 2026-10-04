@@ -229,7 +229,8 @@
           else if (c.out) h += `<span class="mark out" title="Check-out ${esc(c.out.time)}">${esc(compact(c.out.time))}</span>`;
           else if (c.in) h += `<span class="mark in" title="Check-in ${esc(c.in.time)}">${esc(compact(c.in.time))}</span>`;
           if (c.movedOut && !c.out) h += `<span class="mark moved-away" title="Clean moved to ${esc(longDate(c.movedOut.to))}">→ ${esc(WD_SHORT.format(D(c.movedOut.to)))}</span>`;
-          return `<td class="cell${dates[i] === today ? ' today' : ''}">${h}</td>`;
+          const tap = c.out || c.in || c.movedOut;
+          return `<td class="cell${dates[i] === today ? ' today' : ''}${tap ? ' tap' : ''}"${tap ? ` data-flat="${esc(u.listingId)}" data-date="${dates[i]}" title="Open ${esc(u.label)} on ${esc(longDate(dates[i]))}"` : ''}>${h}</td>`;
         }).join('')}
       </tr>`).join('')}`).join('');
     const foot = `<tfoot>
@@ -239,6 +240,8 @@
     $('board').innerHTML = head + `<tbody>${body}</tbody>` + foot;
   }
   $('board').addEventListener('click', (e) => {
+    const cell = e.target.closest('td.cell[data-flat]');
+    if (cell) { openLink(`/?view=day&date=${cell.dataset.date}&flat=${encodeURIComponent(cell.dataset.flat)}`); return; }
     const b = e.target.closest('thead button');
     if (!b) return;
     selected = b.dataset.date;
@@ -809,7 +812,7 @@
         const r = t ? await send('PUT', `/api/maintenance/${encodeURIComponent(t.id)}`, b) : await send('POST', '/api/maintenance', b);
         if (picker) picker.clear();
         toast(t ? 'Saved' : mgr ? 'Task created' : 'Reported — thank you');
-        mtCache = null; if (view === 'maintenance') loadMaintenance(); refreshBadges();
+        mtCache = null; if (view === 'maintenance') loadMaintenance(); if (view === 'damage' && pre.damageId) loadDamageView(); refreshBadges();
         if (sheetListing && !$('sheet').classList.contains('hidden')) loadSheetMaint(sheetListing);
         openTask(r.task.id);
       } catch (err) { $('mt-msg').className = 'form-msg err'; $('mt-msg').textContent = err.message; $('mt-go').disabled = false; }
@@ -1291,11 +1294,32 @@
       if (!isNew) body.active = f.querySelector('[name=uf-active]:checked').value === '1';
       try {
         const out = await send(isNew ? 'POST' : 'PUT', isNew ? '/api/users' : '/api/users/' + u.id, body);
-        toast(isNew ? `${out.user.name} can now sign in as “${out.user.username}”` : 'Saved');
+        if (body.password && out.user.id !== me.id) shareLogin(out.user, body.password, isNew); // shown once, to send on
+        else toast(isNew ? `${out.user.name} can now sign in as “${out.user.username}”` : 'Saved');
         editing = null; loadUsers();
         if (out.user.id === me.id) { me = { ...me, ...out.user }; applyPermissions(); }
       } catch (err) { $('uf-msg').className = 'form-msg err'; $('uf-msg').textContent = err.message; }
     };
+  }
+
+  // After adding someone (or setting them a new password): their sign-in details, once, to copy and send privately.
+  function shareLogin(user, pw, isNew) {
+    const box = document.createElement('div');
+    box.className = 'modal';
+    box.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="sl-t"><h3 id="sl-t">${isNew ? `${esc(user.name)} can now sign in` : `New password for ${esc(user.name)}`}</h3>
+      <p>Send these to ${esc(user.name.split(' ')[0])} privately. The password isn’t shown again${isNew ? '; they can change it under My account' : ''}.</p>
+      <dl class="sl-dl"><dt>Address</dt><dd>${esc(location.host)}</dd><dt>Username</dt><dd>${esc(user.username)}</dd><dt>Password</dt><dd>${esc(pw)}</dd></dl>
+      <div class="form-actions"><span class="spacer"></span><button class="btn" data-sl="done">Done</button><button class="btn primary" data-sl="copy">Copy details</button></div></div>`;
+    document.body.appendChild(box);
+    const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape' && isTopModal(box)) close(); };
+    document.addEventListener('keydown', onKey);
+    box.addEventListener('click', async (e) => {
+      if (e.target === box || e.target.closest('[data-sl="done"]')) return close();
+      if (!e.target.closest('[data-sl="copy"]')) return;
+      try { await navigator.clipboard.writeText(`Cityscape Schedule: ${location.origin}\nUsername: ${user.username}\nPassword: ${pw}`); toast('Copied: send it to them privately'); }
+      catch (_) { toast('Couldn’t copy here: select the details and copy them'); }
+    });
   }
 
   // ---------- live updates ----------
@@ -1485,16 +1509,40 @@
   }
 
   // Each row's status ("Cleaning · 12:04" live, "Cleaned · 49 min", "To clean") and its cleaner.
-  const cleanState = (listingId) => {
-    const list = forListing(listingId, selected);
+  const cleanState = (listingId, date = selected) => {
+    const list = forListing(listingId, date);
     return { active: list.find((c) => ACTIVE.includes(c.status)), done: list.filter((c) => c.status === 'completed').pop() };
   };
+  // Guests arriving today at a flat that isn't clean yet: flagged on the row and under Needs attention.
+  // A same-day turnover counts once check-in is 2 hours away and the clean hasn't started; an arrival after an
+  // earlier check-out counts as soon as that clean is missing.
+  const toMin = (t) => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+  const londonMin = () => toMin(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()));
+  function arrivalRisk(u) {
+    if (!data || !u || !u.checkIn || selected !== data.today) return null;
+    const inAt = toMin(u.checkIn.timeRaw), now = londonMin(), late = inAt !== null && now >= inAt;
+    const { active, done } = cleanState(u.listingId);
+    if (active || done) return null;
+    if (u.checkOut) return inAt !== null && now >= inAt - 120 ? { late, why: late ? 'not cleaned yet' : 'clean not started' } : null;
+    if (u.movedOut) return { late, why: `clean moved to ${WD_SHORT.format(D(u.movedOut.to))} ${shortDate(u.movedOut.to)}` };
+    for (const d of data.days.filter((x) => x.date < selected).reverse()) { // the last guests' check-out earlier this week
+      const p = d.units.find((x) => x.listingId === u.listingId);
+      if (!p || (!p.checkOut && !p.movedOut)) continue;
+      const day = p.checkOut ? d.date : p.movedOut.to;
+      if (day > selected) return { late, why: `clean moved to ${WD_SHORT.format(D(day))} ${shortDate(day)}` };
+      const st = cleanState(u.listingId, day);
+      return st.done || st.active ? null : { late, why: `not cleaned since guests left ${WD_SHORT.format(D(d.date))}` };
+    }
+    return null;
+  }
   function decorateDay() {
     if (data && me && cRange !== cleaningRange()) { cRange = 'loading'; refreshCleanings(); }
     document.querySelectorAll('[data-cbadge]').forEach((el) => {
       const { active, done } = cleanState(el.dataset.cbadge);
+      let risk = null;
       if (active) el.innerHTML = `<span class="cb running"><i></i>${active.status === 'in_progress' ? 'Cleaning' : esc(stepWord(active))}${active.status === 'in_progress' ? ` · <b data-since="${esc(active.startedAt)}" data-until="${esc(active.endedAt || '')}">${fmtDur((active.endedAt ? Date.parse(active.endedAt) : Date.now()) - Date.parse(active.startedAt))}</b>` : ''}</span>`;
       else if (done) el.innerHTML = `<span class="cb done">✓ ${done.manual ? 'Marked cleaned' : 'Cleaned'}${hasDuration(done) ? ` · ${durWords(Date.parse(done.endedAt) - Date.parse(done.startedAt))}` : ''}</span>`;
+      else if ((risk = arrivalRisk(unitOn(el.dataset.cbadge, selected)))) el.innerHTML = `<span class="cb risk${risk.late ? ' late' : ''}">${risk.late ? 'Guests in · not clean' : 'At risk'}</span>`;
       else if (el.dataset.moved) el.innerHTML = `<span class="cb moved">Clean moved → ${esc(WD_SHORT.format(D(el.dataset.moved)))} ${esc(shortDate(el.dataset.moved))}</span>`;
       else el.innerHTML = el.dataset.kind === 'in' ? '<span class="cb arr">Arriving</span>' : '<span class="cb todo">To clean</span>';
     });
@@ -1535,6 +1583,7 @@
       $('m-third').textContent = s.unassigned.length;
       $('m-third').classList.toggle('warnv', s.unassigned.length > 0 && !(data && selected < data.today));
       $('m-third-s').textContent = s.unassigned.length ? s.unassigned.map((x) => x.u.label).slice(0, 4).join(' · ') + (s.unassigned.length > 4 ? ' …' : '') : 'Everyone has a cleaner';
+      $('m-assign').classList.toggle('hidden', !(s.unassigned.length && can('assign_cleanings') && !(data && selected < data.today)));
     } else {
       const mine = s.st.filter((x) => x.a && x.a.cleanerId === me.id);
       $('m-third-k').textContent = 'Assigned to you';
@@ -1575,7 +1624,7 @@
         : x.done ? `${x.u.label} done${x.done.manual && !x.done.manual.timeKnown ? '' : ' ' + fmtClock(x.done.endedAt)}` : `${x.u.label} to clean`;
       const rows = [...by.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : 0)).map(([id, g]) => id
         ? `<div class="rrow"><span class="avatar">${esc(initials(g.name))}</span><span class="rtxt"><b>${id === me.id ? 'You' : esc(g.name)}</b><span>${esc(g.items.map(line).join(' · '))}</span></span><em>${g.items.filter((x) => x.done).length}/${g.items.length}</em></div>`
-        : `<div class="rrow"><span class="avatar dash" aria-hidden="true"></span><span class="rtxt"><b>Not assigned</b><span>${esc(g.items.map((x) => x.u.label).join(' · '))}</span></span></div>`).join('');
+        : `<div class="rrow"><span class="avatar dash" aria-hidden="true"></span><span class="rtxt"><b>Not assigned</b><span>${esc(g.items.map((x) => x.u.label).join(' · '))}</span></span>${can('assign_cleanings') && !(data && selected < data.today) ? '<button class="btn sm-assign" data-assign-many>Assign</button>' : ''}</div>`).join('');
       cards.push(`<div class="card rcard"><div class="rc-h"><h3>Team ${esc(dayWord)}</h3></div>${rows}</div>`);
     }
     const att = [];
@@ -1583,6 +1632,10 @@
       const since = (c) => Date.parse((c.status === 'awaiting_key' ? c.videoAt || (c.videoSkipped && c.videoSkipped.at) : c.checksConfirmedAt) || c.endedAt || c.startedAt);
       const stuck = cleanings.filter((c) => (c.status === 'awaiting_video' || c.status === 'awaiting_key') && Date.now() - since(c) > 30 * 60e3);
       for (const c of stuck) att.push(`<button class="rrow link" data-flat="${esc(c.listingId)}" data-fday="${esc(cleanFor(c))}"><span class="ric warn">${c.status === 'awaiting_video' ? ICONS.video : ICONS.key}</span><span class="rtxt"><b>${esc(c.label)}: ${c.status === 'awaiting_video' ? 'video not uploaded' : 'key not returned'}</b><span>${esc(c.building)} · ${esc(c.cleanerName)} · waiting ${esc(durWords(Date.now() - since(c)))}</span></span>${CHEV}</button>`);
+    }
+    for (const u of s.units) { // guests arriving at a flat that isn't clean: first in the list
+      const r = arrivalRisk(u);
+      if (r) att.unshift(`<button class="rrow link" data-flat="${esc(u.listingId)}"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${esc(u.label)}: guests ${r.late ? 'arrived' : 'arrive'} ${esc(u.checkIn.time)}</b><span>${esc(u.building || '')} · ${esc(r.why)}</span></span>${CHEV}</button>`);
     }
     if (openDamage) att.push(`<button class="rrow link" data-go="damage"><span class="ric bad">${ICONS.damage}</span><span class="rtxt"><b>${openDamage} open damage report${openDamage === 1 ? '' : 's'}</b><span>${can('manage_damage') ? 'Review and resolve' : 'See the reports'}</span></span>${CHEV}</button>`);
     if (knUnlinked.length) att.push(`<button class="rrow link" data-go="${can('manage_settings') ? 'settings' : 'props'}"><span class="ric warn">${ICONS.key}</span><span class="rtxt"><b>${knUnlinked.length} KeyNest flat${knUnlinked.length === 1 ? '' : 's'} not linked</b><span>${esc(knUnlinked.map((f) => f.label).join(' · '))}</span></span>${CHEV}</button>`);
@@ -1603,7 +1656,9 @@
     key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14 9l2 2"/></svg>',
     star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 13.8 10.2 20.5 12 13.8 13.8 12 20.5 10.2 13.8 3.5 12 10.2 10.2z"/></svg>',
   };
+  $('m-assign').onclick = () => assignMany();
   $('rail').addEventListener('click', (e) => {
+    if (e.target.closest('[data-assign-many]')) { assignMany(); return; }
     const b = e.target.closest('[data-go], [data-flat]');
     if (!b) return;
     if (b.dataset.flat && b.dataset.fday && b.dataset.fday !== selected) openLink(`/?view=day&date=${b.dataset.fday}&flat=${encodeURIComponent(b.dataset.flat)}`);
@@ -1622,6 +1677,7 @@
   // Sticky bar so a cleaner can always get back to the flat they're cleaning.
   function renderActiveBar() {
     const a = myActive();
+    if (a && a.status === 'awaiting_video') restoreUploads(a); // after a reload: is the video already up?
     const bar = $('active-bar');
     if (!a) { bar.classList.add('hidden'); return; }
     const step = a.status === 'in_progress' ? `<b data-since="${esc(a.startedAt)}">${fmtDur(Date.now() - Date.parse(a.startedAt))}</b>` : a.status === 'checklist' ? 'Checklist to finish' : a.status === 'awaiting_key' ? 'Key to return' : videoReady(a) ? 'Video uploaded · finish it' : 'Video needed';
@@ -1738,6 +1794,30 @@
   const sheetSig = () => JSON.stringify([sheetListing, selected, typingStep() ? null : (assignments[`${selected}|${sheetListing}`] || {}).cleanerId || null, forListing(sheetListing, selected).map((c) =>
     [c.id, c.status, c.endedAt, c.guesty, c.checklist && c.checklist.length, c.key && c.key.mode, (c.media || []).map((m) => [m.id, m.status, m.hasOrig])])]);
 
+  // ---- every flat still without a cleaner that day, assigned in one pop-up (summary tile, Not assigned card) ----
+  async function assignMany() {
+    const date = selected, todo = dayStats().unassigned.map((x) => x.u);
+    if (!todo.length || !can('assign_cleanings') || (data && date < data.today)) return;
+    await Promise.all(todo.map(async (u) => { // fresh: who covers each flat can change
+      try { assignees.set(u.listingId, (await getJSON('/api/assignees?listingId=' + encodeURIComponent(u.listingId))).people); } catch (_) { /* that flat's picker stays empty */ }
+    }));
+    const html = `<p class="muted">They’re told straight away. Leave a flat on “Not assigned” to do it later.</p><div class="am-list">${todo.map((u) => `<label class="am-row"><span class="am-f"><b>${esc(u.label)}</b><small>${esc(u.building || '')}${u.checkOut ? ` · out ${esc(u.checkOut.time)}` : ''}${u.checkIn ? ` · in ${esc(u.checkIn.time)}` : ''}</small></span>
+      <select data-am="${esc(u.listingId)}"><option value="">Not assigned</option>${(assignees.get(u.listingId) || []).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}${p.role !== 'cleaner' ? ` (${esc(p.role)})` : ''}</option>`).join('')}</select></label>`).join('')}</div>
+      <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-md="no">Cancel</button><button type="submit" class="btn primary">Assign</button></div>`;
+    formModal(`Assign cleaners · ${longDate(date)}`, html, async (form) => {
+      const picks = [...form.querySelectorAll('[data-am]')].filter((x) => x.value);
+      if (!picks.length) throw new Error('Pick a cleaner for at least one flat.');
+      let ok = 0; const errs = [];
+      for (const sel of picks) {
+        try { const r = await send('PUT', '/api/assignments', { listingId: sel.dataset.am, date, cleanerId: sel.value }); if (r.assignment) assignments[`${date}|${sel.dataset.am}`] = r.assignment; ok++; sel.disabled = true; }
+        catch (e) { errs.push(e.message); }
+      }
+      decorateDay();
+      if (ok) toast(`${ok} flat${ok === 1 ? '' : 's'} assigned — they’ve been notified`);
+      if (errs.length) throw new Error(errs[0]);
+      return true;
+    });
+  }
   // ---- assigning a cleaner to this flat on the selected day (Admin/User); everyone else just sees who it is ----
   const assignees = new Map(); // listingId → [{ id, name, role }]
   function assignBlock() {
@@ -2344,7 +2424,19 @@
       <button class="btn big primary" id="ev-finish" disabled>Finish cleaning</button>
     </div>`;
   }
+  // The phone reloaded after the video uploaded but before Finish: the server still has it, so show it as uploaded.
+  const restoreTried = new Set();
+  async function restoreUploads(a) {
+    if (!a || a.status !== 'awaiting_video' || a.cleanerId !== me.id || restoreTried.has(a.id)) return;
+    if ([...uploads.values()].some((u) => u.ownerId === a.id)) return;
+    restoreTried.add(a.id);
+    let r; try { r = await getJSON(`/api/media?owner=${encodeURIComponent(a.id)}`); } catch (_) { return; }
+    if ([...uploads.values()].some((u) => u.ownerId === a.id)) return; // they started a new upload meanwhile
+    for (const m of r.media || []) uploads.set('r' + m.id, { file: { name: m.name, size: m.size }, kind: m.kind, progress: 1, id: m.id, done: true, error: null, ownerId: a.id, purpose: 'cleaning', info: m.info, restored: true });
+    if ((r.media || []).length) { if ($('ev-list') && sheetListing === a.listingId) drawUploads(a); else { renderActiveBar(); decorateDay(); } }
+  }
   function wireEvidence(a) {
+    restoreUploads(a);
     const add = (files, kindHint) => {
       for (const f of files) {
         const kind = (f.type || '').startsWith('video') || kindHint === 'video' && !(f.type || '').startsWith('image') ? 'video' : 'photo';
@@ -2538,11 +2630,13 @@
       <p class="dmg-desc">${esc(d.description)}</p>
       ${mediaTiles(d.media)}
       ${d.status === 'resolved' ? `<div class="hist-s">Resolved by ${esc(d.resolvedBy || '')}${d.note ? ' — ' + esc(d.note) : ''}</div>` : ''}
-      ${can('manage_damage') || can('manage_maintenance') ? `<div class="form-actions">${can('manage_damage') ? `<button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button>` : ''}${can('manage_maintenance') ? `<button class="btn" data-dmg-mt="${esc(d.id)}">Create maintenance task</button>` : ''}</div>` : ''}
+      ${(d.tasks || []).length ? `<div class="dmg-tasks">${d.tasks.map((t) => `<button class="linkbtn" data-dmg-task="${esc(t.id)}">${ICONS.tool}<span>Task: ${esc(t.title)} · ${esc(MT_ST[t.status] || t.status)}</span></button>`).join('')}</div>` : ''}
+      ${can('manage_damage') || can('manage_maintenance') ? `<div class="form-actions">${can('manage_damage') ? `<button class="btn" data-dmg="${d.id}" data-to="${d.status === 'resolved' ? 'open' : 'resolved'}">${d.status === 'resolved' ? 'Reopen' : 'Mark resolved'}</button>` : ''}${can('manage_maintenance') ? `<button class="btn" data-dmg-mt="${esc(d.id)}">${(d.tasks || []).length ? 'Create another task' : 'Create maintenance task'}</button>` : ''}</div>` : ''}
     </div>`;
   }
   const dmgSeen = new Map(); // damage reports on screen, for "Create maintenance task"
   function wireDamageCards(root, after) {
+    root.querySelectorAll('[data-dmg-task]').forEach((b) => b.onclick = () => openTask(b.dataset.dmgTask));
     root.querySelectorAll('[data-dmg-mt]').forEach((b) => b.onclick = () => {
       const d = dmgSeen.get(b.dataset.dmgMt);
       if (d) taskForm({ listingId: d.listingId, label: d.label, building: d.building, damageId: d.id, title: `Fix: ${d.description.split('\n')[0].slice(0, 90)}`, details: `${d.location ? d.location + ': ' : ''}${d.description}\n\nFrom a damage report by ${d.reporterName}.`, mediaIds: (d.media || []).map((m) => m.id) });

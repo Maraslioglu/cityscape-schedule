@@ -1449,3 +1449,26 @@ table.board thead th.first-col { z-index: 4; } /* the corner stays on top of the
 .assign-row.ro #as-remove { margin-left: auto; flex: none; }
 /* lockbox box: code and Edit code on the first line, "set by …" always on its own line under them */
 .lbx-by:not(.lbx-i) { order: 3; flex-basis: 100%; }
+/* tasks made from a damage report */
+.dmg-tasks { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; }
+.dmg-tasks .linkbtn { display: inline-flex; align-items: center; gap: 6px; text-align: left; font-size: 13px; }
+.dmg-tasks .linkbtn svg { width: 15px; height: 15px; flex: none; }
+/* guests arriving at a flat that isn't clean yet */
+.cb.risk { background: var(--prog-soft); color: var(--prog); }
+.cb.risk.late { background: var(--out-soft); color: var(--out); }
+.cb.risk::before { content: "!"; font-weight: 800; }
+/* assigning several flats at once */
+.am-list { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 4px; max-height: 55vh; overflow-y: auto; }
+.am-row { display: flex; align-items: center; gap: 12px; }
+.am-f { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.am-f small { color: var(--ink-3); font-size: 12px; }
+.am-row select { flex: 0 1 190px; min-width: 0; height: 40px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14.5px; }
+@media (max-width: 520px) { .am-row { flex-wrap: wrap; } .am-row select { flex: 1 1 100%; } }
+#m-assign { margin-top: 6px; font-size: 13px; }
+.rrow .sm-assign { margin-left: auto; height: 32px; padding: 0 12px; font-size: 13px; flex: none; }
+table.board td.cell.tap { cursor: pointer; }
+table.board td.cell.tap:hover { background: var(--surface-2); }
+/* sign-in details after adding someone */
+.sl-dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 12px 0 4px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); font-size: 14.5px; }
+.sl-dl dt { color: var(--ink-3); }
+.sl-dl dd { margin: 0; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; user-select: all; }

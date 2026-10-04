@@ -4,7 +4,10 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "build": "node src/worker/build.cjs && cp src/dist/worker.js worker.js && cp src/dist/server.mjs server.mjs"
+    "build": "node src/worker/build.cjs && cp src/dist/worker.js worker.js && cp src/dist/server.mjs server.mjs",
+    "test": "node tests/run.mjs"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

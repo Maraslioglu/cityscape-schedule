@@ -2030,11 +2030,12 @@ async function damagesApi(req, env, ctx, me, parts, url) {
     const listingId = url.searchParams.get('listingId');
     const status = url.searchParams.get('status');
     const out = [];
+    const tasks = await loadList(env, 'maintenance'); // tasks made from a report show on it, so nobody makes the same one twice
     for (const d of list) {
       if (!canSee(d)) continue;
       if (listingId && d.listingId !== listingId) continue;
       if (status && d.status !== status) continue;
-      out.push(await withMedia(env, d));
+      out.push({ ...(await withMedia(env, d)), tasks: tasks.filter((t) => t.damageId === d.id).map((t) => ({ id: t.id, title: t.title, status: t.status })) });
     }
     out.sort((a, b) => b.reportedAt.localeCompare(a.reportedAt));
     return json({ damages: out });
