@@ -2371,6 +2371,7 @@ async function assistantMaintenanceApi(req, env, ctx) {
   const tasks = await loadList(env, 'maintenance');
   const link = (t) => `/?view=maintenance&task=${t.id}`;
   const messageIds = [...new Set((Array.isArray(body.messageIds) ? body.messageIds : []).map((x) => text(x, 60)).filter(Boolean))].slice(0, 50);
+  const mediaIds = await assistantMediaIds(env, body.mediaIds, l.id, 'maintenance');
   const sameKind = (t) => (t.kind === 'guest_request') === guestRequest;
   // Already reported: the open task the assistant said it is, or (as a safety net) an open task at this flat for
   // the same booking, or reported by the assistant in the last fortnight, with a title about the same thing.
@@ -2398,16 +2399,22 @@ async function assistantMaintenanceApi(req, env, ctx) {
       same.log.push({ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `Due ${due} (was ${same.due || 'not set'})` });
       same.due = due;
     }
+    // The guest's photos go on the task even if their message was already noted (a retry, or Create task pressed later).
+    const added = mediaIds.filter((id) => !(same.media || []).includes(id));
+    if (added.length) {
+      same.media = [...(same.media || []), ...added];
+      same.log = [...(same.log || []), { id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `Added ${added.length} photo${added.length === 1 ? '' : 's'} from the guest` }];
+    }
     same.log = same.log.slice(-200);
     same.updatedAt = nowIso();
     await saveList(env, 'maintenance', capMaintenance(tasks));
-    return json({ task: { id: same.id, url: link(same), title: same.title, duplicate: true, noted, due: same.due, dueChanged } });
+    return json({ task: { id: same.id, url: link(same), title: same.title, duplicate: true, noted, due: same.due, dueChanged, mediaAdded: added.length } });
   }
   const t = {
     id: newId(), title, details: text(body.details, 4000), listingId: l.id, label: l.label, building: l.building,
     priority: MT_PRIORITY.includes(body.priority) ? body.priority : 'normal', status: 'open', assignee: null, due, repeat: null, cost: null,
     reporterId: bot.id, reporterName: bot.name, createdAt: nowIso(), updatedAt: nowIso(), doneAt: null, doneBy: null,
-    media: [], log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `${guestRequest ? 'Guest request' : 'Reported'} ${origin}` }],
+    media: mediaIds, log: [{ id: newId(), at: nowIso(), byId: bot.id, byName: bot.name, kind: 'event', text: `${guestRequest ? 'Guest request' : 'Reported'} ${origin}${mediaIds.length ? `, with ${mediaIds.length} photo${mediaIds.length === 1 ? '' : 's'} from the guest` : ''}` }],
     damageId: null, reservationId, messageIds, ...(guestRequest ? { kind: 'guest_request' } : {}),
     complaintId: text(body.complaintId, 40) || null, // the guest complaint it came with, if any
   };
@@ -2418,7 +2425,7 @@ async function assistantMaintenanceApi(req, env, ctx) {
   const heading = guestRequest ? `Guest request · ${t.label}` : `${urgent}Maintenance reported · ${t.label}`;
   await notify(env, ctx, await recipients(env, ['admin', 'user'], t.building, null), { type: 'maintenance', title: heading, body: `${t.title} — ${origin}`, url: link(t), tag: `mt-${t.id}` });
   console.log(`[maintenance] guest assistant ${guestRequest ? 'added guest request' : 'reported'} "${t.title}" at ${t.label}`);
-  return json({ task: { id: t.id, url: link(t), title: t.title, duplicate: false, due: t.due, dueChanged: false } });
+  return json({ task: { id: t.id, url: link(t), title: t.title, duplicate: false, due: t.due, dueChanged: false, mediaAdded: mediaIds.length } });
 }
 
 // ---------------------------------------------------------------- guest assistant: complaints
@@ -2427,6 +2434,11 @@ async function assistantMaintenanceApi(req, env, ctx) {
 // straight away only when the complaint is about the clean (the assistant says so); managers are always told, since
 // nobody logged it by hand. A complaint the team says isn't one is dismissed from Slack.
 const ASSISTANT = { id: 'assistant', name: 'Guest assistant (AI)' };
+// Guest photos the assistant uploaded for this flat and purpose (POST /api/integrations/media), to attach to a task or
+// complaint. Anything else is ignored: an id for another flat, another purpose, or someone else's upload.
+const assistantMediaIds = async (env, raw, listingId, purpose) => (await mediaReady(env,
+  [...new Set((Array.isArray(raw) ? raw : []).map(String))].filter((x) => /^[a-f0-9]{24}$/.test(x)).slice(0, 10), null,
+  (m) => m.byId === ASSISTANT.id && m.listingId === listingId && m.purpose === purpose)).map((m) => m.id);
 const assistantAuthorised = (req, env) => {
   const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   return Boolean(env.ASSISTANT_API_KEY && safeEqual(key, env.ASSISTANT_API_KEY));
@@ -2507,6 +2519,7 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
     const aboutCleaning = body.aboutCleaning === true;
     const details = text(body.details, 4000);
     const messageIds = [...new Set((Array.isArray(body.messageIds) ? body.messageIds : []).map((x) => text(x, 60)).filter(Boolean))].slice(0, 50);
+    const mediaIds = await assistantMediaIds(env, body.mediaIds, l.id, 'complaint');
     const mine = list.filter((c) => c.createdById === ASSISTANT.id && c.listingId === l.id);
     const isOpen = (c) => ['open', 'investigating'].includes(c.status);
     // Asked for by a team member in Slack: their request always counts, even for a message already on it.
@@ -2535,15 +2548,18 @@ async function assistantComplaintsApi(req, env, ctx, parts) {
           else if (!same.cleaning) { same.untaggedWhy = same.untaggedWhy || 'Now about the clean, but no cleaning is tagged (a manager chose none, or none was found). Pick it when you edit the complaint.'; log(same, 'event', same.untaggedWhy); }
           same.cleaningIfAbout = null;
         }
-        await saveList(env, 'complaints', list);
       }
+      // Kept apart from `changed`, which tells the assistant whether the card keeps "Not a complaint".
+      const added = mediaIds.filter((x) => !(same.media || []).includes(x));
+      if (added.length) { same.media = [...(same.media || []), ...added]; log(same, 'event', `Added ${added.length} photo${added.length === 1 ? '' : 's'} from the guest`); }
+      if (changed || added.length) await saveList(env, 'complaints', list);
       return reply(same, true, 200, changed);
     }
     const found = await cpStayForBooking(env, ctx, l, reservationId, body.stay, date);
     // Only a complaint about the clean is put on the cleaning (so it shows as that cleaner's and counts in their
     // patterns); otherwise the cleaning that prepared the stay is kept for reference only.
     const c = { id: newId(), listingId: l.id, label: l.label, building: l.building, unitType: l.unitType, date, title, details, source: 'guest_message', severity, categories, status: 'open', upheld: null, resolution: '', compensation: null,
-      stay: found.stay, cleaning: aboutCleaning ? found.cleaning : null, media: [], createdAt: nowIso(), updatedAt: nowIso(), createdById: ASSISTANT.id, createdByName: ASSISTANT.name, resolvedAt: null, resolvedBy: null, log: [],
+      stay: found.stay, cleaning: aboutCleaning ? found.cleaning : null, media: mediaIds, createdAt: nowIso(), updatedAt: nowIso(), createdById: ASSISTANT.id, createdByName: ASSISTANT.name, resolvedAt: null, resolvedBy: null, log: [],
       reservationId, messageIds, aboutCleaning, cleaningIfAbout: aboutCleaning ? null : found.cleaning, cleanerTold: false, noCleaningRecorded: Boolean(found.noCleaning), untaggedWhy: found.why };
     log(c, 'event', 'Logged by the guest assistant from a guest message');
     if (found.why) log(c, 'event', found.why);
@@ -2880,6 +2896,15 @@ async function handle(req, env, ctx) {
     return new Response('ok');
   }
 
+  // Same-process only (server.mjs strips x-internal from outside requests): may the assistant's key upload a guest's
+  // photo for this flat? Without a listingId it just says whether the key is right (the capability check).
+  if (p === '/api/internal/assistant-media-check' && req.headers.get('x-internal') === env.__INTERNAL_KEY) {
+    if (!assistantAuthorised(req, env)) return json({ ok: false, error: 'unauthorised' }, 401);
+    const body = await req.json().catch(() => ({}));
+    if (!body.listingId) return json({ ok: true });
+    const l = await listingInfo(env, ctx, String(body.listingId));
+    return l ? json({ ok: true, building: l.building, listingId: l.id }) : json({ ok: false, error: 'Unknown or hidden listing.' }, 404);
+  }
   if (p === '/api/integrations/maintenance' && req.method === 'POST') return withLock('maintenance', () => assistantMaintenanceApi(req, env, ctx));
   if (p === '/api/integrations/maintenance' && req.method === 'GET') return assistantOpenTasks(req, env, ctx, url);
   if (p === '/api/integrations/complaints' || p.startsWith('/api/integrations/complaints/')) return withLock('complaints', () => assistantComplaintsApi(req, env, ctx, p.split('/')));

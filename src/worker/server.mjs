@@ -289,10 +289,22 @@ async function freeSpace(need = LOW_WATER) {
   if (Date.now() - warnedLow > 3600e3) { warnedLow = Date.now(); console.log(`[media] WARNING: disk nearly full (${Math.round(freeBytes() / 1e9)} GB free); originals are being deleted early. Grow the volume or lower KEEP_ORIGINAL_DAYS.`); }
 }
 
+// Every media id a maintenance task or complaint uses (worked out once per sweep).
+let attachedCache = null;
+function attachedMedia() {
+  if (attachedCache) return attachedCache;
+  const ids = new Set();
+  for (const key of ['maintenance', 'complaints']) {
+    let list = []; try { list = JSON.parse((data[key] && data[key].v) || '[]'); } catch (_) {}
+    for (const r of list) for (const id of r.media || []) ids.add(id);
+  }
+  return (attachedCache = ids);
+}
 // Delete full-quality originals of cleaning media after KEEP_ORIGINAL_DAYS, and uploads idle for 3 days.
 // Never touches damage-report or maintenance media, or an original that is the only copy.
 async function sweepMedia() {
   const now = Date.now();
+  attachedCache = null;
   for (const k of Object.keys(data)) {
     if (!k.startsWith('media:')) continue;
     let m; try { m = JSON.parse(data[k].v); } catch (_) { continue; }
@@ -303,6 +315,15 @@ async function sweepMedia() {
         metaCache.delete(m.id); await STORE.delete(k);
         console.log(`[media] removed abandoned upload ${m.id}`);
       }
+      continue;
+    }
+    // A guest photo the assistant uploaded but never attached (its task or complaint failed): gone after 3 days.
+    const sinceUsed = now - Math.max(Date.parse(m.createdAt || 0), Date.parse(m.reusedAt || 0) || 0);
+    if (m.byId === 'assistant' && sinceUsed > 3 * 864e5 && !attachedMedia().has(m.id)) {
+      for (const f of [`${m.id}.orig`, `${m.id}.jpg`, `${m.id}.mp4`, `${m.id}.thumb.jpg`]) await fsp.rm(path.join(MEDIA, f), { force: true });
+      metaCache.delete(m.id); await STORE.delete(k);
+      if (m.sha256) await STORE.delete(`media-sha:${m.purpose}|${m.listingId}|${m.sha256}`);
+      console.log(`[media] removed an unused guest photo ${m.id}`);
       continue;
     }
     if (!(KEEP_ORIGINAL_DAYS > 0) || age < KEEP_ORIGINAL_DAYS * 864e5 || !originalDeletable(m)) continue;
@@ -464,6 +485,91 @@ async function mediaRoute(req, res, url) {
   return false;
 }
 
+// ---------------- guest photos from the guest assistant ----------------
+// The guest assistant uploads photos guests send (a leak, damage, hair in the shower) with its API key, then attaches
+// them to the task or complaint it logs (mediaIds). One request per file, the whole file in the body; the same photo
+// uploaded twice for the same flat and purpose gives back the same id.
+const ASSISTANT_MAX = { photo: Number(process.env.ASSISTANT_MAX_PHOTO_MB || 25) * 1024 ** 2, video: Number(process.env.ASSISTANT_MAX_VIDEO_MB || 100) * 1024 ** 2 };
+const ASSISTANT_DAILY = Number(process.env.ASSISTANT_DAILY_UPLOAD_GB || 2) * 1024 ** 3;
+async function checkAssistant(req, listingId) {
+  // A fixed address, never one built from the request's own headers (X-Forwarded-Host could point it elsewhere).
+  const r = await worker.fetch(new Request('http://internal/api/internal/assistant-media-check', {
+    method: 'POST',
+    headers: { authorization: req.headers.authorization || '', 'content-type': 'application/json', 'x-internal': INTERNAL_KEY },
+    body: JSON.stringify(listingId ? { listingId } : {}),
+  }), env, ctx);
+  return { status: r.status, ...(await r.json().catch(() => ({}))) };
+}
+async function assistantMediaRoute(req, res, url) {
+  if (req.method === 'GET') {
+    req.resume();
+    const c = await checkAssistant(req, null);
+    if (!c.ok) return sendJson(res, 401, { error: 'unauthorised' });
+    return sendJson(res, 200, { ok: true, maxBytes: ASSISTANT_MAX, maxPerReport: 10, purposes: ['maintenance', 'complaint'] });
+  }
+  if (req.method !== 'POST') { req.resume(); return sendJson(res, 405, { error: 'Not supported' }); }
+  const q = url.searchParams;
+  const kind = q.get('kind') === 'video' ? 'video' : q.get('kind') === 'photo' ? 'photo' : null;
+  const purpose = ['maintenance', 'complaint'].includes(q.get('purpose')) ? q.get('purpose') : null;
+  const type = safeMediaType(req.headers['content-type']);
+  const size = Number(req.headers['content-length']);
+  const refuse = (status, error) => { req.resume(); return sendJson(res, status, { error }); };
+  if (!q.get('listingId')) return refuse(400, 'Say which flat (listingId).');
+  const c = await checkAssistant(req, q.get('listingId'));
+  if (c.status === 401) return refuse(401, 'unauthorised');
+  if (c.status >= 500) return refuse(503, 'Try again shortly.');
+  // 422, not 404: one hidden flat mustn't look like the whole endpoint is missing.
+  if (!c.ok || !c.listingId) return refuse(422, c.error || 'Unknown or hidden listing.');
+  if (!kind || !purpose) return refuse(400, 'kind must be photo or video, and purpose maintenance or complaint.');
+  if (!type || !type.startsWith(kind === 'photo' ? 'image/' : 'video/')) return refuse(415, 'Only photos and videos.');
+  if (!(size > 0)) return refuse(411, 'Send the file with its Content-Length.');
+  if (size > ASSISTANT_MAX[kind]) return refuse(413, 'That file is too large.');
+  const quota = uploadedToday('assistant');
+  if (quota.bytes + size > ASSISTANT_DAILY) return refuse(429, 'The guest assistant has uploaded a lot today.');
+  if (freeBytes() < size + FREE_MARGIN) return refuse(507, 'The server is out of space.');
+  const m = {
+    id: crypto.randomBytes(12).toString('hex'), kind, purpose, ownerId: null, listingId: c.listingId, building: c.building || null,
+    name: String(q.get('name') || kind).slice(0, 120), type, size, received: 0, uploaded: false, status: 'uploading',
+    byId: 'assistant', byName: 'Guest assistant (AI)', createdAt: new Date().toISOString(), source: 'guest_message',
+  };
+  // The assistant may have given up while the check ran: nothing more will arrive, so don't wait for it.
+  if (req.destroyed || req.readableAborted || req.readableEnded) return;
+  const f = fileFor(m, 'orig');
+  const hash = crypto.createHash('sha256');
+  const out = fs.createWriteStream(f);
+  let n = 0, tooBig = false, writeErr = null;
+  out.on('error', (e) => { writeErr = e; });
+  await new Promise((resolve) => {
+    req.on('data', (chunk) => { n += chunk.length; if (n > size || n > ASSISTANT_MAX[kind]) { tooBig = true; req.destroy(); } else if (!writeErr) { hash.update(chunk); out.write(chunk); } });
+    req.on('end', resolve); req.on('close', resolve); req.on('error', resolve);
+  });
+  await new Promise((r) => { if (writeErr) return r(); out.once('error', r); out.end(r); });
+  if (writeErr || tooBig || n !== size) {
+    await fsp.rm(f, { force: true });
+    if (writeErr) console.log('[media] could not save the guest assistant’s upload', writeErr.message);
+    return sendJson(res, writeErr ? 507 : 400, { error: writeErr ? 'The server couldn’t save it.' : 'The file didn’t arrive whole.' });
+  }
+  quota.bytes += n;
+  const sha256 = hash.digest('hex');
+  // Already uploaded for this flat and purpose: the same id again (nothing stored twice).
+  const shaKey = `media-sha:${purpose}|${m.listingId}|${sha256}`;
+  const earlier = await STORE.get(shaKey);
+  const e = earlier ? await getMeta(earlier) : null;
+  if (e) {
+    await fsp.rm(f, { force: true });
+    // Used again now: the clean-up of unattached uploads counts from here, so it can't vanish before it's attached.
+    e.reusedAt = new Date().toISOString();
+    await putMeta(e);
+    return sendJson(res, 200, { media: { id: e.id, kind: e.kind, type: e.type, size: e.size, status: e.status, duplicate: true } });
+  }
+  Object.assign(m, { received: n, uploaded: true, status: 'queued', origType: type, sha256 });
+  await putMeta(m);
+  await STORE.put(shaKey, m.id);
+  enqueue(m.id, kind === 'photo');
+  console.log(`[media] guest assistant uploaded a ${kind} for ${purpose} (${Math.round(n / 1e3)} KB)`);
+  return sendJson(res, 200, { media: { id: m.id, kind, type, size: n, status: 'queued', duplicate: false } });
+}
+
 // ---------------- status (for an uptime monitor) and backups (Admins) ----------------
 const MAX_BODY = 1024 * 1024;
 const bootAt = Date.now();
@@ -514,9 +620,11 @@ http.createServer(async (req, res) => {
       if (handled !== false) return;
     }
     if (url.pathname.startsWith('/api/internal/')) return sendJson(res, 404, { error: 'Not found' });
+    // Before the 1 MB limit below: the body is a whole photo or video.
+    if (url.pathname === '/api/integrations/media') return await assistantMediaRoute(req, res, url);
 
     if (url.pathname === '/status') return sendStatus(res);
-    if (url.pathname.startsWith('/api/admin/backups')) return backupsRoute(req, res, url);
+    if (url.pathname.startsWith('/api/admin/backups')) return await backupsRoute(req, res, url);
 
     // Everything except video/photo uploads is small: refuse bodies over 1 MB before reading them into memory.
     if (Number(req.headers['content-length'] || 0) > MAX_BODY) { req.resume(); return sendJson(res, 413, { error: 'That request is too large.' }); }
