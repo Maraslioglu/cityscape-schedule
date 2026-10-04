@@ -1520,6 +1520,7 @@
   const londonMin = () => toMin(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()));
   function arrivalRisk(u) {
     if (!data || !u || !u.checkIn || selected !== data.today) return null;
+    if (cRange !== cleaningRange() || !can('view_cleaning')) return null; // cleanings not loaded yet, or only your own
     const inAt = toMin(u.checkIn.timeRaw), now = londonMin(), late = inAt !== null && now >= inAt;
     const { active, done } = cleanState(u.listingId);
     if (active || done) return null;
@@ -1583,7 +1584,7 @@
       $('m-third').textContent = s.unassigned.length;
       $('m-third').classList.toggle('warnv', s.unassigned.length > 0 && !(data && selected < data.today));
       $('m-third-s').textContent = s.unassigned.length ? s.unassigned.map((x) => x.u.label).slice(0, 4).join(' · ') + (s.unassigned.length > 4 ? ' …' : '') : 'Everyone has a cleaner';
-      $('m-assign').classList.toggle('hidden', !(s.unassigned.length && can('assign_cleanings') && !(data && selected < data.today)));
+      $('m-assign').classList.toggle('hidden', !(s.unassigned.some((x) => !x.done && !x.active) && can('assign_cleanings') && !(data && selected < data.today)));
     } else {
       const mine = s.st.filter((x) => x.a && x.a.cleanerId === me.id);
       $('m-third-k').textContent = 'Assigned to you';
@@ -1624,7 +1625,7 @@
         : x.done ? `${x.u.label} done${x.done.manual && !x.done.manual.timeKnown ? '' : ' ' + fmtClock(x.done.endedAt)}` : `${x.u.label} to clean`;
       const rows = [...by.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : 0)).map(([id, g]) => id
         ? `<div class="rrow"><span class="avatar">${esc(initials(g.name))}</span><span class="rtxt"><b>${id === me.id ? 'You' : esc(g.name)}</b><span>${esc(g.items.map(line).join(' · '))}</span></span><em>${g.items.filter((x) => x.done).length}/${g.items.length}</em></div>`
-        : `<div class="rrow"><span class="avatar dash" aria-hidden="true"></span><span class="rtxt"><b>Not assigned</b><span>${esc(g.items.map((x) => x.u.label).join(' · '))}</span></span>${can('assign_cleanings') && !(data && selected < data.today) ? '<button class="btn sm-assign" data-assign-many>Assign</button>' : ''}</div>`).join('');
+        : `<div class="rrow"><span class="avatar dash" aria-hidden="true"></span><span class="rtxt"><b>Not assigned</b><span>${esc(g.items.map((x) => x.u.label).join(' · '))}</span></span>${can('assign_cleanings') && !(data && selected < data.today) && g.items.some((x) => !x.done && !x.active) ? '<button class="btn sm-assign" data-assign-many>Assign</button>' : ''}</div>`).join('');
       cards.push(`<div class="card rcard"><div class="rc-h"><h3>Team ${esc(dayWord)}</h3></div>${rows}</div>`);
     }
     const att = [];
@@ -1796,7 +1797,7 @@
 
   // ---- every flat still without a cleaner that day, assigned in one pop-up (summary tile, Not assigned card) ----
   async function assignMany() {
-    const date = selected, todo = dayStats().unassigned.map((x) => x.u);
+    const date = selected, todo = dayStats().unassigned.filter((x) => !x.done && !x.active).map((x) => x.u); // still to clean
     if (!todo.length || !can('assign_cleanings') || (data && date < data.today)) return;
     await Promise.all(todo.map(async (u) => { // fresh: who covers each flat can change
       try { assignees.set(u.listingId, (await getJSON('/api/assignees?listingId=' + encodeURIComponent(u.listingId))).people); } catch (_) { /* that flat's picker stays empty */ }
@@ -2430,7 +2431,7 @@
     if (!a || a.status !== 'awaiting_video' || a.cleanerId !== me.id || restoreTried.has(a.id)) return;
     if ([...uploads.values()].some((u) => u.ownerId === a.id)) return;
     restoreTried.add(a.id);
-    let r; try { r = await getJSON(`/api/media?owner=${encodeURIComponent(a.id)}`); } catch (_) { return; }
+    let r; try { r = await getJSON(`/api/media?owner=${encodeURIComponent(a.id)}`); } catch (_) { restoreTried.delete(a.id); return; } // try again on the next redraw
     if ([...uploads.values()].some((u) => u.ownerId === a.id)) return; // they started a new upload meanwhile
     for (const m of r.media || []) uploads.set('r' + m.id, { file: { name: m.name, size: m.size }, kind: m.kind, progress: 1, id: m.id, done: true, error: null, ownerId: a.id, purpose: 'cleaning', info: m.info, restored: true });
     if ((r.media || []).length) { if ($('ev-list') && sheetListing === a.listingId) drawUploads(a); else { renderActiveBar(); decorateDay(); } }

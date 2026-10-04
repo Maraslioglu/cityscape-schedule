@@ -39,6 +39,8 @@ await call(owner, 'POST', '/api/maintenance', { listingId: flat.listingId, title
 list = (await call(owner, 'GET', `/api/damages?listingId=${flat.listingId}`)).body.damages;
 const tasks = list.find((d) => d.id === dmg.id).tasks;
 ok('the task made from it shows on the report', tasks.length === 1 && tasks[0].title === 'Fix: Chipped sink' && tasks[0].status === 'open', tasks);
+const cleoSees = (await call(cleo, 'GET', `/api/damages?listingId=${flat.listingId}`)).body.damages.find((d) => d.id === dmg.id);
+ok('a cleaner who can’t see that task doesn’t see it on the report either', cleoSees && cleoSees.tasks.length === 0, cleoSees && cleoSees.tasks);
 
 // 3. No assigning on a day that has passed (taking one off still works).
 const past = wk.days.map((d) => d.date).concat((await call(owner, 'GET', `/api/week?date=${wk.prevWeek}`)).body.days.map((d) => d.date)).filter((d) => d < today).sort().pop();

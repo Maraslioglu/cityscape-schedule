@@ -2022,6 +2022,8 @@ async function cleaningsApi(req, env, ctx, me, parts, url, pre) {
   return json({ error: 'Not supported' }, 405);
 }
 
+// Who sees a maintenance task: managers and supervisors in its building, whoever reported it, whoever it's assigned to.
+const taskVisible = (me, t) => (inScope(me, t.building) && (can(me, 'manage_maintenance') || me.role === 'supervisor')) || t.reporterId === me.id || Boolean(t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id);
 async function damagesApi(req, env, ctx, me, parts, url) {
   const [, , , id] = parts;
   const list = await loadList(env, 'damages');
@@ -2035,7 +2037,7 @@ async function damagesApi(req, env, ctx, me, parts, url) {
       if (!canSee(d)) continue;
       if (listingId && d.listingId !== listingId) continue;
       if (status && d.status !== status) continue;
-      out.push({ ...(await withMedia(env, d)), tasks: tasks.filter((t) => t.damageId === d.id).map((t) => ({ id: t.id, title: t.title, status: t.status })) });
+      out.push({ ...(await withMedia(env, d)), tasks: tasks.filter((t) => t.damageId === d.id && taskVisible(me, t)).map((t) => ({ id: t.id, title: t.title, status: t.status })) });
     }
     out.sort((a, b) => b.reportedAt.localeCompare(a.reportedAt));
     return json({ damages: out });
@@ -2114,7 +2116,7 @@ async function maintenanceApi(req, env, ctx, me, parts, url) {
   const mm = can(me, 'manage_maintenance'); // Admins and Users by default
   const manage = (t) => mm && inScope(me, t.building);
   const mine = (t) => t.assignee && t.assignee.type === 'user' && t.assignee.id === me.id;
-  const canSee = (t) => (inScope(me, t.building) && (mm || me.role === 'supervisor')) || t.reporterId === me.id || mine(t);
+  const canSee = (t) => taskVisible(me, t);
   const canMove = (t) => manage(t) || mine(t) || (me.role === 'supervisor' && inScope(me, t.building));
   const text = (v, max) => String(v ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
   const link = (t) => `/?view=maintenance&task=${t.id}`;
