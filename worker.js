@@ -2345,8 +2345,10 @@ const MT_OPEN = (t) => !['done', 'cancelled'].includes(t.status);
 // assistant drafts replies to guests, so nothing that opens a door or reaches a person goes to it.
 const forAssistant = (t, max = 300) => String(t || '')
   .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email]')
+  .replace(/\bhttps?:\/\/\S+|\bwww\.\S+|\b[\w-]+(\.[\w-]+)+\/\S*/gi, '[link]')
   .replace(/\+?\(?\d[\d\s().-]{7,}\d/g, (m) => (m.replace(/\D/g, '').length >= 9 ? '[phone]' : m))
-  .replace(/\b\d{4,}\b/g, '[number]')
+  // Any word with 3 or more digits in it (a code like 4821#, C1234X or KN-AB123), unless it's a time or a year.
+  .replace(/(?<![\w£$€:.])(?=[\w#*-]*\d[\w#*-]*\d[\w#*-]*\d)[\w#*-]+/g, (m) => (/^(\d{1,2}(am|pm)|(19|20)\d\d)$/i.test(m) ? m : '[number]'))
   .replace(/\s+/g, ' ').trim().slice(0, max);
 // The open tasks at a flat, so the guest assistant can tell a problem that's already reported from a new one, and say
 // how one is going: its due day, whether someone has it, and the latest note from the team (not its own).

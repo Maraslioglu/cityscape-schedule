@@ -62,12 +62,12 @@ ok('an id that isn’t a booking at this flat: none', (await api('/api/integrati
 // Open tasks: due day, someone on it, and the team's latest note (codes and numbers taken out)
 const t = (await post('/api/integrations/maintenance', { listingId: F, title: 'Shower drain blocked', reservationId: 'res-1', due: tomorrow, source: 'slack' })).body.task;
 ok('the assistant reports a task', t && t.id, t);
-ok('a manager adds a note with a time, a phone number and a code', (await call(owner, 'POST', `/api/maintenance/${t.id}/notes`, { text: 'Plumber booked 19:00-20:00, his number is 07700 900123, lockbox 4821, email bob@example.com' })).status === 200);
+ok('a manager adds a note with a time, a phone number and codes', (await call(owner, 'POST', `/api/maintenance/${t.id}/notes`, { text: 'Plumber booked 19:00-20:00, his number is 07700 900123, lockbox 4821, key C1234X, email bob@example.com' })).status === 200);
 await post('/api/integrations/maintenance', { listingId: F, title: 'Shower drain blocked', reservationId: 'res-1', details: 'Guest says it is still blocked', source: 'slack' });
 const open = (await api(`/api/integrations/maintenance?listingId=${F}`)).body.tasks.find((x) => x.id === t.id);
 ok('due day, not assigned, and whose booking it is', open && open.due === tomorrow && open.assigned === false && open.reservationId === 'res-1', open);
 ok('the latest note from the team, not the assistant’s own', open && open.latestNote && open.latestNote.text.startsWith('Plumber booked 19:00-20:00'), open && open.latestNote);
-ok('…with the phone number, code and email taken out', open && !/07700|4821|bob@/.test(open.latestNote.text) && open.latestNote.text.includes('[phone]') && open.latestNote.text.includes('[number]') && open.latestNote.text.includes('[email]'), open && open.latestNote);
+ok('…with the phone number, codes and email taken out', open && !/07700|4821|C1234X|bob@/.test(open.latestNote.text) && open.latestNote.text.includes('[phone]') && open.latestNote.text.includes('[number]') && open.latestNote.text.includes('[email]'), open && open.latestNote);
 
 console.log(fails ? `${fails} failed` : 'all passed');
 process.exit(fails ? 1 : 0);
