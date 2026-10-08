@@ -21,9 +21,10 @@ const clean = async (who, listingId) => {
   const r = await call(W[who], 'POST', `/api/cleanings/${c}/complete`, { videoIds: [v.body.id] });
   return { id: c, status: r.body.cleaning && r.body.cleaning.status, video: v.body.id };
 };
-// A flat where a guest arrives today: today's cleaning is the one that got it ready.
+// A flat where a guest arrives today: today's cleaning is the one that got it ready. Not the lockbox (m4) or KeyNest (m5)
+// sample flats: their cleans end at the key step, so whether this test could finish one depended on the day.
 let F = null;
-for (let i = 1; i <= 14 && !F; i++) { const r = await call(owner, 'GET', `/api/complaints/lookup?listingId=m${i}&date=${today}`); if (r.body.stay && r.body.stay.checkIn === today) F = 'm' + i; }
+for (let i = 1; i <= 14 && !F; i++) { if (i === 4 || i === 5) continue; const r = await call(owner, 'GET', `/api/complaints/lookup?listingId=m${i}&date=${today}`); if (r.body.stay && r.body.stay.checkIn === today) F = 'm' + i; }
 ok('found a flat with a guest arriving today', Boolean(F), F);
 const FL = (await call(owner, 'GET', '/api/properties')).body.buildings.flatMap((b) => b.units).find((u) => u.id === F);
 ok('Maria is assigned to it today', (await call(owner, 'PUT', '/api/assignments', { date: today, listingId: F, cleanerId: uid('maria') })).status === 200);

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const T = path.join(ROOT, 'tests');
 const only = process.argv.slice(2);
-const SUITES = ['safety', 'race', 'cleans-only', 'code-edit', 'jobtools', 'complaint', 'keydrop', 'start-role', 'audit-fixes', 'review-fixes', 'improvements']
+const SUITES = ['safety', 'race', 'cleans-only', 'code-edit', 'jobtools', 'complaint', 'keydrop', 'start-role', 'audit-fixes', 'review-fixes', 'improvements', 'assistant']
   .filter((s) => !only.length || only.includes(s));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'cs-test-'));
@@ -77,7 +77,7 @@ for (const name of SUITES) {
       ({ app, dir } = await startApp({ port: 8840, worker: copy.dir, env: { MOCK_OV: copy.ov, FAKE_NOW: FIXED_DAY[name] } }));
       args = [copy.ov];
     } else {
-      ({ app, dir } = await startApp());
+      ({ app, dir } = await startApp(name === 'assistant' ? { env: { ASSISTANT_API_KEY: 'test-assistant-key' } } : {}));
       if (name === 'cleans-only' || name === 'code-edit') await addPeople();
       if (name === 'code-edit') args = [path.join(dir, 'app.log')];
       if (name === 'complaint') args = [path.join(dir, 'store.json')];

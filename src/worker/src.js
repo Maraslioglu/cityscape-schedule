@@ -2284,15 +2284,85 @@ const splitTitle = (t) => { const m = String(t || '').match(/^(.*?)\s*\(([^()]*)
 // are different radiators.
 const similarTitles = (a, b) => { const x = splitTitle(a), y = splitTitle(b); return x.core.length >= 3 && x.core === y.core && (!x.note || !y.note || x.note === y.note); };
 const MT_OPEN = (t) => !['done', 'cancelled'].includes(t.status);
-// The open tasks at a flat, so the guest assistant can tell a problem that's already reported from a new one.
+// Free text passed to the guest assistant (task notes): codes, phone numbers and email addresses taken out. The
+// assistant drafts replies to guests, so nothing that opens a door or reaches a person goes to it.
+const forAssistant = (t, max = 300) => String(t || '')
+  .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email]')
+  .replace(/\bhttps?:\/\/\S+|\bwww\.\S+|\b[\w-]+(\.[\w-]+)+\/\S*/gi, '[link]')
+  .replace(/\+?\(?\d[\d\s().-]{7,}\d/g, (m) => (m.replace(/\D/g, '').length >= 9 ? '[phone]' : m))
+  // Any word with 3 or more digits in it (a code like 4821#, C1234X or KN-AB123), unless it's a time or a year.
+  .replace(/(?<![\w£$€:.])(?=[\w#*-]*\d[\w#*-]*\d[\w#*-]*\d)[\w#*-]+/g, (m) => (/^(\d{1,2}(am|pm)|(19|20)\d\d)$/i.test(m) ? m : '[number]'))
+  .replace(/\s+/g, ' ').trim().slice(0, max);
+// The open tasks at a flat, so the guest assistant can tell a problem that's already reported from a new one, and say
+// how one is going: its due day, whether someone has it, and the latest note from the team (not its own).
 async function assistantOpenTasks(req, env, ctx, url) {
   const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (!env.ASSISTANT_API_KEY || !safeEqual(key, env.ASSISTANT_API_KEY)) return json({ error: 'unauthorised' }, 401);
   const listingId = String(url.searchParams.get('listingId') || '');
   const tasks = (await loadList(env, 'maintenance')).filter((t) => t.listingId === listingId && MT_OPEN(t))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 40)
-    .map((t) => ({ id: t.id, title: t.title, kind: t.kind === 'guest_request' ? 'guest_request' : 'maintenance', priority: t.priority, status: t.status, createdAt: t.createdAt, url: `/?view=maintenance&task=${t.id}` }));
+    .map((t) => {
+      const note = [...(t.log || [])].reverse().find((x) => x.kind === 'note' && x.byId !== 'assistant' && x.text);
+      return {
+        id: t.id, title: t.title, kind: t.kind === 'guest_request' ? 'guest_request' : 'maintenance', priority: t.priority, status: t.status, createdAt: t.createdAt, url: `/?view=maintenance&task=${t.id}`,
+        due: t.due || null, assigned: Boolean(t.assignee), reservationId: t.reservationId || null,
+        latestNote: note ? { at: note.at, text: forAssistant(note.text) } : null,
+      };
+    });
   return json({ tasks });
+}
+
+// The flat's live status for the guest assistant, so a reply can say whether the flat is ready, whether someone leaves
+// or arrives on a day (and when), and how keys work. For each day asked about: a departure and its time, an arrival
+// and its time, and the clean after the latest check-out on or before that day (the one that gets the flat ready).
+// Times and yes/no only: never a code, a name, a booking reference or anything else about another guest.
+async function assistantFlatStatus(req, env, ctx, url) {
+  const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.ASSISTANT_API_KEY || !safeEqual(key, env.ASSISTANT_API_KEY)) return json({ error: 'unauthorised' }, 401);
+  const l = await listingInfo(env, ctx, String(url.searchParams.get('listingId') || ''));
+  if (!l) return json({ error: 'Unknown or hidden listing.' }, 404);
+  const asked = String(url.searchParams.get('dates') || '').split(',').map((d) => d.trim()).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+  const dates = [...new Set(asked.length ? asked : [londonDate()])].slice(0, 5);
+  const snap = await getSnapshot(env, ctx), cfg = config(env);
+  const stays = (snap.stays || []).filter((r) => r.listingId === l.id && cfg.statuses.includes(r.status));
+  const cleanings = (await loadList(env, 'cleanings')).filter((c) => c.listingId === l.id && c.status !== 'cancelled');
+  const assigned = (await env.STORE.get('assignments', 'json')) || {};
+  const days = [];
+  for (const date of dates) {
+    const out = stays.find((r) => r.checkOutDateLocalized === date), arrive = stays.find((r) => r.checkInDateLocalized === date);
+    // The clean after the latest check-out on or before this day.
+    const last = stays.filter((r) => r.checkOutDateLocalized <= date).sort((a, b) => b.checkOutDateLocalized.localeCompare(a.checkOutDateLocalized))[0];
+    let clean = null;
+    if (last) {
+      const job = await jobFor(env, ctx, l, last.checkOutDateLocalized), day = job ? job.displayDay : last.checkOutDateLocalized;
+      const rec = cleanings.filter((c) => c.forDate === last.checkOutDateLocalized || (!c.forDate && c.date === day))
+        .sort((a, b) => String(b.startedAt || b.completedAt || '').localeCompare(String(a.startedAt || a.completedAt || '')))[0];
+      clean = {
+        afterCheckOut: last.checkOutDateLocalized, day,
+        status: !rec ? 'not_started' : rec.status === 'completed' ? 'finished' : 'in_progress',
+        startedAt: rec && rec.startedAt ? londonHHMM(rec.startedAt) : null,
+        finishedAt: rec && rec.status === 'completed' && rec.completedAt ? londonHHMM(rec.completedAt) : null,
+        finishedOn: rec && rec.status === 'completed' && rec.completedAt ? londonDate(rec.completedAt) : null,
+        cleanerAssigned: Boolean(assigned[`${day}|${l.id}`]),
+      };
+    }
+    days.push({
+      date,
+      departure: out ? { time: out.plannedDeparture || l.checkOutTime || null } : null,
+      arrival: arrive ? { time: arrive.plannedArrival || l.checkInTime || null } : null,
+      clean,
+    });
+  }
+  // This guest's own booking, if asked: its planned arrival and departure times.
+  const rid = String(url.searchParams.get('reservationId') || '');
+  const own = rid ? stays.find((r) => r._id === rid) : null;
+  return json({
+    flat: { checkInTime: l.checkInTime || null, checkOutTime: l.checkOutTime || null, keyMode: ['keynest', 'lockbox'].includes(l.keyMode) ? l.keyMode : null },
+    booking: own ? { checkIn: own.checkInDateLocalized, checkOut: own.checkOutDateLocalized, plannedArrival: own.plannedArrival || null, plannedDeparture: own.plannedDeparture || null } : null,
+    days,
+    // The days Schedule knows bookings for (outside them, "no departure" only means it doesn't know).
+    window: { from: snap.from || null, to: snap.to || null },
+  });
 }
 async function assistantMaintenanceApi(req, env, ctx) {
   const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -2850,6 +2920,7 @@ async function handle(req, env, ctx) {
   }
   if (p === '/api/integrations/maintenance' && req.method === 'POST') return withLock('maintenance', () => assistantMaintenanceApi(req, env, ctx));
   if (p === '/api/integrations/maintenance' && req.method === 'GET') return assistantOpenTasks(req, env, ctx, url);
+  if (p === '/api/integrations/flat-status' && req.method === 'GET') return assistantFlatStatus(req, env, ctx, url);
   if (p === '/api/integrations/complaints' || p.startsWith('/api/integrations/complaints/')) return withLock('complaints', () => assistantComplaintsApi(req, env, ctx, p.split('/')));
 
   if (p.startsWith('/webhooks/guesty/') && req.method === 'POST') {
